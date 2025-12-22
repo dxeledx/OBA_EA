@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--methods",
         type=str,
         default="csp-lda,ea-csp-lda",
-        help="Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda",
+        help="Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, oea-zo-csp-lda",
     )
     p.add_argument(
         "--oea-eps",
@@ -107,6 +107,48 @@ def parse_args() -> argparse.Namespace:
         "--oea-pseudo-balance",
         action="store_true",
         help="For oea-csp-lda only (hard mode): balance pseudo-labeled trials per class (uses min count).",
+    )
+    p.add_argument(
+        "--oea-zo-objective",
+        choices=["entropy", "pseudo_ce", "confidence"],
+        default="entropy",
+        help="For oea-zo-csp-lda only: zero-order objective on target unlabeled data.",
+    )
+    p.add_argument(
+        "--oea-zo-iters",
+        type=int,
+        default=30,
+        help="For oea-zo-csp-lda only: SPSA iterations for optimizing Q_t.",
+    )
+    p.add_argument(
+        "--oea-zo-lr",
+        type=float,
+        default=0.5,
+        help="For oea-zo-csp-lda only: SPSA learning rate (base).",
+    )
+    p.add_argument(
+        "--oea-zo-mu",
+        type=float,
+        default=0.1,
+        help="For oea-zo-csp-lda only: SPSA perturbation size.",
+    )
+    p.add_argument(
+        "--oea-zo-k",
+        type=int,
+        default=50,
+        help="For oea-zo-csp-lda only: number of Givens rotations (low-dim Q parameterization).",
+    )
+    p.add_argument(
+        "--oea-zo-seed",
+        type=int,
+        default=0,
+        help="For oea-zo-csp-lda only: random seed for Givens planes and SPSA directions.",
+    )
+    p.add_argument(
+        "--oea-zo-l2",
+        type=float,
+        default=0.0,
+        help="For oea-zo-csp-lda only: L2 regularization on Givens angles.",
     )
     p.add_argument(
         "--oea-q-blend",
@@ -201,10 +243,19 @@ def main() -> None:
                 f"pseudo_mode={args.oea_pseudo_mode}, pseudo_conf={args.oea_pseudo_confidence}, "
                 f"topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
+        elif method == "oea-zo-csp-lda":
+            alignment = "oea_zo"
+            method_details[method] = (
+                "OEA-ZO (target optimistic selection): source uses Δ-alignment for Q_s; "
+                "target optimizes Q_t by zero-order SPSA on unlabeled data "
+                f"(objective={args.oea_zo_objective}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
+                f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
+            )
         else:
             raise ValueError(
                 "Unknown method "
-                f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda"
+                f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, oea-zo-csp-lda"
             )
 
         results_df, y_true_all, y_pred_all, y_proba_all, _class_order, _models_by_subject = (
@@ -222,6 +273,13 @@ def main() -> None:
                 oea_pseudo_confidence=float(args.oea_pseudo_confidence),
                 oea_pseudo_topk_per_class=int(args.oea_pseudo_topk_per_class),
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
+                oea_zo_objective=str(args.oea_zo_objective),
+                oea_zo_iters=int(args.oea_zo_iters),
+                oea_zo_lr=float(args.oea_zo_lr),
+                oea_zo_mu=float(args.oea_zo_mu),
+                oea_zo_k=int(args.oea_zo_k),
+                oea_zo_seed=int(args.oea_zo_seed),
+                oea_zo_l2=float(args.oea_zo_l2),
             )
         )
         results_by_method[method] = results_df
@@ -293,7 +351,7 @@ def main() -> None:
                 y_parts.append(sd.y)
             X_fit = np.concatenate(X_parts, axis=0)
             y_fit = np.concatenate(y_parts, axis=0)
-        elif method == "oea-csp-lda":
+        elif method in {"oea-csp-lda", "oea-zo-csp-lda"}:
             # Visualization-only: use true labels to compute Δ_ref and Q_s for all subjects.
             if len(class_order) != 2:
                 raise ValueError("oea-csp-lda visualization currently supports 2-class only.")

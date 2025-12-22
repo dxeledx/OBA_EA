@@ -111,6 +111,13 @@ def loso_cross_subject_evaluation(
     oea_pseudo_confidence: float = 0.0,
     oea_pseudo_topk_per_class: int = 0,
     oea_pseudo_balance: bool = False,
+    oea_zo_objective: str = "entropy",
+    oea_zo_iters: int = 30,
+    oea_zo_lr: float = 0.5,
+    oea_zo_mu: float = 0.1,
+    oea_zo_k: int = 50,
+    oea_zo_seed: int = 0,
+    oea_zo_l2: float = 0.0,
 ) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, List[str], Dict[int, TrainedModel]]:
     """LOSO evaluation: each subject is test once; others are training.
 
@@ -134,8 +141,8 @@ def loso_cross_subject_evaluation(
     y_pred_all: List[np.ndarray] = []
     y_proba_all: List[np.ndarray] = []
 
-    if alignment not in {"none", "ea", "oea_cov", "oea"}:
-        raise ValueError("alignment must be one of: 'none', 'ea', 'oea_cov', 'oea'")
+    if alignment not in {"none", "ea", "oea_cov", "oea", "oea_zo"}:
+        raise ValueError("alignment must be one of: 'none', 'ea', 'oea_cov', 'oea', 'oea_zo'")
 
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
@@ -143,6 +150,19 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_pseudo_confidence must be in [0,1].")
     if int(oea_pseudo_topk_per_class) < 0:
         raise ValueError("oea_pseudo_topk_per_class must be >= 0.")
+
+    if oea_zo_objective not in {"entropy", "pseudo_ce", "confidence"}:
+        raise ValueError("oea_zo_objective must be one of: 'entropy', 'pseudo_ce', 'confidence'")
+    if int(oea_zo_iters) < 0:
+        raise ValueError("oea_zo_iters must be >= 0.")
+    if float(oea_zo_lr) <= 0.0:
+        raise ValueError("oea_zo_lr must be > 0.")
+    if float(oea_zo_mu) <= 0.0:
+        raise ValueError("oea_zo_mu must be > 0.")
+    if int(oea_zo_k) < 1:
+        raise ValueError("oea_zo_k must be >= 1.")
+    if float(oea_zo_l2) < 0.0:
+        raise ValueError("oea_zo_l2 must be >= 0.")
 
     # Fast path: subject-wise EA can be precomputed once.
     if alignment == "ea":
@@ -193,7 +213,7 @@ def loso_cross_subject_evaluation(
             X_test = _align_one(test_subject)
             y_test = subject_data[test_subject].y
         else:
-            # alignment == "oea": optimistic selection based on discriminative covariance difference Δ.
+            # alignment in {"oea","oea_zo"}: optimistic selection based on discriminative covariance difference Δ.
             if len(class_order) != 2:
                 raise ValueError("oea currently supports 2-class problems only.")
             class_pair = (str(class_order[0]), str(class_order[1]))
@@ -239,49 +259,66 @@ def loso_cross_subject_evaluation(
             # 4) Train the classifier once (frozen after this).
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
 
-            # 5) Target subject: select Q_t using *unlabeled* target data via pseudo-labeling,
-            #    without updating model parameters.
+            # 5) Target subject: select Q_t using *unlabeled* target data (no classifier update).
             z_t = z_by_subject[int(test_subject)]
-            q_t = np.eye(z_t.shape[1], dtype=np.float64)
-            for _ in range(int(max(0, oea_pseudo_iters))):
-                X_t_cur = apply_spatial_transform(q_t, z_t)
-                proba = model.predict_proba(X_t_cur)
-                proba = _reorder_proba_columns(proba, model.classes_, list(class_pair))
+            if alignment == "oea":
+                q_t = np.eye(z_t.shape[1], dtype=np.float64)
+                for _ in range(int(max(0, oea_pseudo_iters))):
+                    X_t_cur = apply_spatial_transform(q_t, z_t)
+                    proba = model.predict_proba(X_t_cur)
+                    proba = _reorder_proba_columns(proba, model.classes_, list(class_pair))
 
-                if oea_pseudo_mode == "soft":
-                    d_t = _soft_class_cov_diff(
-                        z_t,
-                        proba=proba,
-                        class_order=class_pair,
-                        eps=oea_eps,
-                        shrinkage=oea_shrinkage,
-                    )
-                else:
-                    y_pseudo = np.asarray(model.predict(X_t_cur))
-                    keep = _select_pseudo_indices(
-                        y_pseudo=y_pseudo,
-                        proba=proba,
-                        class_order=class_pair,
-                        confidence=float(oea_pseudo_confidence),
-                        topk_per_class=int(oea_pseudo_topk_per_class),
-                        balance=bool(oea_pseudo_balance),
-                    )
-                    if keep.size == 0:
-                        break
-                    d_t = class_cov_diff(
-                        z_t[keep],
-                        y_pseudo[keep],
-                        class_order=class_pair,
-                        eps=oea_eps,
-                        shrinkage=oea_shrinkage,
-                    )
-                q_t = orthogonal_align_symmetric(d_t, d_ref)
-                q_t = blend_with_identity(q_t, oea_q_blend)
+                    if oea_pseudo_mode == "soft":
+                        d_t = _soft_class_cov_diff(
+                            z_t,
+                            proba=proba,
+                            class_order=class_pair,
+                            eps=oea_eps,
+                            shrinkage=oea_shrinkage,
+                        )
+                    else:
+                        y_pseudo = np.asarray(model.predict(X_t_cur))
+                        keep = _select_pseudo_indices(
+                            y_pseudo=y_pseudo,
+                            proba=proba,
+                            class_order=class_pair,
+                            confidence=float(oea_pseudo_confidence),
+                            topk_per_class=int(oea_pseudo_topk_per_class),
+                            balance=bool(oea_pseudo_balance),
+                        )
+                        if keep.size == 0:
+                            break
+                        d_t = class_cov_diff(
+                            z_t[keep],
+                            y_pseudo[keep],
+                            class_order=class_pair,
+                            eps=oea_eps,
+                            shrinkage=oea_shrinkage,
+                        )
+                    q_t = orthogonal_align_symmetric(d_t, d_ref)
+                    q_t = blend_with_identity(q_t, oea_q_blend)
+            else:
+                q_t = _optimize_qt_oea_zo(
+                    z_t=z_t,
+                    model=model,
+                    class_pair=class_pair,
+                    q_blend=float(oea_q_blend),
+                    objective=str(oea_zo_objective),
+                    iters=int(oea_zo_iters),
+                    lr=float(oea_zo_lr),
+                    mu=float(oea_zo_mu),
+                    n_rotations=int(oea_zo_k),
+                    seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    l2=float(oea_zo_l2),
+                    pseudo_confidence=float(oea_pseudo_confidence),
+                    pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                    pseudo_balance=bool(oea_pseudo_balance),
+                )
 
             X_test = apply_spatial_transform(q_t, z_t)
             y_test = subject_data[test_subject].y
 
-        if alignment != "oea":
+        if alignment not in {"oea", "oea_zo"}:
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test)
@@ -421,6 +458,148 @@ def _soft_class_cov_diff(
     jitter = float(eps) * float(np.max(np.abs(np.diag(diff))) + 1.0)
     diff = diff + jitter * np.eye(n_channels, dtype=np.float64)
     return diff
+
+
+def _optimize_qt_oea_zo(
+    *,
+    z_t: np.ndarray,
+    model: TrainedModel,
+    class_pair: tuple[str, str],
+    q_blend: float,
+    objective: str,
+    iters: int,
+    lr: float,
+    mu: float,
+    n_rotations: int,
+    seed: int,
+    l2: float,
+    pseudo_confidence: float,
+    pseudo_topk_per_class: int,
+    pseudo_balance: bool,
+) -> np.ndarray:
+    """Zero-order optimize Q_t on the orthogonal group via a low-dim Givens parameterization.
+
+    This implements a practical "optimistic selection" variant for the target subject:
+    freeze the trained classifier and update only Q_t using unlabeled target data.
+    """
+
+    z_t = np.asarray(z_t, dtype=np.float64)
+    _n_trials, n_channels, _n_times = z_t.shape
+    rng = np.random.RandomState(int(seed))
+
+    # Random set of (i,j) planes; fixed per fold for reproducibility.
+    pairs = _sample_givens_pairs(n_channels=n_channels, n_rotations=int(n_rotations), rng=rng)
+    phi = np.zeros(len(pairs), dtype=np.float64)
+    best_phi = phi.copy()
+    best_obj = float("inf")
+
+    csp = model.csp
+    lda = model.pipeline.named_steps["lda"]
+    F = np.asarray(csp.filters_[: int(csp.n_components)], dtype=np.float64)
+
+    # Determine whether CSP uses log(power).
+    use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
+
+    def eval_phi(phi_vec: np.ndarray) -> float:
+        # Compute CSP features for Q applied to channels, without building Q explicitly:
+        # (F Q) X == F (Q X). We right-multiply F by Q via Givens updates.
+        FQ = _apply_givens_right(F, pairs=pairs, angles=phi_vec)
+        Y = np.einsum("kc,nct->nkt", FQ, z_t, optimize=True)
+        power = np.mean(Y * Y, axis=2)
+        power = np.maximum(power, 1e-20)
+        feats = np.log(power) if use_log else power
+        proba = lda.predict_proba(feats)
+        proba = _reorder_proba_columns(proba, lda.classes_, list(class_pair))
+
+        if objective == "entropy":
+            p = np.clip(proba, 1e-12, 1.0)
+            ent = -np.sum(p * np.log(p), axis=1)
+            val = float(np.mean(ent))
+        elif objective == "confidence":
+            conf = np.max(proba, axis=1)
+            val = float(np.mean(1.0 - conf))
+        else:
+            # pseudo_ce: hard pseudo labels + optional filtering
+            pred_idx = np.argmax(proba, axis=1)
+            y_pseudo = np.where(pred_idx == 0, class_pair[0], class_pair[1])
+            keep = _select_pseudo_indices(
+                y_pseudo=y_pseudo,
+                proba=proba,
+                class_order=class_pair,
+                confidence=float(pseudo_confidence),
+                topk_per_class=int(pseudo_topk_per_class),
+                balance=bool(pseudo_balance),
+            )
+            if keep.size == 0:
+                return 1e6
+            pred_idx_k = np.argmax(proba[keep], axis=1)
+            conf_k = proba[keep, pred_idx_k]
+            conf_k = np.clip(conf_k, 1e-12, 1.0)
+            nll = -np.log(conf_k)
+            # Weight by confidence (encourages self-consistent high-confidence predictions).
+            val = float(np.mean(conf_k * nll))
+
+        if l2 > 0.0:
+            val += float(l2) * float(np.mean(phi_vec * phi_vec))
+        return val
+
+    # SPSA / two-point random-direction estimator
+    for t in range(int(iters)):
+        u = rng.choice([-1.0, 1.0], size=phi.shape[0]).astype(np.float64)
+        f_plus = eval_phi(phi + float(mu) * u)
+        f_minus = eval_phi(phi - float(mu) * u)
+        g = (f_plus - f_minus) / (2.0 * float(mu)) * u
+        step = float(lr) / np.sqrt(float(t) + 1.0)
+        phi = phi - step * g
+
+        f_cur = min(f_plus, f_minus, eval_phi(phi))
+        if f_cur < best_obj:
+            best_obj = f_cur
+            best_phi = phi.copy()
+
+    Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=best_phi)
+    Q = blend_with_identity(Q, float(q_blend))
+    return Q
+
+
+def _sample_givens_pairs(
+    *, n_channels: int, n_rotations: int, rng: np.random.RandomState
+) -> List[tuple[int, int]]:
+    if n_rotations < 1:
+        raise ValueError("n_rotations must be >= 1.")
+    all_pairs: List[tuple[int, int]] = []
+    for i in range(int(n_channels)):
+        for j in range(i + 1, int(n_channels)):
+            all_pairs.append((i, j))
+    rng.shuffle(all_pairs)
+    n_rotations = min(int(n_rotations), len(all_pairs))
+    return all_pairs[:n_rotations]
+
+
+def _apply_givens_right(mat: np.ndarray, *, pairs: List[tuple[int, int]], angles: np.ndarray) -> np.ndarray:
+    """Return mat @ Q(angles) where Q is a product of Givens rotations (right-multiplication)."""
+
+    out = np.asarray(mat, dtype=np.float64).copy()
+    angles = np.asarray(angles, dtype=np.float64)
+    if len(pairs) != angles.shape[0]:
+        raise ValueError("pairs and angles length mismatch.")
+
+    for (i, j), theta in zip(pairs, angles):
+        c = float(np.cos(theta))
+        s = float(np.sin(theta))
+        col_i = out[:, i].copy()
+        col_j = out[:, j].copy()
+        out[:, i] = c * col_i + s * col_j
+        out[:, j] = -s * col_i + c * col_j
+    return out
+
+
+def _build_q_from_givens(
+    *, n_channels: int, pairs: List[tuple[int, int]], angles: np.ndarray
+) -> np.ndarray:
+    Q = np.eye(int(n_channels), dtype=np.float64)
+    Q = _apply_givens_right(Q, pairs=pairs, angles=angles)
+    return Q
 
 
 def summarize_results(results_df: pd.DataFrame, metric_columns: Sequence[str]) -> pd.DataFrame:

@@ -36,6 +36,8 @@ conda run -n eeg python run_csp_lda_loso.py
 - `YYYYMMDD_oea-cov-csp-lda_confusion_matrix.png`（如启用）
 - `YYYYMMDD_oea-csp-lda_csp_patterns.png`（如启用）
 - `YYYYMMDD_oea-csp-lda_confusion_matrix.png`（如启用）
+- `YYYYMMDD_oea-zo-csp-lda_csp_patterns.png`（如启用）
+- `YYYYMMDD_oea-zo-csp-lda_confusion_matrix.png`（如启用）
 - `YYYYMMDD_model_compare_accuracy.png`
 
 可选参数：
@@ -66,11 +68,12 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 
 - `oea-cov-csp-lda`：**无监督**策略，按训练被试的平均协方差构造参考特征基 `U_ref`，并选择 `Q_s=U_ref U_s^T`（`U_s` 为每个被试 `C_s` 的特征向量）。
 - `oea-csp-lda`：**判别式（更“乐观”）**策略，使用 `Δ=Cov(class1)-Cov(class0)` 做二阶判别签名，对训练被试用真标签构造 `Δ_ref` 并选 `Q_s`；对目标被试用模型预测的伪标签迭代 `--oea-pseudo-iters` 次估计 `Δ_t` 从而选 `Q_t`。
+- `oea-zo-csp-lda`：**零阶优化（主创新候选）**：源域同 `oea-csp-lda`（用 `Δ_ref` 选 `Q_s`），目标域仅用无标签数据，冻结分类器，直接在正交群上（Givens 低维参数化）用 SPSA 零阶方法优化 `Q_t` 的分类相关目标（如 entropy / pseudo-CE）。
 
 运行示例：
 
 ```bash
-conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-components 6 --methods csp-lda,ea-csp-lda,oea-cov-csp-lda,oea-csp-lda
+conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-components 6 --methods csp-lda,ea-csp-lda,oea-cov-csp-lda,oea-csp-lda,oea-zo-csp-lda
 ```
 
 可调参数：
@@ -94,4 +97,10 @@ TTA-Q 稳健化参数（可选）：
 
 ```bash
 conda run -n eeg python run_csp_lda_loso.py --oea-pseudo-mode hard --oea-pseudo-confidence 0.7 --oea-pseudo-topk-per-class 40 --oea-pseudo-balance
+```
+
+OEA-ZO（零阶）常用参数（可选）：
+
+```bash
+conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-csp-lda --oea-zo-objective entropy --oea-zo-iters 30 --oea-zo-k 50 --oea-zo-lr 0.5 --oea-zo-mu 0.1
 ```
