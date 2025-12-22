@@ -68,7 +68,14 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 
 - `oea-cov-csp-lda`：**无监督**策略，按训练被试的平均协方差构造参考特征基 `U_ref`，并选择 `Q_s=U_ref U_s^T`（`U_s` 为每个被试 `C_s` 的特征向量）。
 - `oea-csp-lda`：**判别式（更“乐观”）**策略，使用 `Δ=Cov(class1)-Cov(class0)` 做二阶判别签名，对训练被试用真标签构造 `Δ_ref` 并选 `Q_s`；对目标被试用模型预测的伪标签迭代 `--oea-pseudo-iters` 次估计 `Δ_t` 从而选 `Q_t`。
-- `oea-zo-csp-lda`：**零阶优化（主创新候选）**：源域同 `oea-csp-lda`（用 `Δ_ref` 选 `Q_s`），目标域仅用无标签数据，冻结分类器，直接在正交群上（Givens 低维参数化）用 SPSA 零阶方法优化 `Q_t` 的分类相关目标（如 entropy / pseudo-CE）。
+- `oea-zo-csp-lda`：**零阶优化（主创新候选）**：源域同 `oea-csp-lda`（用 `Δ_ref` 选 `Q_s`），目标域仅用无标签数据，冻结分类器，直接在正交群上（Givens 低维参数化）用 SPSA 零阶方法优化 `Q_t` 的分类相关目标（默认 `entropy`；也支持 `infomax` / `pseudo_ce` / `confidence`）。
+
+为方便一次运行对比不同 ZO 目标，额外提供方法别名（仅覆盖 `--oea-zo-objective`，其余参数不变）：
+
+- `oea-zo-ent-csp-lda`（OEA-ZO，entropy，主推）
+- `oea-zo-im-csp-lda`（OEA-ZO-IM，infomax，防止 entropy 塌缩的稳健变体/主推候选）
+- `oea-zo-pce-csp-lda`（OEA-ZO-pCE，非光滑变体/消融）
+- `oea-zo-conf-csp-lda`（OEA-ZO-conf，置信度目标/消融）
 
 运行示例：
 
@@ -102,5 +109,11 @@ conda run -n eeg python run_csp_lda_loso.py --oea-pseudo-mode hard --oea-pseudo-
 OEA-ZO（零阶）常用参数（可选）：
 
 ```bash
-conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-csp-lda --oea-zo-objective entropy --oea-zo-iters 30 --oea-zo-k 50 --oea-zo-lr 0.5 --oea-zo-mu 0.1
+conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-ent-csp-lda --oea-zo-iters 30 --oea-zo-k 50 --oea-zo-lr 0.5 --oea-zo-mu 0.1
+```
+
+对比 entropy vs infomax vs pCE（同一次运行输出到同一份 `YYYYMMDD_results.txt`）：
+
+```bash
+conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-ent-csp-lda,oea-zo-im-csp-lda,oea-zo-pce-csp-lda
 ```

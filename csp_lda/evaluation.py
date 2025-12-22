@@ -112,6 +112,7 @@ def loso_cross_subject_evaluation(
     oea_pseudo_topk_per_class: int = 0,
     oea_pseudo_balance: bool = False,
     oea_zo_objective: str = "entropy",
+    oea_zo_infomax_lambda: float = 1.0,
     oea_zo_iters: int = 30,
     oea_zo_lr: float = 0.5,
     oea_zo_mu: float = 0.1,
@@ -151,8 +152,10 @@ def loso_cross_subject_evaluation(
     if int(oea_pseudo_topk_per_class) < 0:
         raise ValueError("oea_pseudo_topk_per_class must be >= 0.")
 
-    if oea_zo_objective not in {"entropy", "pseudo_ce", "confidence"}:
-        raise ValueError("oea_zo_objective must be one of: 'entropy', 'pseudo_ce', 'confidence'")
+    if oea_zo_objective not in {"entropy", "pseudo_ce", "confidence", "infomax"}:
+        raise ValueError("oea_zo_objective must be one of: 'entropy', 'pseudo_ce', 'confidence', 'infomax'")
+    if float(oea_zo_infomax_lambda) <= 0.0:
+        raise ValueError("oea_zo_infomax_lambda must be > 0.")
     if int(oea_zo_iters) < 0:
         raise ValueError("oea_zo_iters must be >= 0.")
     if float(oea_zo_lr) <= 0.0:
@@ -304,6 +307,7 @@ def loso_cross_subject_evaluation(
                     class_pair=class_pair,
                     q_blend=float(oea_q_blend),
                     objective=str(oea_zo_objective),
+                    infomax_lambda=float(oea_zo_infomax_lambda),
                     iters=int(oea_zo_iters),
                     lr=float(oea_zo_lr),
                     mu=float(oea_zo_mu),
@@ -467,6 +471,7 @@ def _optimize_qt_oea_zo(
     class_pair: tuple[str, str],
     q_blend: float,
     objective: str,
+    infomax_lambda: float,
     iters: int,
     lr: float,
     mu: float,
@@ -500,21 +505,37 @@ def _optimize_qt_oea_zo(
     # Determine whether CSP uses log(power).
     use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
 
-    def eval_phi(phi_vec: np.ndarray) -> float:
-        # Compute CSP features for Q applied to channels, without building Q explicitly:
-        # (F Q) X == F (Q X). We right-multiply F by Q via Givens updates.
-        FQ = _apply_givens_right(F, pairs=pairs, angles=phi_vec)
+    def _proba_from_q(phi_vec: np.ndarray) -> np.ndarray:
+        Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi_vec)
+        if float(q_blend) < 1.0:
+            Q = blend_with_identity(Q, float(q_blend))
+        FQ = F @ Q
         Y = np.einsum("kc,nct->nkt", FQ, z_t, optimize=True)
         power = np.mean(Y * Y, axis=2)
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        proba = _reorder_proba_columns(proba, lda.classes_, list(class_pair))
+        return _reorder_proba_columns(proba, lda.classes_, list(class_pair))
+
+    def eval_phi(phi_vec: np.ndarray) -> float:
+        proba = _proba_from_q(phi_vec)
 
         if objective == "entropy":
             p = np.clip(proba, 1e-12, 1.0)
+            p = p / np.sum(p, axis=1, keepdims=True)
             ent = -np.sum(p * np.log(p), axis=1)
             val = float(np.mean(ent))
+        elif objective == "infomax":
+            # Maximize mutual information I(Y;X) = H(mean p) - mean H(p).
+            # We minimize: mean H(p) - λ * H(mean p).
+            p = np.clip(proba, 1e-12, 1.0)
+            p = p / np.sum(p, axis=1, keepdims=True)
+            ent = -np.sum(p * np.log(p), axis=1)
+            p_bar = np.mean(p, axis=0)
+            p_bar = np.clip(p_bar, 1e-12, 1.0)
+            p_bar = p_bar / np.sum(p_bar)
+            ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
+            val = float(np.mean(ent)) - float(infomax_lambda) * ent_bar
         elif objective == "confidence":
             conf = np.max(proba, axis=1)
             val = float(np.mean(1.0 - conf))
@@ -543,18 +564,24 @@ def _optimize_qt_oea_zo(
             val += float(l2) * float(np.mean(phi_vec * phi_vec))
         return val
 
+    # Baseline: identity (or blended-identity) alignment must be a valid candidate.
+    best_obj = eval_phi(best_phi)
+
     # SPSA / two-point random-direction estimator
     for t in range(int(iters)):
         u = rng.choice([-1.0, 1.0], size=phi.shape[0]).astype(np.float64)
-        f_plus = eval_phi(phi + float(mu) * u)
-        f_minus = eval_phi(phi - float(mu) * u)
+        phi_plus = phi + float(mu) * u
+        phi_minus = phi - float(mu) * u
+        f_plus = eval_phi(phi_plus)
+        f_minus = eval_phi(phi_minus)
         g = (f_plus - f_minus) / (2.0 * float(mu)) * u
         step = float(lr) / np.sqrt(float(t) + 1.0)
         phi = phi - step * g
 
-        f_cur = min(f_plus, f_minus, eval_phi(phi))
-        if f_cur < best_obj:
-            best_obj = f_cur
+        # Track best iterate (not the +/- perturbations used only for gradient estimation).
+        f_phi = eval_phi(phi)
+        if f_phi < best_obj:
+            best_obj = f_phi
             best_phi = phi.copy()
 
     Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=best_phi)
