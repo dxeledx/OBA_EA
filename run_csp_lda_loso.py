@@ -86,6 +86,29 @@ def parse_args() -> argparse.Namespace:
         help="For oea-csp-lda only: number of pseudo-label iterations on the target subject.",
     )
     p.add_argument(
+        "--oea-pseudo-mode",
+        choices=["hard", "soft"],
+        default="hard",
+        help="For oea-csp-lda only: pseudo-label mode for target Q_t selection ('hard' or 'soft').",
+    )
+    p.add_argument(
+        "--oea-pseudo-confidence",
+        type=float,
+        default=0.0,
+        help="For oea-csp-lda only (hard mode): minimum confidence to keep a pseudo-labeled trial (0 disables).",
+    )
+    p.add_argument(
+        "--oea-pseudo-topk-per-class",
+        type=int,
+        default=0,
+        help="For oea-csp-lda only (hard mode): keep top-k confident trials per class (0 disables).",
+    )
+    p.add_argument(
+        "--oea-pseudo-balance",
+        action="store_true",
+        help="For oea-csp-lda only (hard mode): balance pseudo-labeled trials per class (uses min count).",
+    )
+    p.add_argument(
         "--oea-q-blend",
         type=float,
         default=1.0,
@@ -174,7 +197,9 @@ def main() -> None:
             method_details[method] = (
                 "OEA (discriminative optimistic selection): choose Q_s by aligning Δ=Cov(class1)-Cov(class0) to Δ_ref; "
                 f"target uses {args.oea_pseudo_iters} pseudo-label iters "
-                f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage}, q_blend={args.oea_q_blend})."
+                f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage}, q_blend={args.oea_q_blend}, "
+                f"pseudo_mode={args.oea_pseudo_mode}, pseudo_conf={args.oea_pseudo_confidence}, "
+                f"topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
         else:
             raise ValueError(
@@ -193,6 +218,10 @@ def main() -> None:
                 oea_shrinkage=float(args.oea_shrinkage),
                 oea_pseudo_iters=int(args.oea_pseudo_iters),
                 oea_q_blend=float(args.oea_q_blend),
+                oea_pseudo_mode=str(args.oea_pseudo_mode),
+                oea_pseudo_confidence=float(args.oea_pseudo_confidence),
+                oea_pseudo_topk_per_class=int(args.oea_pseudo_topk_per_class),
+                oea_pseudo_balance=bool(args.oea_pseudo_balance),
             )
         )
         results_by_method[method] = results_df

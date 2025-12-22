@@ -107,6 +107,10 @@ def loso_cross_subject_evaluation(
     oea_shrinkage: float = 0.0,
     oea_pseudo_iters: int = 2,
     oea_q_blend: float = 1.0,
+    oea_pseudo_mode: str = "hard",
+    oea_pseudo_confidence: float = 0.0,
+    oea_pseudo_topk_per_class: int = 0,
+    oea_pseudo_balance: bool = False,
 ) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, List[str], Dict[int, TrainedModel]]:
     """LOSO evaluation: each subject is test once; others are training.
 
@@ -132,6 +136,13 @@ def loso_cross_subject_evaluation(
 
     if alignment not in {"none", "ea", "oea_cov", "oea"}:
         raise ValueError("alignment must be one of: 'none', 'ea', 'oea_cov', 'oea'")
+
+    if oea_pseudo_mode not in {"hard", "soft"}:
+        raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
+    if not (0.0 <= float(oea_pseudo_confidence) <= 1.0):
+        raise ValueError("oea_pseudo_confidence must be in [0,1].")
+    if int(oea_pseudo_topk_per_class) < 0:
+        raise ValueError("oea_pseudo_topk_per_class must be >= 0.")
 
     # Fast path: subject-wise EA can be precomputed once.
     if alignment == "ea":
@@ -234,17 +245,36 @@ def loso_cross_subject_evaluation(
             q_t = np.eye(z_t.shape[1], dtype=np.float64)
             for _ in range(int(max(0, oea_pseudo_iters))):
                 X_t_cur = apply_spatial_transform(q_t, z_t)
-                y_pseudo = model.predict(X_t_cur)
-                unique = set(np.unique(y_pseudo).tolist())
-                if not (class_pair[0] in unique and class_pair[1] in unique):
-                    break
-                d_t = class_cov_diff(
-                    z_t,
-                    y_pseudo,
-                    class_order=class_pair,
-                    eps=oea_eps,
-                    shrinkage=oea_shrinkage,
-                )
+                proba = model.predict_proba(X_t_cur)
+                proba = _reorder_proba_columns(proba, model.classes_, list(class_pair))
+
+                if oea_pseudo_mode == "soft":
+                    d_t = _soft_class_cov_diff(
+                        z_t,
+                        proba=proba,
+                        class_order=class_pair,
+                        eps=oea_eps,
+                        shrinkage=oea_shrinkage,
+                    )
+                else:
+                    y_pseudo = np.asarray(model.predict(X_t_cur))
+                    keep = _select_pseudo_indices(
+                        y_pseudo=y_pseudo,
+                        proba=proba,
+                        class_order=class_pair,
+                        confidence=float(oea_pseudo_confidence),
+                        topk_per_class=int(oea_pseudo_topk_per_class),
+                        balance=bool(oea_pseudo_balance),
+                    )
+                    if keep.size == 0:
+                        break
+                    d_t = class_cov_diff(
+                        z_t[keep],
+                        y_pseudo[keep],
+                        class_order=class_pair,
+                        eps=oea_eps,
+                        shrinkage=oea_shrinkage,
+                    )
                 q_t = orthogonal_align_symmetric(d_t, d_ref)
                 q_t = blend_with_identity(q_t, oea_q_blend)
 
@@ -287,6 +317,110 @@ def loso_cross_subject_evaluation(
         list(class_order),
         models_by_subject,
     )
+
+
+def _select_pseudo_indices(
+    *,
+    y_pseudo: np.ndarray,
+    proba: np.ndarray,
+    class_order: tuple[str, str],
+    confidence: float,
+    topk_per_class: int,
+    balance: bool,
+) -> np.ndarray:
+    """Select trial indices to use for pseudo-label covariance estimation.
+
+    This is a simple stabilization layer for OEA(TTA-Q) to reduce the impact of noisy pseudo labels.
+    """
+
+    y_pseudo = np.asarray(y_pseudo)
+    proba = np.asarray(proba, dtype=np.float64)
+    if proba.ndim != 2 or proba.shape[1] != 2:
+        raise ValueError(f"Expected proba shape (n_samples,2); got {proba.shape}.")
+
+    pred_idx = np.where(y_pseudo == class_order[0], 0, 1)
+    conf = proba[np.arange(len(y_pseudo)), pred_idx]
+    keep = conf >= float(confidence)
+    if not np.any(keep):
+        return np.array([], dtype=int)
+
+    idx0 = np.where(keep & (y_pseudo == class_order[0]))[0]
+    idx1 = np.where(keep & (y_pseudo == class_order[1]))[0]
+    if idx0.size == 0 or idx1.size == 0:
+        return np.array([], dtype=int)
+
+    if int(topk_per_class) > 0:
+        k = int(topk_per_class)
+        idx0 = idx0[np.argsort(proba[idx0, 0])[::-1][:k]]
+        idx1 = idx1[np.argsort(proba[idx1, 1])[::-1][:k]]
+        if idx0.size == 0 or idx1.size == 0:
+            return np.array([], dtype=int)
+
+    if balance:
+        k = int(min(idx0.size, idx1.size))
+        idx0 = idx0[:k]
+        idx1 = idx1[:k]
+
+    out = np.concatenate([idx0, idx1], axis=0)
+    return np.asarray(out, dtype=int)
+
+
+def _soft_class_cov_diff(
+    X: np.ndarray,
+    *,
+    proba: np.ndarray,
+    class_order: tuple[str, str],
+    eps: float,
+    shrinkage: float,
+) -> np.ndarray:
+    """Soft pseudo-label covariance difference using class probabilities as weights.
+
+    For each trial i, compute Ci = Xi Xi^T. Then:
+        Cov_c = sum_i w_{i,c} Ci / sum_i w_{i,c}
+    and Δ = Cov_{class1} - Cov_{class0}.
+    """
+
+    X = np.asarray(X, dtype=np.float64)
+    proba = np.asarray(proba, dtype=np.float64)
+    if X.ndim != 3:
+        raise ValueError(f"Expected X shape (n_trials,n_channels,n_times); got {X.shape}.")
+    if proba.ndim != 2 or proba.shape[0] != X.shape[0] or proba.shape[1] != 2:
+        raise ValueError(f"Expected proba shape (n_trials,2); got {proba.shape}.")
+
+    w0 = proba[:, 0].clip(0.0, 1.0)
+    w1 = proba[:, 1].clip(0.0, 1.0)
+    if float(np.sum(w0)) <= 0.0 or float(np.sum(w1)) <= 0.0:
+        raise ValueError("Soft pseudo-label weights degenerate (sum to zero).")
+
+    n_trials, n_channels, _ = X.shape
+    cov0 = np.zeros((n_channels, n_channels), dtype=np.float64)
+    cov1 = np.zeros((n_channels, n_channels), dtype=np.float64)
+    for i in range(n_trials):
+        xi = X[i]
+        ci = xi @ xi.T
+        cov0 += float(w0[i]) * ci
+        cov1 += float(w1[i]) * ci
+    cov0 /= float(np.sum(w0))
+    cov1 /= float(np.sum(w1))
+    cov0 = 0.5 * (cov0 + cov0.T)
+    cov1 = 0.5 * (cov1 + cov1.T)
+
+    if shrinkage > 0.0:
+        alpha = float(shrinkage)
+        cov0 = (1.0 - alpha) * cov0 + alpha * (np.trace(cov0) / float(n_channels)) * np.eye(
+            n_channels, dtype=np.float64
+        )
+        cov1 = (1.0 - alpha) * cov1 + alpha * (np.trace(cov1) / float(n_channels)) * np.eye(
+            n_channels, dtype=np.float64
+        )
+
+    # eps only affects eigenvalue flooring in the EA helper; we mimic that by flooring on the diff stage.
+    diff = cov1 - cov0
+    diff = 0.5 * (diff + diff.T)
+    # Light diagonal jitter for numerical stability (keeps symmetry).
+    jitter = float(eps) * float(np.max(np.abs(np.diag(diff))) + 1.0)
+    diff = diff + jitter * np.eye(n_channels, dtype=np.float64)
+    return diff
 
 
 def summarize_results(results_df: pd.DataFrame, metric_columns: Sequence[str]) -> pd.DataFrame:

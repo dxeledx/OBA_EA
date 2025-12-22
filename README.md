@@ -84,3 +84,14 @@ conda run -n eeg python run_csp_lda_loso.py --oea-pseudo-iters 2 --oea-eps 1e-10
 ```bash
 conda run -n eeg python run_csp_lda_loso.py --oea-q-blend 0.3
 ```
+
+### 建议的论文口径（严格 LOSO vs TTA）
+
+- **严格 LOSO（主表建议）**：`--oea-pseudo-iters 0`（目标域不做伪标签迭代，只做 EA 的 `C_t^{-1/2}`；分类器不更新）。  
+- **TTA-Q（附表/补充）**：`--oea-pseudo-iters 1~2`（仍不更新分类器，仅用无标签目标数据做 Q_t 迭代）。
+
+TTA-Q 稳健化参数（可选）：
+
+```bash
+conda run -n eeg python run_csp_lda_loso.py --oea-pseudo-mode hard --oea-pseudo-confidence 0.7 --oea-pseudo-topk-per-class 40 --oea-pseudo-balance
+```
