@@ -133,6 +133,36 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods with objective=infomax: weight λ for H(mean p) term (must be > 0).",
     )
     p.add_argument(
+        "--oea-zo-holdout-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "For oea-zo-* methods: holdout fraction in [0,1) used for best-iterate selection "
+            "(updates use the remaining trials). 0 disables."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-warm-start",
+        choices=["none", "delta"],
+        default="none",
+        help="For oea-zo-* methods: initialization strategy for SPSA (none|delta).",
+    )
+    p.add_argument(
+        "--oea-zo-warm-iters",
+        type=int,
+        default=1,
+        help="For oea-zo-* methods with warm_start=delta: number of pseudo-Δ refinement iterations.",
+    )
+    p.add_argument(
+        "--oea-zo-fallback-min-marginal-entropy",
+        type=float,
+        default=0.0,
+        help=(
+            "For oea-zo-* methods: if >0, enable an unlabeled safety fallback when the predicted "
+            "class-marginal entropy H(mean p) falls below this threshold (nats)."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-iters",
         type=int,
         default=30,
@@ -287,7 +317,9 @@ def main() -> None:
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
                 f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
-                f"infomax_lambda={args.oea_zo_infomax_lambda}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; holdout={args.oea_zo_holdout_fraction}; "
+                f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
         else:
@@ -314,6 +346,10 @@ def main() -> None:
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
                 oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
                 oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
+                oea_zo_holdout_fraction=float(args.oea_zo_holdout_fraction),
+                oea_zo_warm_start=str(args.oea_zo_warm_start),
+                oea_zo_warm_iters=int(args.oea_zo_warm_iters),
+                oea_zo_fallback_min_marginal_entropy=float(args.oea_zo_fallback_min_marginal_entropy),
                 oea_zo_iters=int(args.oea_zo_iters),
                 oea_zo_lr=float(args.oea_zo_lr),
                 oea_zo_mu=float(args.oea_zo_mu),
