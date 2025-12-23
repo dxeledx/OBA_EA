@@ -67,7 +67,8 @@ def parse_args() -> argparse.Namespace:
         default="csp-lda,ea-csp-lda",
         help=(
             "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
-            "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda"
+            "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
+            "ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
         ),
     )
     p.add_argument(
@@ -131,6 +132,45 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="For oea-zo-* methods with objective=infomax: weight λ for H(mean p) term (must be > 0).",
+    )
+    p.add_argument(
+        "--oea-zo-reliable-metric",
+        choices=["none", "confidence", "entropy"],
+        default="none",
+        help=(
+            "For oea-zo-* methods: optional reliability weighting metric used inside entropy/infomax/confidence "
+            "objectives (none disables)."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-reliable-threshold",
+        type=float,
+        default=0.7,
+        help=(
+            "For oea-zo-* methods with reliable_metric != none: threshold for reliability weighting. "
+            "If metric=confidence, must be in [0,1]. If metric=entropy, must be >=0."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-reliable-alpha",
+        type=float,
+        default=10.0,
+        help="For oea-zo-* methods with reliable_metric != none: sigmoid sharpness (alpha > 0).",
+    )
+    p.add_argument(
+        "--oea-zo-trust-lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "For oea-zo-* methods: trust-region penalty weight ρ for ||Q - Q0||_F^2 "
+            "(0 disables)."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-trust-q0",
+        choices=["identity", "delta"],
+        default="identity",
+        help="For oea-zo-* methods: trust-region anchor Q0 (identity|delta).",
     )
     p.add_argument(
         "--oea-zo-holdout-fraction",
@@ -322,13 +362,45 @@ def main() -> None:
                 f"infomax_lambda={args.oea_zo_infomax_lambda}; holdout={args.oea_zo_holdout_fraction}; "
                 f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
+                f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
+                f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
+                f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
+            )
+        elif method in {
+            "ea-zo-ent-csp-lda",
+            "ea-zo-im-csp-lda",
+            "ea-zo-pce-csp-lda",
+            "ea-zo-conf-csp-lda",
+        }:
+            alignment = "ea_zo"
+            if method == "ea-zo-ent-csp-lda":
+                zo_objective_override = "entropy"
+            elif method == "ea-zo-im-csp-lda":
+                zo_objective_override = "infomax"
+            elif method == "ea-zo-pce-csp-lda":
+                zo_objective_override = "pseudo_ce"
+            elif method == "ea-zo-conf-csp-lda":
+                zo_objective_override = "confidence"
+
+            zo_obj = zo_objective_override or str(args.oea_zo_objective)
+            method_details[method] = (
+                "EA-ZO (target optimistic selection): source trains on EA-whitened data (no Q_s selection); "
+                "target optimizes Q_t by zero-order SPSA on unlabeled data "
+                f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; holdout={args.oea_zo_holdout_fraction}; "
+                f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
+                f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
+                f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
         else:
             raise ValueError(
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
-                "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda"
+                "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
+                "ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
 
         results_df, y_true_all, y_pred_all, y_proba_all, _class_order, _models_by_subject = (
@@ -348,6 +420,11 @@ def main() -> None:
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
                 oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
                 oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
+                oea_zo_reliable_metric=str(args.oea_zo_reliable_metric),
+                oea_zo_reliable_threshold=float(args.oea_zo_reliable_threshold),
+                oea_zo_reliable_alpha=float(args.oea_zo_reliable_alpha),
+                oea_zo_trust_lambda=float(args.oea_zo_trust_lambda),
+                oea_zo_trust_q0=str(args.oea_zo_trust_q0),
                 oea_zo_holdout_fraction=float(args.oea_zo_holdout_fraction),
                 oea_zo_warm_start=str(args.oea_zo_warm_start),
                 oea_zo_warm_iters=int(args.oea_zo_warm_iters),
@@ -394,7 +471,7 @@ def main() -> None:
     )
 
     for method in results_by_method.keys():
-        if method == "ea-csp-lda":
+        if method == "ea-csp-lda" or method.startswith("ea-zo"):
             # Align each subject independently, then concatenate for a representative visualization.
             X_parts = []
             y_parts = []

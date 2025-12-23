@@ -113,6 +113,11 @@ def loso_cross_subject_evaluation(
     oea_pseudo_balance: bool = False,
     oea_zo_objective: str = "entropy",
     oea_zo_infomax_lambda: float = 1.0,
+    oea_zo_reliable_metric: str = "none",
+    oea_zo_reliable_threshold: float = 0.0,
+    oea_zo_reliable_alpha: float = 10.0,
+    oea_zo_trust_lambda: float = 0.0,
+    oea_zo_trust_q0: str = "identity",
     oea_zo_holdout_fraction: float = 0.0,
     oea_zo_warm_start: str = "none",
     oea_zo_warm_iters: int = 1,
@@ -146,8 +151,8 @@ def loso_cross_subject_evaluation(
     y_pred_all: List[np.ndarray] = []
     y_proba_all: List[np.ndarray] = []
 
-    if alignment not in {"none", "ea", "oea_cov", "oea", "oea_zo"}:
-        raise ValueError("alignment must be one of: 'none', 'ea', 'oea_cov', 'oea', 'oea_zo'")
+    if alignment not in {"none", "ea", "ea_zo", "oea_cov", "oea", "oea_zo"}:
+        raise ValueError("alignment must be one of: 'none', 'ea', 'ea_zo', 'oea_cov', 'oea', 'oea_zo'")
 
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
@@ -160,6 +165,20 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_objective must be one of: 'entropy', 'pseudo_ce', 'confidence', 'infomax'")
     if float(oea_zo_infomax_lambda) <= 0.0:
         raise ValueError("oea_zo_infomax_lambda must be > 0.")
+    if oea_zo_reliable_metric not in {"none", "confidence", "entropy"}:
+        raise ValueError("oea_zo_reliable_metric must be one of: 'none', 'confidence', 'entropy'")
+    if float(oea_zo_reliable_alpha) <= 0.0:
+        raise ValueError("oea_zo_reliable_alpha must be > 0.")
+    if oea_zo_reliable_metric == "confidence" and not (
+        0.0 <= float(oea_zo_reliable_threshold) <= 1.0
+    ):
+        raise ValueError("oea_zo_reliable_threshold must be in [0,1] when metric='confidence'.")
+    if oea_zo_reliable_metric == "entropy" and float(oea_zo_reliable_threshold) < 0.0:
+        raise ValueError("oea_zo_reliable_threshold must be >= 0 when metric='entropy'.")
+    if float(oea_zo_trust_lambda) < 0.0:
+        raise ValueError("oea_zo_trust_lambda must be >= 0.")
+    if oea_zo_trust_q0 not in {"identity", "delta"}:
+        raise ValueError("oea_zo_trust_q0 must be one of: 'identity', 'delta'.")
     if not (0.0 <= float(oea_zo_holdout_fraction) < 1.0):
         raise ValueError("oea_zo_holdout_fraction must be in [0,1).")
     if oea_zo_warm_start not in {"none", "delta"}:
@@ -180,7 +199,7 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_l2 must be >= 0.")
 
     # Fast path: subject-wise EA can be precomputed once.
-    if alignment == "ea":
+    if alignment in {"ea", "ea_zo"}:
         aligned: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_aligned = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
@@ -199,6 +218,62 @@ def loso_cross_subject_evaluation(
             y_train_parts = [subject_data[s].y for s in train_subjects]
             X_train = np.concatenate(X_train_parts, axis=0)
             y_train = np.concatenate(y_train_parts, axis=0)
+        elif alignment == "ea_zo":
+            # Train on EA-whitened source data (no Q_s selection), then adapt only Q_t at test time.
+            class_labels = tuple([str(c) for c in class_order])
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+            model = fit_csp_lda(X_train, y_train, n_components=n_components)
+
+            diffs_train = []
+            for s in train_subjects:
+                diffs_train.append(
+                    class_cov_diff(
+                        subject_data[int(s)].X,
+                        subject_data[int(s)].y,
+                        class_order=class_labels,
+                        eps=oea_eps,
+                        shrinkage=oea_shrinkage,
+                    )
+                )
+            d_ref = np.mean(np.stack(diffs_train, axis=0), axis=0)
+
+            z_t = subject_data[int(test_subject)].X
+            q_t = _optimize_qt_oea_zo(
+                z_t=z_t,
+                model=model,
+                class_order=class_labels,
+                d_ref=d_ref,
+                eps=float(oea_eps),
+                shrinkage=float(oea_shrinkage),
+                pseudo_mode=str(oea_pseudo_mode),
+                warm_start=str(oea_zo_warm_start),
+                warm_iters=int(oea_zo_warm_iters),
+                q_blend=float(oea_q_blend),
+                objective=str(oea_zo_objective),
+                infomax_lambda=float(oea_zo_infomax_lambda),
+                reliable_metric=str(oea_zo_reliable_metric),
+                reliable_threshold=float(oea_zo_reliable_threshold),
+                reliable_alpha=float(oea_zo_reliable_alpha),
+                trust_lambda=float(oea_zo_trust_lambda),
+                trust_q0=str(oea_zo_trust_q0),
+                holdout_fraction=float(oea_zo_holdout_fraction),
+                fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
+                iters=int(oea_zo_iters),
+                lr=float(oea_zo_lr),
+                mu=float(oea_zo_mu),
+                n_rotations=int(oea_zo_k),
+                seed=int(oea_zo_seed) + int(test_subject) * 997,
+                l2=float(oea_zo_l2),
+                pseudo_confidence=float(oea_pseudo_confidence),
+                pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                pseudo_balance=bool(oea_pseudo_balance),
+            )
+            X_test = apply_spatial_transform(q_t, z_t)
+            y_test = subject_data[int(test_subject)].y
         elif alignment == "oea_cov":
             # OEA (cov-eig) selection: pick Q_s = U_ref U_sᵀ, where U_s is eigenbasis of C_s
             # and U_ref from the average covariance of the training subjects.
@@ -325,6 +400,11 @@ def loso_cross_subject_evaluation(
                     q_blend=float(oea_q_blend),
                     objective=str(oea_zo_objective),
                     infomax_lambda=float(oea_zo_infomax_lambda),
+                    reliable_metric=str(oea_zo_reliable_metric),
+                    reliable_threshold=float(oea_zo_reliable_threshold),
+                    reliable_alpha=float(oea_zo_reliable_alpha),
+                    trust_lambda=float(oea_zo_trust_lambda),
+                    trust_q0=str(oea_zo_trust_q0),
                     holdout_fraction=float(oea_zo_holdout_fraction),
                     fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
                     iters=int(oea_zo_iters),
@@ -341,7 +421,7 @@ def loso_cross_subject_evaluation(
             X_test = apply_spatial_transform(q_t, z_t)
             y_test = subject_data[test_subject].y
 
-        if alignment not in {"oea", "oea_zo"}:
+        if alignment not in {"oea", "oea_zo", "ea_zo"}:
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test)
@@ -520,6 +600,11 @@ def _optimize_qt_oea_zo(
     q_blend: float,
     objective: str,
     infomax_lambda: float,
+    reliable_metric: str,
+    reliable_threshold: float,
+    reliable_alpha: float,
+    trust_lambda: float,
+    trust_q0: str,
     holdout_fraction: float,
     fallback_min_marginal_entropy: float,
     iters: int,
@@ -554,6 +639,18 @@ def _optimize_qt_oea_zo(
         raise ValueError("holdout_fraction must be in [0,1).")
     if float(fallback_min_marginal_entropy) < 0.0:
         raise ValueError("fallback_min_marginal_entropy must be >= 0.")
+    if reliable_metric not in {"none", "confidence", "entropy"}:
+        raise ValueError("reliable_metric must be one of: 'none', 'confidence', 'entropy'")
+    if float(reliable_alpha) <= 0.0:
+        raise ValueError("reliable_alpha must be > 0.")
+    if reliable_metric == "confidence" and not (0.0 <= float(reliable_threshold) <= 1.0):
+        raise ValueError("reliable_threshold must be in [0,1] when metric='confidence'.")
+    if reliable_metric == "entropy" and float(reliable_threshold) < 0.0:
+        raise ValueError("reliable_threshold must be >= 0 when metric='entropy'.")
+    if float(trust_lambda) < 0.0:
+        raise ValueError("trust_lambda must be >= 0.")
+    if trust_q0 not in {"identity", "delta"}:
+        raise ValueError("trust_q0 must be one of: 'identity', 'delta'.")
 
     # Unlabeled holdout split: use one subset to update (SPSA gradient estimation) and
     # the other subset to select the best iterate (reduces overfitting to the same trials).
@@ -582,7 +679,7 @@ def _optimize_qt_oea_zo(
     # Determine whether CSP uses log(power).
     use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
 
-    def _proba_from_q(phi_vec: np.ndarray, z_data: np.ndarray) -> np.ndarray:
+    def _proba_from_q(phi_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi_vec)
         if float(q_blend) < 1.0:
             Q = blend_with_identity(Q, float(q_blend))
@@ -592,7 +689,7 @@ def _optimize_qt_oea_zo(
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        return _reorder_proba_columns(proba, lda.classes_, list(class_order))
+        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), Q
 
     def _maybe_select_keep(proba: np.ndarray) -> np.ndarray:
         """Optionally select a reliable subset based on confidence/top-k/balance settings.
@@ -616,8 +713,16 @@ def _optimize_qt_oea_zo(
             balance=bool(pseudo_balance),
         )
 
+    phi_anchor = np.zeros_like(phi)
+    q0 = np.eye(int(n_channels), dtype=np.float64)
+
+    def _sigmoid(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        x = np.clip(x, -50.0, 50.0)
+        return 1.0 / (1.0 + np.exp(-x))
+
     def eval_phi(phi_vec: np.ndarray, z_data: np.ndarray) -> float:
-        proba = _proba_from_q(phi_vec, z_data)
+        proba, Q = _proba_from_q(phi_vec, z_data)
 
         if objective in {"entropy", "infomax", "confidence"}:
             keep = _maybe_select_keep(proba)
@@ -625,33 +730,18 @@ def _optimize_qt_oea_zo(
                 return 1e6
             proba = proba[keep]
 
-        if objective == "entropy":
-            p = np.clip(proba, 1e-12, 1.0)
-            p = p / np.sum(p, axis=1, keepdims=True)
-            ent = -np.sum(p * np.log(p), axis=1)
-            val = float(np.mean(ent))
-        elif objective == "infomax":
-            # Maximize mutual information I(Y;X) = H(mean p) - mean H(p).
-            # We minimize: mean H(p) - λ * H(mean p).
-            p = np.clip(proba, 1e-12, 1.0)
-            p = p / np.sum(p, axis=1, keepdims=True)
-            ent = -np.sum(p * np.log(p), axis=1)
-            p_bar = np.mean(p, axis=0)
-            p_bar = np.clip(p_bar, 1e-12, 1.0)
-            p_bar = p_bar / np.sum(p_bar)
-            ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
-            val = float(np.mean(ent)) - float(infomax_lambda) * ent_bar
-        elif objective == "confidence":
-            conf = np.max(proba, axis=1)
-            val = float(np.mean(1.0 - conf))
-        else:
+        # Normalize to a valid distribution for entropy computations.
+        p = np.clip(proba, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+
+        if objective == "pseudo_ce":
             # pseudo_ce: hard pseudo labels + optional filtering
-            pred_idx = np.argmax(proba, axis=1)
+            pred_idx = np.argmax(p, axis=1)
             classes_arr = np.asarray(class_order, dtype=object)
             y_pseudo = classes_arr[pred_idx]
             keep = _select_pseudo_indices(
                 y_pseudo=y_pseudo,
-                proba=proba,
+                proba=p,
                 class_order=class_order,
                 confidence=float(pseudo_confidence),
                 topk_per_class=int(pseudo_topk_per_class),
@@ -659,20 +749,49 @@ def _optimize_qt_oea_zo(
             )
             if keep.size == 0:
                 return 1e6
-            pred_idx_k = np.argmax(proba[keep], axis=1)
-            conf_k = proba[keep, pred_idx_k]
+            pred_idx_k = np.argmax(p[keep], axis=1)
+            conf_k = p[keep, pred_idx_k]
             conf_k = np.clip(conf_k, 1e-12, 1.0)
             nll = -np.log(conf_k)
             # Weight by confidence (encourages self-consistent high-confidence predictions).
             val = float(np.mean(conf_k * nll))
+        else:
+            ent = -np.sum(p * np.log(p), axis=1)
+            conf = np.max(p, axis=1)
 
+            w = np.ones(p.shape[0], dtype=np.float64)
+            if reliable_metric != "none":
+                if reliable_metric == "confidence":
+                    w = w * _sigmoid(float(reliable_alpha) * (conf - float(reliable_threshold)))
+                else:
+                    w = w * _sigmoid(float(reliable_alpha) * (float(reliable_threshold) - ent))
+
+            w_sum = float(np.sum(w))
+            if w_sum <= 1e-12:
+                return 1e6
+
+            if objective == "entropy":
+                val = float(np.sum(w * ent) / w_sum)
+            elif objective == "confidence":
+                val = float(np.sum(w * (1.0 - conf)) / w_sum)
+            else:
+                # infomax: maximize mutual information I(Y;X) = H(mean p) - mean H(p).
+                # We minimize: mean H(p) - λ * H(mean p).
+                p_bar = np.sum(p * w[:, None], axis=0) / w_sum
+                p_bar = np.clip(p_bar, 1e-12, 1.0)
+                p_bar = p_bar / float(np.sum(p_bar))
+                ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
+                val = float(np.sum(w * ent) / w_sum) - float(infomax_lambda) * ent_bar
+
+        if float(trust_lambda) > 0.0:
+            val += float(trust_lambda) * float(np.mean((Q - q0) ** 2))
         if l2 > 0.0:
-            val += float(l2) * float(np.mean(phi_vec * phi_vec))
+            val += float(l2) * float(np.mean((phi_vec - phi_anchor) ** 2))
         return val
 
     # Optional warm start: build Q_Δ from pseudo-label Δ-alignment and approximate it with our Givens pairs.
     q_delta: np.ndarray | None = None
-    if warm_start == "delta" and int(warm_iters) > 0:
+    if (warm_start == "delta" or trust_q0 == "delta") and int(warm_iters) > 0:
         q_cur = np.eye(int(n_channels), dtype=np.float64)
         for _ in range(int(warm_iters)):
             X_cur = apply_spatial_transform(q_cur, z_t)
@@ -713,6 +832,9 @@ def _optimize_qt_oea_zo(
                 q_delta = None
                 break
 
+        if trust_q0 == "delta" and q_delta is not None:
+            q0 = blend_with_identity(q_delta, float(q_blend))
+
         if q_delta is not None:
             # Greedy 2D Procrustes per plane to get a good phi initialization.
             q_work = np.eye(int(n_channels), dtype=np.float64)
@@ -735,7 +857,9 @@ def _optimize_qt_oea_zo(
                 col_j = q_work[:, j].copy()
                 q_work[:, i] = c * col_i + s * col_j
                 q_work[:, j] = -s * col_i + c * col_j
-            phi = phi_init.copy()
+            if warm_start == "delta":
+                phi = phi_init.copy()
+                phi_anchor = phi_init.copy()
 
     # Baseline: identity alignment is always a valid candidate (best selection uses z_best).
     best_phi = np.zeros_like(best_phi)
@@ -769,7 +893,7 @@ def _optimize_qt_oea_zo(
 
     # Safety fallback: if target predictions collapse to a single class, fall back to a safer Q.
     if float(fallback_min_marginal_entropy) > 0.0:
-        proba_best = _proba_from_q(best_phi, z_t)
+        proba_best, _Q_best = _proba_from_q(best_phi, z_t)
         p_bar = np.mean(np.clip(proba_best, 1e-12, 1.0), axis=0)
         p_bar = p_bar / float(np.sum(p_bar))
         ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
