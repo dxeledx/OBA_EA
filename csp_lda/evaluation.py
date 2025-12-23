@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
@@ -121,6 +122,8 @@ def loso_cross_subject_evaluation(
     oea_zo_marginal_mode: str = "none",
     oea_zo_marginal_beta: float = 0.0,
     oea_zo_marginal_tau: float = 0.05,
+    oea_zo_marginal_prior: str = "uniform",
+    oea_zo_marginal_prior_mix: float = 0.0,
     oea_zo_min_improvement: float = 0.0,
     oea_zo_holdout_fraction: float = 0.0,
     oea_zo_warm_start: str = "none",
@@ -132,6 +135,9 @@ def loso_cross_subject_evaluation(
     oea_zo_k: int = 50,
     oea_zo_seed: int = 0,
     oea_zo_l2: float = 0.0,
+    diagnostics_dir: Path | None = None,
+    diagnostics_subjects: Sequence[int] = (),
+    diagnostics_tag: str = "",
 ) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, List[str], Dict[int, TrainedModel]]:
     """LOSO evaluation: each subject is test once; others are training.
 
@@ -183,14 +189,26 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_trust_lambda must be >= 0.")
     if oea_zo_trust_q0 not in {"identity", "delta"}:
         raise ValueError("oea_zo_trust_q0 must be one of: 'identity', 'delta'.")
-    if oea_zo_marginal_mode not in {"none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min"}:
+    if oea_zo_marginal_mode not in {
+        "none",
+        "l2_uniform",
+        "kl_uniform",
+        "hinge_uniform",
+        "hard_min",
+        "kl_prior",
+    }:
         raise ValueError(
-            "oea_zo_marginal_mode must be one of: 'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min'."
+            "oea_zo_marginal_mode must be one of: "
+            "'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min', 'kl_prior'."
         )
     if float(oea_zo_marginal_beta) < 0.0:
         raise ValueError("oea_zo_marginal_beta must be >= 0.")
     if not (0.0 <= float(oea_zo_marginal_tau) <= 1.0):
         raise ValueError("oea_zo_marginal_tau must be in [0,1].")
+    if oea_zo_marginal_prior not in {"uniform", "source", "anchor_pred"}:
+        raise ValueError("oea_zo_marginal_prior must be one of: 'uniform', 'source', 'anchor_pred'.")
+    if not (0.0 <= float(oea_zo_marginal_prior_mix) <= 1.0):
+        raise ValueError("oea_zo_marginal_prior_mix must be in [0,1].")
     if float(oea_zo_min_improvement) < 0.0:
         raise ValueError("oea_zo_min_improvement must be >= 0.")
     if not (0.0 <= float(oea_zo_holdout_fraction) < 1.0):
@@ -212,6 +230,8 @@ def loso_cross_subject_evaluation(
     if float(oea_zo_l2) < 0.0:
         raise ValueError("oea_zo_l2 must be >= 0.")
 
+    diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
+
     # Fast path: subject-wise EA can be precomputed once.
     if alignment in {"ea", "ea_zo"}:
         aligned: Dict[int, SubjectData] = {}
@@ -222,6 +242,9 @@ def loso_cross_subject_evaluation(
 
     for test_subject in subjects:
         train_subjects = [s for s in subjects if s != test_subject]
+        do_diag = diagnostics_dir is not None and int(test_subject) in diag_subjects_set
+        zo_diag: dict | None = None
+        z_test_base: np.ndarray | None = None
 
         # Build per-fold aligned train/test data if needed.
         if alignment in {"none", "ea"}:
@@ -256,7 +279,27 @@ def loso_cross_subject_evaluation(
             d_ref = np.mean(np.stack(diffs_train, axis=0), axis=0)
 
             z_t = subject_data[int(test_subject)].X
-            q_t = _optimize_qt_oea_zo(
+            z_test_base = z_t
+            marginal_prior_vec: np.ndarray | None = None
+            if oea_zo_marginal_mode == "kl_prior":
+                if oea_zo_marginal_prior == "uniform":
+                    marginal_prior_vec = np.ones(len(class_labels), dtype=np.float64) / float(len(class_labels))
+                elif oea_zo_marginal_prior == "source":
+                    counts = np.array([(y_train == c).sum() for c in class_labels], dtype=np.float64)
+                    marginal_prior_vec = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                else:
+                    # anchor_pred: use target predicted marginal at Q=I (EA), fixed during optimization.
+                    proba_id = model.predict_proba(z_t)
+                    proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_order))
+                    marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                    marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+                mix = float(oea_zo_marginal_prior_mix)
+                if mix > 0.0 and marginal_prior_vec is not None:
+                    u = np.ones_like(marginal_prior_vec) / float(marginal_prior_vec.shape[0])
+                    marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
+                    marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+
+            opt_res = _optimize_qt_oea_zo(
                 z_t=z_t,
                 model=model,
                 class_order=class_labels,
@@ -277,6 +320,7 @@ def loso_cross_subject_evaluation(
                 marginal_mode=str(oea_zo_marginal_mode),
                 marginal_beta=float(oea_zo_marginal_beta),
                 marginal_tau=float(oea_zo_marginal_tau),
+                marginal_prior=marginal_prior_vec,
                 min_improvement=float(oea_zo_min_improvement),
                 holdout_fraction=float(oea_zo_holdout_fraction),
                 fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
@@ -289,7 +333,12 @@ def loso_cross_subject_evaluation(
                 pseudo_confidence=float(oea_pseudo_confidence),
                 pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
                 pseudo_balance=bool(oea_pseudo_balance),
+                return_diagnostics=bool(do_diag),
             )
+            if do_diag:
+                q_t, zo_diag = opt_res
+            else:
+                q_t = opt_res
             X_test = apply_spatial_transform(q_t, z_t)
             y_test = subject_data[int(test_subject)].y
         elif alignment == "oea_cov":
@@ -405,6 +454,27 @@ def loso_cross_subject_evaluation(
                     q_t = orthogonal_align_symmetric(d_t, d_ref)
                     q_t = blend_with_identity(q_t, oea_q_blend)
             else:
+                # If using KL(π||p̄) in the ZO objective, build π per fold.
+                marginal_prior_vec: np.ndarray | None = None
+                if oea_zo_marginal_mode == "kl_prior":
+                    if oea_zo_marginal_prior == "uniform":
+                        marginal_prior_vec = np.ones(len(class_labels), dtype=np.float64) / float(
+                            len(class_labels)
+                        )
+                    elif oea_zo_marginal_prior == "source":
+                        counts = np.array([(y_train == c).sum() for c in class_labels], dtype=np.float64)
+                        marginal_prior_vec = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                    else:
+                        proba_id = model.predict_proba(z_t)
+                        proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_order))
+                        marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                        marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+                    mix = float(oea_zo_marginal_prior_mix)
+                    if mix > 0.0 and marginal_prior_vec is not None:
+                        u = np.ones_like(marginal_prior_vec) / float(marginal_prior_vec.shape[0])
+                        marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
+                        marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+
                 q_t = _optimize_qt_oea_zo(
                     z_t=z_t,
                     model=model,
@@ -426,6 +496,7 @@ def loso_cross_subject_evaluation(
                     marginal_mode=str(oea_zo_marginal_mode),
                     marginal_beta=float(oea_zo_marginal_beta),
                     marginal_tau=float(oea_zo_marginal_tau),
+                    marginal_prior=marginal_prior_vec,
                     min_improvement=float(oea_zo_min_improvement),
                     holdout_fraction=float(oea_zo_holdout_fraction),
                     fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
@@ -438,7 +509,11 @@ def loso_cross_subject_evaluation(
                     pseudo_confidence=float(oea_pseudo_confidence),
                     pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
                     pseudo_balance=bool(oea_pseudo_balance),
+                    return_diagnostics=bool(do_diag),
                 )
+                if do_diag:
+                    q_t, zo_diag = q_t
+                z_test_base = z_t
 
             X_test = apply_spatial_transform(q_t, z_t)
             y_test = subject_data[test_subject].y
@@ -448,6 +523,18 @@ def loso_cross_subject_evaluation(
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test)
         y_proba = _reorder_proba_columns(y_proba, model.classes_, class_order)
+
+        if do_diag and zo_diag is not None:
+            _write_zo_diagnostics(
+                zo_diag,
+                out_dir=Path(diagnostics_dir),
+                tag=str(diagnostics_tag),
+                subject=int(test_subject),
+                model=model,
+                z_t=z_test_base if z_test_base is not None else subject_data[int(test_subject)].X,
+                y_true=y_test,
+                class_order=class_order,
+            )
 
         metrics = compute_metrics(
             y_true=y_test,
@@ -479,6 +566,103 @@ def loso_cross_subject_evaluation(
         list(class_order),
         models_by_subject,
     )
+
+
+def _write_zo_diagnostics(
+    zo_diag: dict,
+    *,
+    out_dir: Path,
+    tag: str,
+    subject: int,
+    model: TrainedModel,
+    z_t: np.ndarray,
+    y_true: np.ndarray,
+    class_order: Sequence[str],
+) -> None:
+    """Write per-subject EA-ZO/OEA-ZO diagnostics (analysis-only; uses labels)."""
+
+    out_dir = Path(out_dir)
+    tag = tag or "zo"
+    diag_dir = out_dir / "diagnostics" / str(tag) / f"subject_{int(subject):02d}"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    records = list(zo_diag.get("records", []))
+    if not records:
+        return
+
+    # Candidate evaluation on the labeled target fold (analysis-only).
+    rows = []
+    for idx, rec in enumerate(records):
+        Q = np.asarray(rec.get("Q"), dtype=np.float64)
+        X = apply_spatial_transform(Q, z_t)
+        y_pred = model.predict(X)
+        acc = accuracy_score(y_true, y_pred)
+        row = {
+            "idx": int(idx),
+            "kind": str(rec.get("kind", "")),
+            "iter": int(rec.get("iter", -1)),
+            "order": int(rec.get("order", idx)),
+            "objective": float(rec.get("objective", np.nan)),
+            "objective_base": float(rec.get("objective_base", np.nan)),
+            "pen_marginal": float(rec.get("pen_marginal", np.nan)),
+            "pen_trust": float(rec.get("pen_trust", np.nan)),
+            "pen_l2": float(rec.get("pen_l2", np.nan)),
+            "n_keep": int(rec.get("n_keep", -1)),
+            "accuracy": float(acc),
+        }
+        p_bar = np.asarray(rec.get("p_bar_full", []), dtype=np.float64).reshape(-1)
+        for k, name in enumerate(class_order):
+            row[f"pbar_{name}"] = float(p_bar[k]) if k < p_bar.shape[0] else np.nan
+        rows.append(row)
+
+    df = pd.DataFrame(rows).sort_values(["order", "idx"])
+    df.to_csv(diag_dir / "candidates.csv", index=False)
+
+    obj = df["objective"].to_numpy(dtype=np.float64)
+    acc = df["accuracy"].to_numpy(dtype=np.float64)
+    pearson = float(np.corrcoef(obj, acc)[0, 1]) if obj.size >= 2 else float("nan")
+    # Spearman via ranks (no ties handling needed for a quick diagnostic).
+    obj_r = obj.argsort().argsort().astype(np.float64)
+    acc_r = acc.argsort().argsort().astype(np.float64)
+    spearman = float(np.corrcoef(obj_r, acc_r)[0, 1]) if obj.size >= 2 else float("nan")
+
+    prior = zo_diag.get("marginal_prior")
+    prior_arr = None if prior is None else np.asarray(prior, dtype=np.float64).reshape(-1)
+
+    # Plots
+    from .plots import plot_class_marginal_trajectory, plot_objective_vs_accuracy_scatter
+
+    p_cols = [c for c in df.columns if c.startswith("pbar_")]
+    p_bars = df[p_cols].to_numpy(dtype=np.float64)
+    x = df["order"].to_numpy(dtype=int)
+    plot_class_marginal_trajectory(
+        p_bars,
+        class_order=class_order,
+        x=x,
+        prior=prior_arr,
+        output_path=diag_dir / "pbar_trajectory.png",
+        title=f"Subject {subject} — p̄ trajectory ({tag})",
+    )
+    plot_objective_vs_accuracy_scatter(
+        obj,
+        acc,
+        output_path=diag_dir / "objective_vs_accuracy.png",
+        title=f"Subject {subject} — objective vs acc (pearson={pearson:.3f}, spearman={spearman:.3f})",
+    )
+
+    # Small text summary
+    lines = [
+        f"tag: {tag}",
+        f"subject: {subject}",
+        f"n_candidates: {len(df)}",
+        f"pearson(objective, accuracy): {pearson:.6f}",
+        f"spearman(objective, accuracy): {spearman:.6f}",
+        f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
+        f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",
+    ]
+    if prior_arr is not None:
+        lines.append("marginal_prior: " + ", ".join([f"{x:.4f}" for x in prior_arr.tolist()]))
+    (diag_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _select_pseudo_indices(
@@ -647,6 +831,7 @@ def _optimize_qt_oea_zo(
     marginal_mode: str,
     marginal_beta: float,
     marginal_tau: float,
+    marginal_prior: np.ndarray | None,
     min_improvement: float,
     holdout_fraction: float,
     fallback_min_marginal_entropy: float,
@@ -659,7 +844,8 @@ def _optimize_qt_oea_zo(
     pseudo_confidence: float,
     pseudo_topk_per_class: int,
     pseudo_balance: bool,
-) -> np.ndarray:
+    return_diagnostics: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict]:
     """Zero-order optimize Q_t on the orthogonal group via a low-dim Givens parameterization.
 
     This implements a practical "optimistic selection" variant for the target subject:
@@ -694,9 +880,10 @@ def _optimize_qt_oea_zo(
         raise ValueError("trust_lambda must be >= 0.")
     if trust_q0 not in {"identity", "delta"}:
         raise ValueError("trust_q0 must be one of: 'identity', 'delta'.")
-    if marginal_mode not in {"none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min"}:
+    if marginal_mode not in {"none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min", "kl_prior"}:
         raise ValueError(
-            "marginal_mode must be one of: 'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min'."
+            "marginal_mode must be one of: "
+            "'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min', 'kl_prior'."
         )
     if float(marginal_beta) < 0.0:
         raise ValueError("marginal_beta must be >= 0.")
@@ -704,6 +891,22 @@ def _optimize_qt_oea_zo(
         raise ValueError("marginal_tau must be in [0,1].")
     if float(min_improvement) < 0.0:
         raise ValueError("min_improvement must be >= 0.")
+
+    # Optional KL(π || p̄) prior (π fixed during optimization).
+    marginal_prior_vec: np.ndarray | None = None
+    if marginal_mode == "kl_prior":
+        if marginal_prior is None:
+            raise ValueError("marginal_prior must be provided when marginal_mode='kl_prior'.")
+        marginal_prior_vec = np.asarray(marginal_prior, dtype=np.float64).reshape(-1)
+        if marginal_prior_vec.shape[0] != int(n_classes):
+            raise ValueError(
+                f"marginal_prior length mismatch: expected {n_classes}, got {marginal_prior_vec.shape[0]}."
+            )
+        marginal_prior_vec = np.clip(marginal_prior_vec, 1e-12, 1.0)
+        marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+
+    do_diag = bool(return_diagnostics)
+    diag_records: List[dict] = []
 
     # Unlabeled holdout split: use one subset to update (SPSA gradient estimation) and
     # the other subset to select the best iterate (reduces overfitting to the same trials).
@@ -785,9 +988,7 @@ def _optimize_qt_oea_zo(
         x = np.clip(x, -50.0, 50.0)
         return 1.0 / (1.0 + np.exp(-x))
 
-    def _objective_from_proba(
-        *, proba: np.ndarray, Q: np.ndarray, phi_vec: np.ndarray | None
-    ) -> float:
+    def _objective_from_proba(*, proba: np.ndarray, Q: np.ndarray, phi_vec: np.ndarray | None) -> float:
         proba = np.asarray(proba, dtype=np.float64)
         Q = np.asarray(Q, dtype=np.float64)
 
@@ -802,7 +1003,6 @@ def _optimize_qt_oea_zo(
         p = p / np.sum(p, axis=1, keepdims=True)
 
         if objective == "pseudo_ce":
-            # pseudo_ce: hard pseudo labels + optional filtering
             pred_idx = np.argmax(p, axis=1)
             classes_arr = np.asarray(class_order, dtype=object)
             y_pseudo = classes_arr[pred_idx]
@@ -820,7 +1020,6 @@ def _optimize_qt_oea_zo(
             conf_k = p[keep, pred_idx_k]
             conf_k = np.clip(conf_k, 1e-12, 1.0)
             nll = -np.log(conf_k)
-            # Weight by confidence (encourages self-consistent high-confidence predictions).
             val = float(np.mean(conf_k * nll))
         else:
             ent = -np.sum(p * np.log(p), axis=1)
@@ -837,8 +1036,6 @@ def _optimize_qt_oea_zo(
             if w_sum <= 1e-12:
                 return 1e6
 
-            # For class-marginal regularization/constraints we use the *unweighted* marginal.
-            # This avoids skewing the marginal when reliability weights downweight certain samples/classes.
             p_bar = np.mean(p, axis=0)
             p_bar = np.clip(p_bar, 1e-12, 1.0)
             p_bar = p_bar / float(np.sum(p_bar))
@@ -848,15 +1045,12 @@ def _optimize_qt_oea_zo(
             elif objective == "confidence":
                 val = float(np.sum(w * (1.0 - conf)) / w_sum)
             else:
-                # infomax: maximize mutual information I(Y;X) = H(mean p) - mean H(p).
-                # We minimize: mean H(p) - λ * H(mean p).
                 ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
                 val = float(np.sum(w * ent) / w_sum) - float(infomax_lambda) * ent_bar
 
             if marginal_mode != "none":
                 tau = float(marginal_tau)
                 if marginal_mode == "hard_min":
-                    # Hard constraint: reject candidates whose class-marginal has near-zero mass.
                     if float(np.min(p_bar)) < tau:
                         return 1e6
                 elif float(marginal_beta) > 0.0:
@@ -864,9 +1058,11 @@ def _optimize_qt_oea_zo(
                         u = 1.0 / float(n_classes)
                         pen = float(np.mean((p_bar - u) ** 2))
                     elif marginal_mode == "kl_uniform":
-                        # KL(u || p_bar) up to a constant, with u uniform:
-                        #   KL(u||p_bar) = const - mean(log p_bar_k)
                         pen = float(-np.mean(np.log(p_bar)))
+                    elif marginal_mode == "kl_prior":
+                        if marginal_prior_vec is None:
+                            return 1e6
+                        pen = float(-np.sum(marginal_prior_vec * np.log(p_bar)))
                     else:
                         pen = float(np.mean(np.maximum(0.0, tau - p_bar) ** 2))
                     val = float(val) + float(marginal_beta) * float(pen)
@@ -877,9 +1073,154 @@ def _optimize_qt_oea_zo(
             val += float(l2) * float(np.mean(phi_vec * phi_vec))
         return float(val)
 
+    def _objective_details_from_proba(
+        *, proba: np.ndarray, Q: np.ndarray, phi_vec: np.ndarray | None
+    ) -> tuple[float, dict]:
+        proba = np.asarray(proba, dtype=np.float64)
+        Q = np.asarray(Q, dtype=np.float64)
+        details: dict = {}
+
+        keep = np.arange(proba.shape[0], dtype=int)
+        if objective in {"entropy", "infomax", "confidence"}:
+            keep = _maybe_select_keep(proba)
+            if keep.size == 0:
+                return 1e6, {"n_keep": 0}
+            proba = proba[keep]
+        details["n_keep"] = int(keep.size)
+
+        # Normalize to a valid distribution for entropy computations.
+        p = np.clip(proba, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+        details["n_samples"] = int(p.shape[0])
+
+        if objective == "pseudo_ce":
+            # pseudo_ce: hard pseudo labels + optional filtering
+            pred_idx = np.argmax(p, axis=1)
+            classes_arr = np.asarray(class_order, dtype=object)
+            y_pseudo = classes_arr[pred_idx]
+            keep = _select_pseudo_indices(
+                y_pseudo=y_pseudo,
+                proba=p,
+                class_order=class_order,
+                confidence=float(pseudo_confidence),
+                topk_per_class=int(pseudo_topk_per_class),
+                balance=bool(pseudo_balance),
+            )
+            if keep.size == 0:
+                return 1e6, {"n_keep": 0}
+            pred_idx_k = np.argmax(p[keep], axis=1)
+            conf_k = p[keep, pred_idx_k]
+            conf_k = np.clip(conf_k, 1e-12, 1.0)
+            nll = -np.log(conf_k)
+            # Weight by confidence (encourages self-consistent high-confidence predictions).
+            base = float(np.mean(conf_k * nll))
+            details["objective_base"] = base
+            val = float(base)
+        else:
+            ent = -np.sum(p * np.log(p), axis=1)
+            conf = np.max(p, axis=1)
+            details["mean_entropy"] = float(np.mean(ent))
+            details["mean_confidence"] = float(np.mean(conf))
+
+            w = np.ones(p.shape[0], dtype=np.float64)
+            if reliable_metric != "none":
+                if reliable_metric == "confidence":
+                    w = w * _sigmoid(float(reliable_alpha) * (conf - float(reliable_threshold)))
+                else:
+                    w = w * _sigmoid(float(reliable_alpha) * (float(reliable_threshold) - ent))
+
+            w_sum = float(np.sum(w))
+            if w_sum <= 1e-12:
+                return 1e6, {"n_keep": int(p.shape[0])}
+
+            # For class-marginal regularization/constraints we use the *unweighted* marginal.
+            # This avoids skewing the marginal when reliability weights downweight certain samples/classes.
+            p_bar = np.mean(p, axis=0)
+            p_bar = np.clip(p_bar, 1e-12, 1.0)
+            p_bar = p_bar / float(np.sum(p_bar))
+            details["p_bar"] = p_bar.copy()
+
+            if objective == "entropy":
+                base = float(np.sum(w * ent) / w_sum)
+                details["objective_base"] = base
+                val = float(base)
+            elif objective == "confidence":
+                base = float(np.sum(w * (1.0 - conf)) / w_sum)
+                details["objective_base"] = base
+                val = float(base)
+            else:
+                # infomax: maximize mutual information I(Y;X) = H(mean p) - mean H(p).
+                # We minimize: mean H(p) - λ * H(mean p).
+                ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
+                base = float(np.sum(w * ent) / w_sum) - float(infomax_lambda) * ent_bar
+                details["entropy_bar"] = float(ent_bar)
+                details["objective_base"] = base
+                val = float(base)
+
+            if marginal_mode != "none":
+                tau = float(marginal_tau)
+                pen = 0.0
+                if marginal_mode == "hard_min":
+                    # Hard constraint: reject candidates whose class-marginal has near-zero mass.
+                    if float(np.min(p_bar)) < tau:
+                        return 1e6, details
+                elif marginal_mode == "kl_prior":
+                    if marginal_prior_vec is None:
+                        return 1e6, details
+                    pen = float(-np.sum(marginal_prior_vec * np.log(p_bar)))
+                elif float(marginal_beta) > 0.0:
+                    if marginal_mode == "l2_uniform":
+                        u = 1.0 / float(n_classes)
+                        pen = float(np.mean((p_bar - u) ** 2))
+                    elif marginal_mode == "kl_uniform":
+                        # KL(u || p_bar) up to a constant, with u uniform:
+                        #   KL(u||p_bar) = const - mean(log p_bar_k)
+                        pen = float(-np.mean(np.log(p_bar)))
+                    else:
+                        pen = float(np.mean(np.maximum(0.0, tau - p_bar) ** 2))
+                if float(marginal_beta) > 0.0 and marginal_mode != "hard_min":
+                    val = float(val) + float(marginal_beta) * float(pen)
+                details["pen_marginal"] = float(pen)
+
+        pen_trust = 0.0
+        if float(trust_lambda) > 0.0:
+            pen_trust = float(trust_lambda) * float(np.mean((Q - q0) ** 2))
+            val += pen_trust
+        details["pen_trust"] = float(pen_trust)
+        pen_l2 = 0.0
+        if l2 > 0.0 and phi_vec is not None:
+            pen_l2 = float(l2) * float(np.mean(phi_vec * phi_vec))
+            val += pen_l2
+        details["pen_l2"] = float(pen_l2)
+        details["objective"] = float(val)
+        return float(val), details
+
     def eval_phi(phi_vec: np.ndarray, z_data: np.ndarray) -> float:
         proba, Q = _proba_from_q(phi_vec, z_data)
         return _objective_from_proba(proba=proba, Q=Q, phi_vec=phi_vec)
+
+    def _record_candidate(*, kind: str, iter_idx: int, phi_vec: np.ndarray | None, Q: np.ndarray) -> None:
+        if not do_diag:
+            return
+        proba_best = _proba_from_Q(Q, z_best)
+        obj, details = _objective_details_from_proba(proba=proba_best, Q=Q, phi_vec=phi_vec)
+        proba_full = _proba_from_Q(Q, z_t)
+        p_bar_full = np.mean(np.clip(proba_full, 1e-12, 1.0), axis=0)
+        p_bar_full = p_bar_full / float(np.sum(p_bar_full))
+        rec = {
+            "kind": str(kind),
+            "iter": int(iter_idx),
+            "order": int(len(diag_records)),
+            "objective": float(obj),
+            "objective_base": float(details.get("objective_base", np.nan)),
+            "pen_marginal": float(details.get("pen_marginal", 0.0)),
+            "pen_trust": float(details.get("pen_trust", 0.0)),
+            "pen_l2": float(details.get("pen_l2", 0.0)),
+            "n_keep": int(details.get("n_keep", -1)),
+            "p_bar_full": p_bar_full.astype(np.float64),
+            "Q": np.asarray(Q, dtype=np.float64),
+        }
+        diag_records.append(rec)
 
     # Optional warm start: build Q_Δ from pseudo-label Δ-alignment and approximate it with our Givens pairs.
     q_delta: np.ndarray | None = None
@@ -956,6 +1297,7 @@ def _optimize_qt_oea_zo(
     best_Q_override: np.ndarray | None = None
     phi_id = np.zeros_like(best_phi)
     obj_id = eval_phi(phi_id, z_best)
+    _record_candidate(kind="identity", iter_idx=-1, phi_vec=phi_id, Q=np.eye(int(n_channels), dtype=np.float64))
     best_phi = phi_id.copy()
     best_obj = float(obj_id)
 
@@ -963,6 +1305,7 @@ def _optimize_qt_oea_zo(
         q_delta_b = blend_with_identity(q_delta, float(q_blend))
         proba_qd = _proba_from_Q(q_delta_b, z_best)
         obj_qd = _objective_from_proba(proba=proba_qd, Q=q_delta_b, phi_vec=None)
+        _record_candidate(kind="q_delta", iter_idx=-2, phi_vec=None, Q=q_delta_b)
         if obj_qd < best_obj:
             best_obj = float(obj_qd)
             best_Q_override = q_delta_b
@@ -970,6 +1313,10 @@ def _optimize_qt_oea_zo(
     # If we warm-started (Givens), compare that initial point too.
     if np.any(phi != 0.0):
         obj_init = eval_phi(phi, z_best)
+        if do_diag:
+            q_init = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi)
+            q_init = blend_with_identity(q_init, float(q_blend))
+            _record_candidate(kind="warm_init", iter_idx=0, phi_vec=phi.copy(), Q=q_init)
         if obj_init < best_obj:
             best_obj = float(obj_init)
             best_phi = phi.copy()
@@ -988,6 +1335,9 @@ def _optimize_qt_oea_zo(
 
         # Track best iterate (not the +/- perturbations used only for gradient estimation).
         f_phi = eval_phi(phi, z_best)
+        if do_diag:
+            _proba_tmp, Q_tmp = _proba_from_q(phi, z_best)
+            _record_candidate(kind="iter", iter_idx=int(t + 1), phi_vec=phi.copy(), Q=Q_tmp)
         if f_phi < best_obj:
             best_obj = f_phi
             best_phi = phi.copy()
@@ -1035,6 +1385,14 @@ def _optimize_qt_oea_zo(
                     best_q = q_cand
             Q = best_q
 
+    if do_diag:
+        diag = {
+            "records": diag_records,
+            "class_order": list(class_order),
+            "marginal_mode": str(marginal_mode),
+            "marginal_prior": None if marginal_prior_vec is None else marginal_prior_vec.astype(np.float64),
+        }
+        return Q, diag
     return Q
 
 

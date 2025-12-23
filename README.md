@@ -95,7 +95,8 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 - `--oea-zo-trust-lambda` + `--oea-zo-trust-q0`：信任域（防负迁移）
 - `--oea-zo-reliable-metric ...`：可靠样本连续加权（替代硬阈值选择）
 - `--oea-zo-min-improvement`：若 holdout 上相对 `Q=I` 改善不足则回退 `Q=I`
-- `--oea-zo-marginal-mode` + `--oea-zo-marginal-beta`：更“硬”的类边际均衡约束（4 类推荐先试 `kl_uniform`）
+- `--oea-zo-marginal-mode` + `--oea-zo-marginal-beta`：类边际均衡/先验约束（4 类可先试 `kl_uniform`；或用 `kl_prior` + `--oea-zo-marginal-prior` 替代“强行均匀”假设）
+- `--diagnose-subjects 4`：输出 ZO 过程诊断图（`p̄` 轨迹、objective vs acc 散点、候选表；分析用）
 
 运行示例：
 

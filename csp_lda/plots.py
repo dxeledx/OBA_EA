@@ -116,3 +116,81 @@ def plot_method_comparison_bar(
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_class_marginal_trajectory(
+    p_bars: np.ndarray,
+    *,
+    class_order: Sequence[str],
+    output_path: Path,
+    x: np.ndarray | None = None,
+    prior: np.ndarray | None = None,
+    title: str = "Class-marginal trajectory",
+    dpi: int = 300,
+) -> None:
+    p_bars = np.asarray(p_bars, dtype=np.float64)
+    if p_bars.ndim != 2:
+        raise ValueError(f"Expected p_bars shape (n_steps,n_classes); got {p_bars.shape}.")
+    n_steps, n_classes = p_bars.shape
+    if len(class_order) != n_classes:
+        raise ValueError("class_order length mismatch with p_bars.")
+
+    if x is None:
+        x = np.arange(n_steps)
+    x = np.asarray(x)
+    if x.shape[0] != n_steps:
+        raise ValueError("x length mismatch with p_bars.")
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for k, name in enumerate(class_order):
+        ax.plot(x, p_bars[:, k], marker="o", linewidth=1.5, markersize=3, label=str(name))
+
+    if prior is not None:
+        prior = np.asarray(prior, dtype=np.float64).reshape(-1)
+        if prior.shape[0] != n_classes:
+            raise ValueError("prior length mismatch with p_bars.")
+        for k, name in enumerate(class_order):
+            ax.hlines(
+                prior[k],
+                xmin=float(np.min(x)),
+                xmax=float(np.max(x)),
+                colors="k",
+                linestyles="dashed",
+                linewidth=0.8,
+                alpha=0.35,
+            )
+
+    ax.set_xlabel("Candidate order / iteration")
+    ax.set_ylabel("p̄ (mean predicted probability)")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(ncol=min(4, n_classes), fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_objective_vs_accuracy_scatter(
+    objectives: np.ndarray,
+    accuracies: np.ndarray,
+    *,
+    output_path: Path,
+    title: str = "Objective vs accuracy",
+    dpi: int = 300,
+) -> None:
+    objectives = np.asarray(objectives, dtype=np.float64).reshape(-1)
+    accuracies = np.asarray(accuracies, dtype=np.float64).reshape(-1)
+    if objectives.shape[0] != accuracies.shape[0]:
+        raise ValueError("objectives/accuracies length mismatch.")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.scatter(objectives, accuracies, s=20, alpha=0.75)
+    ax.set_xlabel("Unlabeled objective (lower is better)")
+    ax.set_ylabel("True accuracy (higher is better)")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
