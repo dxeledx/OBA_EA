@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         type=Path,
         default=Path("outputs"),
-        help="Output root directory. Run outputs go to OUT_DIR/YYYYMMDD/HHMMSS_* (no overwrite).",
+        help="Output root directory. Run outputs go to OUT_DIR/YYYYMMDD/<N>class/HHMMSS_* (no overwrite).",
     )
     p.add_argument(
         "--run-name",
@@ -210,6 +210,55 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods: trust-region anchor Q0 (identity|delta).",
     )
     p.add_argument(
+        "--oea-zo-drift-mode",
+        choices=["none", "penalty", "hard"],
+        default="none",
+        help=(
+            "For oea-zo-* methods: prediction-drift guard relative to the EA anchor (Q=I). "
+            "none disables; penalty adds γ * mean KL(p0||pQ); hard enforces drift<=δ at selection time."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-drift-gamma",
+        type=float,
+        default=0.0,
+        help="For oea-zo-* methods with drift_mode=penalty: penalty weight γ (>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-drift-delta",
+        type=float,
+        default=0.0,
+        help="For oea-zo-* methods with drift_mode=hard: drift threshold δ (>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-selector",
+        choices=["objective", "calibrated_ridge"],
+        default="objective",
+        help=(
+            "For oea-zo-* methods: how to select Q_t from the candidate set. "
+            "objective selects by the unlabeled objective (plus optional drift guard); "
+            "calibrated_ridge learns a regressor on source subjects to predict accuracy."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-calib-ridge-alpha",
+        type=float,
+        default=1.0,
+        help="For oea-zo-* methods with selector=calibrated_ridge: Ridge alpha (>0).",
+    )
+    p.add_argument(
+        "--oea-zo-calib-max-subjects",
+        type=int,
+        default=0,
+        help="For oea-zo-* methods with selector=calibrated_ridge: limit pseudo-target subjects per fold (0=all).",
+    )
+    p.add_argument(
+        "--oea-zo-calib-seed",
+        type=int,
+        default=0,
+        help="For oea-zo-* methods with selector=calibrated_ridge: random seed for sampling pseudo-targets.",
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -308,7 +357,12 @@ def main() -> None:
     )
     date_prefix = today_yyyymmdd()
     out_root = Path(args.out_dir)
-    base_dir = out_root / date_prefix
+
+    events = tuple([e.strip() for e in str(args.events).split(",") if e.strip()])
+    if len(events) < 2:
+        raise ValueError("--events must contain at least two classes.")
+    task_dir = f"{len(events)}class"
+    base_dir = out_root / date_prefix / task_dir
     run_name = args.run_name or datetime.now().strftime("%H%M%S")
     out_dir = base_dir / run_name
     i = 1
@@ -316,7 +370,6 @@ def main() -> None:
         out_dir = base_dir / f"{run_name}_{i:02d}"
         i += 1
 
-    events = tuple([e.strip() for e in str(args.events).split(",") if e.strip()])
     sessions_raw = str(args.sessions).strip()
     sessions = None if sessions_raw.upper() == "ALL" else tuple(
         [s.strip() for s in sessions_raw.split(",") if s.strip()]
@@ -364,6 +417,7 @@ def main() -> None:
     results_by_method: dict[str, pd.DataFrame] = {}
     overall_by_method: dict[str, dict[str, float]] = {}
     predictions_by_method: dict[str, tuple] = {}
+    trial_predictions_by_method: dict[str, pd.DataFrame] = {}
     method_details: dict[str, str] = {}
 
     for method in methods:
@@ -415,6 +469,18 @@ def main() -> None:
                 marginal_prior_str = (
                     f", prior={args.oea_zo_marginal_prior}, mix={args.oea_zo_marginal_prior_mix}"
                 )
+            drift_str = ""
+            if str(args.oea_zo_drift_mode) != "none":
+                drift_str = (
+                    f"; drift={args.oea_zo_drift_mode} "
+                    f"(gamma={args.oea_zo_drift_gamma}, delta={args.oea_zo_drift_delta})"
+                )
+            selector_str = f"; selector={args.oea_zo_selector}"
+            if str(args.oea_zo_selector) == "calibrated_ridge":
+                selector_str += (
+                    f"(alpha={args.oea_zo_calib_ridge_alpha}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
             method_details[method] = (
                 "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
                 "(binary Δ; multiclass scatter); "
@@ -423,6 +489,7 @@ def main() -> None:
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
                 f"infomax_lambda={args.oea_zo_infomax_lambda}; "
                 f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
+                f"{drift_str}{selector_str} "
                 f"holdout={args.oea_zo_holdout_fraction}; "
                 f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
@@ -454,6 +521,18 @@ def main() -> None:
                 marginal_prior_str = (
                     f", prior={args.oea_zo_marginal_prior}, mix={args.oea_zo_marginal_prior_mix}"
                 )
+            drift_str = ""
+            if str(args.oea_zo_drift_mode) != "none":
+                drift_str = (
+                    f"; drift={args.oea_zo_drift_mode} "
+                    f"(gamma={args.oea_zo_drift_gamma}, delta={args.oea_zo_drift_delta})"
+                )
+            selector_str = f"; selector={args.oea_zo_selector}"
+            if str(args.oea_zo_selector) == "calibrated_ridge":
+                selector_str += (
+                    f"(alpha={args.oea_zo_calib_ridge_alpha}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
             method_details[method] = (
                 "EA-ZO (target optimistic selection): source trains on EA-whitened data (no Q_s selection); "
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
@@ -461,6 +540,7 @@ def main() -> None:
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
                 f"infomax_lambda={args.oea_zo_infomax_lambda}; "
                 f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
+                f"{drift_str}{selector_str} "
                 f"holdout={args.oea_zo_holdout_fraction}; "
                 f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
@@ -477,7 +557,15 @@ def main() -> None:
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
 
-        results_df, y_true_all, y_pred_all, y_proba_all, _class_order, _models_by_subject = (
+        (
+            results_df,
+            pred_df,
+            y_true_all,
+            y_pred_all,
+            y_proba_all,
+            _class_order,
+            _models_by_subject,
+        ) = (
             loso_cross_subject_evaluation(
                 subject_data,
                 class_order=class_order,
@@ -504,6 +592,13 @@ def main() -> None:
                 oea_zo_reliable_alpha=float(args.oea_zo_reliable_alpha),
                 oea_zo_trust_lambda=float(args.oea_zo_trust_lambda),
                 oea_zo_trust_q0=str(args.oea_zo_trust_q0),
+                oea_zo_drift_mode=str(args.oea_zo_drift_mode),
+                oea_zo_drift_gamma=float(args.oea_zo_drift_gamma),
+                oea_zo_drift_delta=float(args.oea_zo_drift_delta),
+                oea_zo_selector=str(args.oea_zo_selector),
+                oea_zo_calib_ridge_alpha=float(args.oea_zo_calib_ridge_alpha),
+                oea_zo_calib_max_subjects=int(args.oea_zo_calib_max_subjects),
+                oea_zo_calib_seed=int(args.oea_zo_calib_seed),
                 oea_zo_min_improvement=float(args.oea_zo_min_improvement),
                 oea_zo_holdout_fraction=float(args.oea_zo_holdout_fraction),
                 oea_zo_warm_start=str(args.oea_zo_warm_start),
@@ -521,6 +616,7 @@ def main() -> None:
             )
         )
         results_by_method[method] = results_df
+        trial_predictions_by_method[method] = pred_df
         overall_by_method[method] = compute_metrics(
             y_true=y_true_all,
             y_pred=y_pred_all,
@@ -540,6 +636,19 @@ def main() -> None:
         overall_metrics_by_method=overall_by_method,
         method_details_by_method=method_details,
     )
+
+    # Detailed per-trial predictions (for per-subject analysis).
+    all_pred_parts: list[pd.DataFrame] = []
+    for method, pred_df in trial_predictions_by_method.items():
+        out_path = out_dir / f"{date_prefix}_{method}_predictions.csv"
+        pred_df.to_csv(out_path, index=False)
+        df2 = pred_df.copy()
+        df2.insert(0, "method", method)
+        all_pred_parts.append(df2)
+    if all_pred_parts:
+        pd.concat(all_pred_parts, axis=0, ignore_index=True).to_csv(
+            out_dir / f"{date_prefix}_predictions_all_methods.csv", index=False
+        )
 
     # Plots
     # 1) CSP patterns (fit on full data) + confusion matrices for each method

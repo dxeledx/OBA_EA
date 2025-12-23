@@ -25,9 +25,11 @@ pip install -U "git+https://github.com/NeuroTechX/moabb.git"
 conda run -n eeg python run_csp_lda_loso.py
 ```
 
-默认会在 `outputs/YYYYMMDD/HHMMSS/` 目录生成（同一天多次运行不会覆盖）：
+默认会在 `outputs/YYYYMMDD/<N>class/HHMMSS/` 目录生成（同一天多次运行不会覆盖；`<N>` 由 `--events` 决定）：
 
 - `YYYYMMDD_results.txt`
+- `YYYYMMDD_predictions_all_methods.csv`（每条 trial 的 `subject/y_true/y_pred/proba_*`，便于逐被试诊断）
+- `YYYYMMDD_<method>_predictions.csv`（各方法单独一份）
 - `YYYYMMDD_csp-lda_csp_patterns.png`
 - `YYYYMMDD_csp-lda_confusion_matrix.png`
 - `YYYYMMDD_ea-csp-lda_csp_patterns.png`
@@ -96,6 +98,8 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 - `--oea-zo-reliable-metric ...`：可靠样本连续加权（替代硬阈值选择）
 - `--oea-zo-min-improvement`：若 holdout 上相对 `Q=I` 改善不足则回退 `Q=I`
 - `--oea-zo-marginal-mode` + `--oea-zo-marginal-beta`：类边际均衡/先验约束（4 类可先试 `kl_uniform`；或用 `kl_prior` + `--oea-zo-marginal-prior` 替代“强行均匀”假设）
+- `--oea-zo-drift-mode`：预测漂移守门员（相对 EA 锚点 `Q=I`）：`penalty` 用 `γ·KL(p0||pQ)` 惩罚，`hard` 用阈值 `δ` 约束
+- `--oea-zo-selector`：候选集选择器（`objective` 或 `calibrated_ridge`；后者会在每个 LOSO fold 上用源被试离线标定一个“无标签证书”回归器，不用目标标签）
 - `--diagnose-subjects 4`：输出 ZO 过程诊断图（`p̄` 轨迹、objective vs acc 散点、候选表；分析用）
 
 运行示例：
