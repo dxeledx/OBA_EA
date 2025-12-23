@@ -118,6 +118,9 @@ def loso_cross_subject_evaluation(
     oea_zo_reliable_alpha: float = 10.0,
     oea_zo_trust_lambda: float = 0.0,
     oea_zo_trust_q0: str = "identity",
+    oea_zo_marginal_mode: str = "none",
+    oea_zo_marginal_beta: float = 0.0,
+    oea_zo_marginal_tau: float = 0.05,
     oea_zo_min_improvement: float = 0.0,
     oea_zo_holdout_fraction: float = 0.0,
     oea_zo_warm_start: str = "none",
@@ -180,6 +183,14 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_trust_lambda must be >= 0.")
     if oea_zo_trust_q0 not in {"identity", "delta"}:
         raise ValueError("oea_zo_trust_q0 must be one of: 'identity', 'delta'.")
+    if oea_zo_marginal_mode not in {"none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min"}:
+        raise ValueError(
+            "oea_zo_marginal_mode must be one of: 'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min'."
+        )
+    if float(oea_zo_marginal_beta) < 0.0:
+        raise ValueError("oea_zo_marginal_beta must be >= 0.")
+    if not (0.0 <= float(oea_zo_marginal_tau) <= 1.0):
+        raise ValueError("oea_zo_marginal_tau must be in [0,1].")
     if float(oea_zo_min_improvement) < 0.0:
         raise ValueError("oea_zo_min_improvement must be >= 0.")
     if not (0.0 <= float(oea_zo_holdout_fraction) < 1.0):
@@ -263,6 +274,9 @@ def loso_cross_subject_evaluation(
                 reliable_alpha=float(oea_zo_reliable_alpha),
                 trust_lambda=float(oea_zo_trust_lambda),
                 trust_q0=str(oea_zo_trust_q0),
+                marginal_mode=str(oea_zo_marginal_mode),
+                marginal_beta=float(oea_zo_marginal_beta),
+                marginal_tau=float(oea_zo_marginal_tau),
                 min_improvement=float(oea_zo_min_improvement),
                 holdout_fraction=float(oea_zo_holdout_fraction),
                 fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
@@ -409,6 +423,9 @@ def loso_cross_subject_evaluation(
                     reliable_alpha=float(oea_zo_reliable_alpha),
                     trust_lambda=float(oea_zo_trust_lambda),
                     trust_q0=str(oea_zo_trust_q0),
+                    marginal_mode=str(oea_zo_marginal_mode),
+                    marginal_beta=float(oea_zo_marginal_beta),
+                    marginal_tau=float(oea_zo_marginal_tau),
                     min_improvement=float(oea_zo_min_improvement),
                     holdout_fraction=float(oea_zo_holdout_fraction),
                     fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
@@ -627,6 +644,9 @@ def _optimize_qt_oea_zo(
     reliable_alpha: float,
     trust_lambda: float,
     trust_q0: str,
+    marginal_mode: str,
+    marginal_beta: float,
+    marginal_tau: float,
     min_improvement: float,
     holdout_fraction: float,
     fallback_min_marginal_entropy: float,
@@ -674,6 +694,14 @@ def _optimize_qt_oea_zo(
         raise ValueError("trust_lambda must be >= 0.")
     if trust_q0 not in {"identity", "delta"}:
         raise ValueError("trust_q0 must be one of: 'identity', 'delta'.")
+    if marginal_mode not in {"none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min"}:
+        raise ValueError(
+            "marginal_mode must be one of: 'none', 'l2_uniform', 'kl_uniform', 'hinge_uniform', 'hard_min'."
+        )
+    if float(marginal_beta) < 0.0:
+        raise ValueError("marginal_beta must be >= 0.")
+    if not (0.0 <= float(marginal_tau) <= 1.0):
+        raise ValueError("marginal_tau must be in [0,1].")
     if float(min_improvement) < 0.0:
         raise ValueError("min_improvement must be >= 0.")
 
@@ -809,6 +837,12 @@ def _optimize_qt_oea_zo(
             if w_sum <= 1e-12:
                 return 1e6
 
+            # For class-marginal regularization/constraints we use the *unweighted* marginal.
+            # This avoids skewing the marginal when reliability weights downweight certain samples/classes.
+            p_bar = np.mean(p, axis=0)
+            p_bar = np.clip(p_bar, 1e-12, 1.0)
+            p_bar = p_bar / float(np.sum(p_bar))
+
             if objective == "entropy":
                 val = float(np.sum(w * ent) / w_sum)
             elif objective == "confidence":
@@ -816,11 +850,26 @@ def _optimize_qt_oea_zo(
             else:
                 # infomax: maximize mutual information I(Y;X) = H(mean p) - mean H(p).
                 # We minimize: mean H(p) - λ * H(mean p).
-                p_bar = np.sum(p * w[:, None], axis=0) / w_sum
-                p_bar = np.clip(p_bar, 1e-12, 1.0)
-                p_bar = p_bar / float(np.sum(p_bar))
                 ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
                 val = float(np.sum(w * ent) / w_sum) - float(infomax_lambda) * ent_bar
+
+            if marginal_mode != "none":
+                tau = float(marginal_tau)
+                if marginal_mode == "hard_min":
+                    # Hard constraint: reject candidates whose class-marginal has near-zero mass.
+                    if float(np.min(p_bar)) < tau:
+                        return 1e6
+                elif float(marginal_beta) > 0.0:
+                    if marginal_mode == "l2_uniform":
+                        u = 1.0 / float(n_classes)
+                        pen = float(np.mean((p_bar - u) ** 2))
+                    elif marginal_mode == "kl_uniform":
+                        # KL(u || p_bar) up to a constant, with u uniform:
+                        #   KL(u||p_bar) = const - mean(log p_bar_k)
+                        pen = float(-np.mean(np.log(p_bar)))
+                    else:
+                        pen = float(np.mean(np.maximum(0.0, tau - p_bar) ** 2))
+                    val = float(val) + float(marginal_beta) * float(pen)
 
         if float(trust_lambda) > 0.0:
             val += float(trust_lambda) * float(np.mean((Q - q0) ** 2))

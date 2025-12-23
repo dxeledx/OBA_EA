@@ -134,6 +134,27 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods with objective=infomax: weight λ for H(mean p) term (must be > 0).",
     )
     p.add_argument(
+        "--oea-zo-marginal-mode",
+        choices=["none", "l2_uniform", "kl_uniform", "hinge_uniform", "hard_min"],
+        default="none",
+        help=(
+            "For oea-zo-* methods: add a class-marginal balance penalty on the predicted marginal p_bar "
+            "(none disables)."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-marginal-beta",
+        type=float,
+        default=0.0,
+        help="For oea-zo-* methods: class-marginal penalty weight β (>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-marginal-tau",
+        type=float,
+        default=0.05,
+        help="For oea-zo-* methods with marginal_mode=hinge_uniform: lower-bound threshold τ in [0,1].",
+    )
+    p.add_argument(
         "--oea-zo-reliable-metric",
         choices=["none", "confidence", "entropy"],
         default="none",
@@ -368,7 +389,9 @@ def main() -> None:
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
                 f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
-                f"infomax_lambda={args.oea_zo_infomax_lambda}; holdout={args.oea_zo_holdout_fraction}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; "
+                f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}); "
+                f"holdout={args.oea_zo_holdout_fraction}; "
                 f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
                 f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
@@ -399,7 +422,9 @@ def main() -> None:
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
                 f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
-                f"infomax_lambda={args.oea_zo_infomax_lambda}; holdout={args.oea_zo_holdout_fraction}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; "
+                f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}); "
+                f"holdout={args.oea_zo_holdout_fraction}; "
                 f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
                 f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
@@ -432,6 +457,9 @@ def main() -> None:
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
                 oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
                 oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
+                oea_zo_marginal_mode=str(args.oea_zo_marginal_mode),
+                oea_zo_marginal_beta=float(args.oea_zo_marginal_beta),
+                oea_zo_marginal_tau=float(args.oea_zo_marginal_tau),
                 oea_zo_reliable_metric=str(args.oea_zo_reliable_metric),
                 oea_zo_reliable_threshold=float(args.oea_zo_reliable_threshold),
                 oea_zo_reliable_alpha=float(args.oea_zo_reliable_alpha),
