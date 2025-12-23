@@ -19,5 +19,5 @@ File naming convention: `YYYYMMDD_<topic>.md`
 - `20251223_S4_certificate_diagnostics.md`: Diagnostics for the “unlabeled certificate failure” case (S4).
 - `20251223_safe_certificate_drift_guard.md`: Drift-guard + calibrated selector (Ridge) attempts for safer EA-ZO.
 - `20251223_bilevel_reliable_infomax.md`: Draft bilevel / reliable-weighted InfoMax idea.
+- `20251223_bilevel_imr_guard_4class.md`: Continuous bilevel (w,q) + calibrated guard implementation notes and 4-class runs.
 - `20251223_2c_4c_safe_runs.md`: Summary of the latest 2-class and 4-class “safe” runs after adding predictions CSV output.
-

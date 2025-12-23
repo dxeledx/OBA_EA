@@ -68,7 +68,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
-            "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
+            "oea-zo-imr-csp-lda, "
+            "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
+            "ea-zo-imr-csp-lda"
         ),
     )
     p.add_argument(
@@ -123,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-objective",
-        choices=["entropy", "infomax", "pseudo_ce", "confidence"],
+        choices=["entropy", "infomax", "pseudo_ce", "confidence", "entropy_bilevel", "infomax_bilevel"],
         default="entropy",
         help="For oea-zo-* methods: zero-order objective on target unlabeled data.",
     )
@@ -169,6 +171,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="For oea-zo-* methods with marginal_mode=kl_prior: mix π with uniform (0=no mix, 1=all uniform).",
+    )
+    p.add_argument(
+        "--oea-zo-bilevel-iters",
+        type=int,
+        default=5,
+        help="For oea-zo-* methods with objective=*_bilevel: lower-level iterations for (w,q) solver.",
+    )
+    p.add_argument(
+        "--oea-zo-bilevel-temp",
+        type=float,
+        default=1.0,
+        help="For oea-zo-* methods with objective=*_bilevel: temperature for soft labels q (T>0).",
+    )
+    p.add_argument(
+        "--oea-zo-bilevel-step",
+        type=float,
+        default=1.0,
+        help="For oea-zo-* methods with objective=*_bilevel: prior-matching step size (>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-bilevel-coverage-target",
+        type=float,
+        default=0.5,
+        help="For oea-zo-* methods with objective=*_bilevel: coverage target in (0,1] for gating prior strength.",
+    )
+    p.add_argument(
+        "--oea-zo-bilevel-coverage-power",
+        type=float,
+        default=1.0,
+        help="For oea-zo-* methods with objective=*_bilevel: power (>=0) applied to coverage gating.",
     )
     p.add_argument(
         "--oea-zo-reliable-metric",
@@ -232,12 +264,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "calibrated_ridge"],
+        choices=["objective", "calibrated_ridge", "calibrated_guard"],
         default="objective",
         help=(
             "For oea-zo-* methods: how to select Q_t from the candidate set. "
             "objective selects by the unlabeled objective (plus optional drift guard); "
-            "calibrated_ridge learns a regressor on source subjects to predict accuracy."
+            "calibrated_ridge learns a regressor on source subjects to predict improvement; "
+            "calibrated_guard learns a binary guard to reject likely negative transfer."
         ),
     )
     p.add_argument(
@@ -257,6 +290,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="For oea-zo-* methods with selector=calibrated_ridge: random seed for sampling pseudo-targets.",
+    )
+    p.add_argument(
+        "--oea-zo-calib-guard-c",
+        type=float,
+        default=1.0,
+        help="For oea-zo-* methods with selector=calibrated_guard: LogisticRegression C (>0).",
+    )
+    p.add_argument(
+        "--oea-zo-calib-guard-threshold",
+        type=float,
+        default=0.5,
+        help="For oea-zo-* methods with selector=calibrated_guard: keep candidates with P(pos) >= threshold.",
+    )
+    p.add_argument(
+        "--oea-zo-calib-guard-margin",
+        type=float,
+        default=0.0,
+        help="For oea-zo-* methods with selector=calibrated_guard: label as positive if improvement > margin.",
     )
     p.add_argument(
         "--oea-zo-min-improvement",
@@ -450,6 +501,7 @@ def main() -> None:
             "oea-zo-csp-lda",
             "oea-zo-ent-csp-lda",
             "oea-zo-im-csp-lda",
+            "oea-zo-imr-csp-lda",
             "oea-zo-pce-csp-lda",
             "oea-zo-conf-csp-lda",
         }:
@@ -458,6 +510,8 @@ def main() -> None:
                 zo_objective_override = "entropy"
             elif method == "oea-zo-im-csp-lda":
                 zo_objective_override = "infomax"
+            elif method == "oea-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
             elif method == "oea-zo-pce-csp-lda":
                 zo_objective_override = "pseudo_ce"
             elif method == "oea-zo-conf-csp-lda":
@@ -481,6 +535,18 @@ def main() -> None:
                     f"(alpha={args.oea_zo_calib_ridge_alpha}, "
                     f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
                 )
+            elif str(args.oea_zo_selector) == "calibrated_guard":
+                selector_str += (
+                    f"(C={args.oea_zo_calib_guard_c}, "
+                    f"thr={args.oea_zo_calib_guard_threshold}, margin={args.oea_zo_calib_guard_margin}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
+            elif str(args.oea_zo_selector) == "calibrated_guard":
+                selector_str += (
+                    f"(C={args.oea_zo_calib_guard_c}, "
+                    f"thr={args.oea_zo_calib_guard_threshold}, margin={args.oea_zo_calib_guard_margin}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
             method_details[method] = (
                 "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
                 "(binary Δ; multiclass scatter); "
@@ -501,6 +567,7 @@ def main() -> None:
         elif method in {
             "ea-zo-ent-csp-lda",
             "ea-zo-im-csp-lda",
+            "ea-zo-imr-csp-lda",
             "ea-zo-pce-csp-lda",
             "ea-zo-conf-csp-lda",
             "ea-zo-csp-lda",
@@ -510,6 +577,8 @@ def main() -> None:
                 zo_objective_override = "entropy"
             elif method == "ea-zo-im-csp-lda":
                 zo_objective_override = "infomax"
+            elif method == "ea-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
             elif method == "ea-zo-pce-csp-lda":
                 zo_objective_override = "pseudo_ce"
             elif method == "ea-zo-conf-csp-lda":
@@ -553,8 +622,10 @@ def main() -> None:
             raise ValueError(
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
-                "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
-                "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
+                "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
+                "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
+                "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
+                "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
 
         (
@@ -587,6 +658,11 @@ def main() -> None:
                 oea_zo_marginal_tau=float(args.oea_zo_marginal_tau),
                 oea_zo_marginal_prior=str(args.oea_zo_marginal_prior),
                 oea_zo_marginal_prior_mix=float(args.oea_zo_marginal_prior_mix),
+                oea_zo_bilevel_iters=int(args.oea_zo_bilevel_iters),
+                oea_zo_bilevel_temp=float(args.oea_zo_bilevel_temp),
+                oea_zo_bilevel_step=float(args.oea_zo_bilevel_step),
+                oea_zo_bilevel_coverage_target=float(args.oea_zo_bilevel_coverage_target),
+                oea_zo_bilevel_coverage_power=float(args.oea_zo_bilevel_coverage_power),
                 oea_zo_reliable_metric=str(args.oea_zo_reliable_metric),
                 oea_zo_reliable_threshold=float(args.oea_zo_reliable_threshold),
                 oea_zo_reliable_alpha=float(args.oea_zo_reliable_alpha),
@@ -599,6 +675,9 @@ def main() -> None:
                 oea_zo_calib_ridge_alpha=float(args.oea_zo_calib_ridge_alpha),
                 oea_zo_calib_max_subjects=int(args.oea_zo_calib_max_subjects),
                 oea_zo_calib_seed=int(args.oea_zo_calib_seed),
+                oea_zo_calib_guard_c=float(args.oea_zo_calib_guard_c),
+                oea_zo_calib_guard_threshold=float(args.oea_zo_calib_guard_threshold),
+                oea_zo_calib_guard_margin=float(args.oea_zo_calib_guard_margin),
                 oea_zo_min_improvement=float(args.oea_zo_min_improvement),
                 oea_zo_holdout_fraction=float(args.oea_zo_holdout_fraction),
                 oea_zo_warm_start=str(args.oea_zo_warm_start),

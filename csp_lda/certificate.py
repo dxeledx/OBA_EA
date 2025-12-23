@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -25,6 +25,28 @@ class RidgeCertificate:
         if features.ndim == 1:
             features = features.reshape(1, -1)
         return np.asarray(self.model.predict(features), dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class LogisticGuard:
+    """Binary guard model for rejecting likely negative-transfer candidates.
+
+    Models: P(improvement_over_identity > margin | unlabeled_features).
+    """
+
+    model: Pipeline
+    feature_names: tuple[str, ...]
+
+    def predict_pos_proba(self, features: np.ndarray) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float64)
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+        proba = np.asarray(self.model.predict_proba(features), dtype=np.float64)
+        if proba.ndim != 2:
+            raise ValueError("Unexpected proba shape.")
+        if proba.shape[1] == 1:
+            return proba[:, 0]
+        return proba[:, 1]
 
 
 def _safe_float(x) -> float:
@@ -58,28 +80,67 @@ def candidate_features_from_record(
     if n_keep >= 0 and n_best_total > 0:
         keep_ratio = float(n_keep) / float(n_best_total)
 
+    # Optional bilevel stats (may be missing on older runs).
+    coverage = _safe_float(rec.get("coverage", 0.0))
+    eff_n = _safe_float(rec.get("eff_n", 0.0))
+    mean_entropy_q = _safe_float(rec.get("mean_entropy_q", 0.0))
+
+    drift_best = _safe_float(rec.get("drift_best", 0.0))
+    drift_best_std = _safe_float(rec.get("drift_best_std", 0.0))
+    drift_best_q90 = _safe_float(rec.get("drift_best_q90", 0.0))
+    drift_best_q95 = _safe_float(rec.get("drift_best_q95", 0.0))
+    drift_best_max = _safe_float(rec.get("drift_best_max", 0.0))
+    drift_best_tail_frac = _safe_float(rec.get("drift_best_tail_frac", 0.0))
+
+    q_bar = np.asarray(rec.get("q_bar", np.zeros(n_classes)), dtype=np.float64).reshape(-1)
+    if q_bar.shape[0] != n_classes:
+        q_bar = np.zeros(n_classes, dtype=np.float64)
+    q_bar = np.clip(q_bar, 1e-12, 1.0)
+    q_bar = q_bar / float(np.sum(q_bar))
+    q_bar_ent = float(-np.sum(q_bar * np.log(q_bar)))
+
     feats: list[float] = [
         _safe_float(rec.get("objective_base", 0.0)),
         _safe_float(rec.get("pen_marginal", 0.0)),
-        _safe_float(rec.get("drift_best", 0.0)),
+        drift_best,
+        drift_best_std,
+        drift_best_q90,
+        drift_best_q95,
+        drift_best_max,
+        drift_best_tail_frac,
         _safe_float(rec.get("mean_entropy", 0.0)),
+        mean_entropy_q,
         _safe_float(rec.get("entropy_bar", 0.0)),
         _safe_float(keep_ratio),
+        coverage,
+        eff_n,
         _safe_float(p_bar_ent),
+        _safe_float(q_bar_ent),
     ]
     names: list[str] = [
         "objective_base",
         "pen_marginal",
         "drift_best",
+        "drift_best_std",
+        "drift_best_q90",
+        "drift_best_q95",
+        "drift_best_max",
+        "drift_best_tail_frac",
         "mean_entropy",
+        "mean_entropy_q",
         "entropy_bar",
         "keep_ratio",
+        "coverage",
+        "eff_n",
         "pbar_entropy",
+        "qbar_entropy",
     ]
 
     if include_pbar:
         feats.extend([_safe_float(x) for x in p_bar.tolist()])
         names.extend([f"pbar_{k}" for k in range(n_classes)])
+        feats.extend([_safe_float(x) for x in q_bar.tolist()])
+        names.extend([f"qbar_{k}" for k in range(n_classes)])
 
     return np.asarray(feats, dtype=np.float64), tuple(names)
 
@@ -108,6 +169,42 @@ def train_ridge_certificate(
     )
     model.fit(X, y)
     return RidgeCertificate(model=model, feature_names=tuple(feature_names))
+
+
+def train_logistic_guard(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    feature_names: Sequence[str],
+    c: float = 1.0,
+) -> LogisticGuard:
+    """Train a negative-transfer guard on pseudo-target subjects."""
+
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=int).reshape(-1)
+    if X.ndim != 2:
+        raise ValueError("X must be 2D.")
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("X/y length mismatch.")
+    if float(c) <= 0.0:
+        raise ValueError("c must be > 0.")
+
+    model = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "logreg",
+                LogisticRegression(
+                    C=float(c),
+                    max_iter=1000,
+                    class_weight="balanced",
+                    solver="lbfgs",
+                ),
+            ),
+        ]
+    )
+    model.fit(X, y)
+    return LogisticGuard(model=model, feature_names=tuple(feature_names))
 
 
 def select_by_predicted_improvement(
@@ -155,3 +252,58 @@ def select_by_predicted_improvement(
         raise ValueError("No candidates to select from.")
 
     return best
+
+
+def select_by_guarded_objective(
+    records: Iterable[dict],
+    *,
+    guard: LogisticGuard,
+    n_classes: int,
+    threshold: float = 0.5,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+) -> dict:
+    """Guarded selection: first reject likely negative-transfer candidates, then pick by objective.
+
+    Selection rule:
+    - keep candidates with P(pos_improve) >= threshold (identity is always allowed),
+    - apply optional drift hard/penalty,
+    - choose the minimum recorded `score` (or `objective` if score missing).
+    """
+
+    if not (0.0 <= float(threshold) <= 1.0):
+        raise ValueError("threshold must be in [0,1].")
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec in records:
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        p_pos = float(guard.predict_pos_proba(feats)[0])
+        if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        score = _safe_float(rec.get("score", rec.get("objective", 0.0)))
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if best is not None:
+        return best
+    if identity is not None:
+        return identity
+    for rec in records:
+        return rec
+    raise ValueError("No candidates to select from.")
