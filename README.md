@@ -77,6 +77,25 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 - `oea-zo-pce-csp-lda`（OEA-ZO-pCE，非光滑变体/消融）
 - `oea-zo-conf-csp-lda`（OEA-ZO-conf，置信度目标/消融）
 
+> 备注（4 类优先建议）：当前实现中，多类 OEA 的“源域选解集（Q_s）”经常会导致整体性能低于 `ea-csp-lda`。  
+> 因此在 4 类任务上，建议优先使用 **EA 训练 + 仅测试时优化 Q_t** 的 `ea-zo-*`（见下方）。
+
+### EA-ZO：只在测试时优化 Q_t（推荐用于 4 类）
+
+`ea-zo-*` 与 `oea-zo-*` 的区别是：源域训练阶段 **不做** `Q_s` 的“乐观选择”，只对每个被试做 EA 白化；然后在目标被试上冻结分类器，仅用无标签数据优化 `Q_t`。
+
+可用方法：
+
+- `ea-zo-csp-lda`（使用 `--oea-zo-objective`）
+- `ea-zo-ent-csp-lda` / `ea-zo-im-csp-lda` / `ea-zo-pce-csp-lda` / `ea-zo-conf-csp-lda`
+
+进一步“更不掉点”的安全化开关：
+
+- `--oea-zo-holdout-fraction`：无标签 holdout 选 best-iterate
+- `--oea-zo-trust-lambda` + `--oea-zo-trust-q0`：信任域（防负迁移）
+- `--oea-zo-reliable-metric ...`：可靠样本连续加权（替代硬阈值选择）
+- `--oea-zo-min-improvement`：若 holdout 上相对 `Q=I` 改善不足则回退 `Q=I`
+
 运行示例：
 
 ```bash

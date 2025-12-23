@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
-            "ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
+            "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
         ),
     )
     p.add_argument(
@@ -381,6 +381,7 @@ def main() -> None:
             "ea-zo-im-csp-lda",
             "ea-zo-pce-csp-lda",
             "ea-zo-conf-csp-lda",
+            "ea-zo-csp-lda",
         }:
             alignment = "ea_zo"
             if method == "ea-zo-ent-csp-lda":
@@ -411,7 +412,7 @@ def main() -> None:
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
-                "ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
+                "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
 
         results_df, y_true_all, y_pred_all, y_proba_all, _class_order, _models_by_subject = (
