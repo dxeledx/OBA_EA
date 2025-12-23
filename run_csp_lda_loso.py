@@ -173,6 +173,15 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods: trust-region anchor Q0 (identity|delta).",
     )
     p.add_argument(
+        "--oea-zo-min-improvement",
+        type=float,
+        default=0.0,
+        help=(
+            "For oea-zo-* methods: require at least this much holdout-objective improvement over identity "
+            "before accepting an adapted Q_t (0 disables)."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-holdout-fraction",
         type=float,
         default=0.0,
@@ -364,6 +373,7 @@ def main() -> None:
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
                 f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
                 f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
+                f"min_improve={args.oea_zo_min_improvement}; "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
         elif method in {
@@ -393,6 +403,7 @@ def main() -> None:
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
                 f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
                 f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
+                f"min_improve={args.oea_zo_min_improvement}; "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
         else:
@@ -425,6 +436,7 @@ def main() -> None:
                 oea_zo_reliable_alpha=float(args.oea_zo_reliable_alpha),
                 oea_zo_trust_lambda=float(args.oea_zo_trust_lambda),
                 oea_zo_trust_q0=str(args.oea_zo_trust_q0),
+                oea_zo_min_improvement=float(args.oea_zo_min_improvement),
                 oea_zo_holdout_fraction=float(args.oea_zo_holdout_fraction),
                 oea_zo_warm_start=str(args.oea_zo_warm_start),
                 oea_zo_warm_iters=int(args.oea_zo_warm_iters),

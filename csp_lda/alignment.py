@@ -174,13 +174,15 @@ def class_cov_diff(
     """Compute a symmetric discriminative covariance signature.
 
     - Binary (2-class): Δ = Cov(class1) - Cov(class0).
-    - Multiclass (>=3): a between-class covariance scatter matrix:
+    - Multiclass (>=3): an LDA-inspired discriminative operator:
 
         Let Σ_k = Cov(X | y=k), and Σ̄ = Σ_k π_k Σ_k (π_k empirical class frequency).
-        Return D = Σ_k π_k (Σ_k - Σ̄)(Σ_k - Σ̄).
+        Define within-scatter S_w := Σ̄ and between-scatter
+          S_b := Σ_k π_k (Σ_k - Σ̄)(Σ_k - Σ̄).
+        Return M := S_w^{-1/2} S_b S_w^{-1/2}.
 
-    This D is symmetric PSD and transforms as D -> Q D Qᵀ under orthogonal Q,
-    making it suitable for eigen-basis alignment (OEA).
+    This M is symmetric PSD and transforms as M -> Q M Qᵀ under orthogonal Q,
+    making it suitable for eigen-basis alignment (OEA) in multiclass settings.
     """
 
     class_order = [str(c) for c in class_order]
@@ -223,15 +225,28 @@ def class_cov_diff(
 
     w = np.asarray(weights, dtype=np.float64)
     w = w / float(np.sum(w))
-    cov_mean = np.zeros((n_channels, n_channels), dtype=np.float64)
+    sw = np.zeros((n_channels, n_channels), dtype=np.float64)
     for wk, cov_k in zip(w, covs):
-        cov_mean += float(wk) * cov_k
-    cov_mean = 0.5 * (cov_mean + cov_mean.T)
+        sw += float(wk) * cov_k
+    sw = 0.5 * (sw + sw.T)
 
-    sig = np.zeros((n_channels, n_channels), dtype=np.float64)
+    sb = np.zeros((n_channels, n_channels), dtype=np.float64)
     for wk, cov_k in zip(w, covs):
-        d = cov_k - cov_mean
-        sig += float(wk) * (d @ d)
+        d = cov_k - sw
+        sb += float(wk) * (d @ d)
+    sb = 0.5 * (sb + sb.T)
+
+    # Whitening by S_w^{-1/2} (stable via eigenvalue flooring).
+    eigvals, eigvecs = np.linalg.eigh(sw)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+    eigvecs = _fix_eigvec_signs(eigvecs)
+    floor = float(eps) * float(np.max(eigvals)) if np.max(eigvals) > 0 else float(eps)
+    eigvals = np.maximum(eigvals, floor)
+    sw_inv_sqrt = eigvecs @ np.diag(1.0 / np.sqrt(eigvals)) @ eigvecs.T
+
+    sig = sw_inv_sqrt @ sb @ sw_inv_sqrt
     sig = 0.5 * (sig + sig.T)
 
     # Light diagonal jitter for numerical stability (keeps symmetry).
