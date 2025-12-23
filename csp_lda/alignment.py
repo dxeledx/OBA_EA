@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 
+from typing import Sequence
+
 
 class BaseAligner(BaseEstimator, TransformerMixin):
     """Base interface for (future) alignment methods, e.g., Euclidean Alignment (EA).
@@ -165,32 +167,77 @@ def class_cov_diff(
     X: np.ndarray,
     y: np.ndarray,
     *,
-    class_order: tuple[str, str],
+    class_order: Sequence[str],
     eps: float = 1e-10,
     shrinkage: float = 0.0,
 ) -> np.ndarray:
-    """Compute symmetric class covariance difference Δ = Cov(class1) - Cov(class0).
+    """Compute a symmetric discriminative covariance signature.
 
-    This is used as a simple discriminative second-order signature in OEA.
+    - Binary (2-class): Δ = Cov(class1) - Cov(class0).
+    - Multiclass (>=3): a between-class covariance scatter matrix:
+
+        Let Σ_k = Cov(X | y=k), and Σ̄ = Σ_k π_k Σ_k (π_k empirical class frequency).
+        Return D = Σ_k π_k (Σ_k - Σ̄)(Σ_k - Σ̄).
+
+    This D is symmetric PSD and transforms as D -> Q D Qᵀ under orthogonal Q,
+    making it suitable for eigen-basis alignment (OEA).
     """
 
-    if len(class_order) != 2:
-        raise ValueError("class_cov_diff currently supports binary classification only.")
-    c0, c1 = class_order
+    class_order = [str(c) for c in class_order]
+    if len(class_order) < 2:
+        raise ValueError("class_order must contain at least 2 classes.")
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y)
     if X.ndim != 3:
         raise ValueError(f"Expected X with shape (n_trials,n_channels,n_times); got {X.shape}.")
 
-    mask0 = y == c0
-    mask1 = y == c1
-    if not (np.any(mask0) and np.any(mask1)):
-        raise ValueError("Both classes must be present to compute class_cov_diff.")
+    if len(class_order) == 2:
+        c0, c1 = class_order
+        mask0 = y == c0
+        mask1 = y == c1
+        if not (np.any(mask0) and np.any(mask1)):
+            raise ValueError("Both classes must be present to compute class_cov_diff.")
 
-    cov0 = EuclideanAligner(eps=eps, shrinkage=shrinkage).fit(X[mask0]).cov_
-    cov1 = EuclideanAligner(eps=eps, shrinkage=shrinkage).fit(X[mask1]).cov_
-    diff = cov1 - cov0
-    return 0.5 * (diff + diff.T)
+        cov0 = EuclideanAligner(eps=eps, shrinkage=shrinkage).fit(X[mask0]).cov_
+        cov1 = EuclideanAligner(eps=eps, shrinkage=shrinkage).fit(X[mask1]).cov_
+        diff = cov1 - cov0
+        return 0.5 * (diff + diff.T)
+
+    n_trials = int(X.shape[0])
+    n_channels = int(X.shape[1])
+    if n_trials < 2:
+        raise ValueError("Need at least 2 trials to compute class covariance signature.")
+
+    covs: list[np.ndarray] = []
+    weights: list[float] = []
+    for c in class_order:
+        mask = y == c
+        if not np.any(mask):
+            continue
+        cov_c = EuclideanAligner(eps=eps, shrinkage=shrinkage).fit(X[mask]).cov_
+        covs.append(cov_c)
+        weights.append(float(np.sum(mask)) / float(n_trials))
+
+    if len(covs) < 2:
+        raise ValueError("At least two classes must be present to compute a multiclass signature.")
+
+    w = np.asarray(weights, dtype=np.float64)
+    w = w / float(np.sum(w))
+    cov_mean = np.zeros((n_channels, n_channels), dtype=np.float64)
+    for wk, cov_k in zip(w, covs):
+        cov_mean += float(wk) * cov_k
+    cov_mean = 0.5 * (cov_mean + cov_mean.T)
+
+    sig = np.zeros((n_channels, n_channels), dtype=np.float64)
+    for wk, cov_k in zip(w, covs):
+        d = cov_k - cov_mean
+        sig += float(wk) * (d @ d)
+    sig = 0.5 * (sig + sig.T)
+
+    # Light diagonal jitter for numerical stability (keeps symmetry).
+    jitter = float(eps) * float(np.max(np.abs(np.diag(sig))) + 1.0)
+    sig = sig + jitter * np.eye(n_channels, dtype=np.float64)
+    return sig
 
 
 def orthogonal_align_symmetric(A: np.ndarray, B: np.ndarray) -> np.ndarray:

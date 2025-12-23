@@ -288,7 +288,8 @@ def main() -> None:
         elif method == "oea-csp-lda":
             alignment = "oea"
             method_details[method] = (
-                "OEA (discriminative optimistic selection): choose Q_s by aligning Δ=Cov(class1)-Cov(class0) to Δ_ref; "
+                "OEA (discriminative optimistic selection): choose Q_s by aligning a covariance signature to a reference "
+                "(binary: Δ=Cov(c1)-Cov(c0); multiclass: between-class covariance scatter); "
                 f"target uses {args.oea_pseudo_iters} pseudo-label iters "
                 f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage}, q_blend={args.oea_q_blend}, "
                 f"pseudo_mode={args.oea_pseudo_mode}, pseudo_conf={args.oea_pseudo_confidence}, "
@@ -313,7 +314,8 @@ def main() -> None:
 
             zo_obj = zo_objective_override or str(args.oea_zo_objective)
             method_details[method] = (
-                "OEA-ZO (target optimistic selection): source uses Δ-alignment for Q_s; "
+                "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
+                "(binary Δ; multiclass scatter); "
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
                 f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
@@ -428,10 +430,8 @@ def main() -> None:
             X_fit = np.concatenate(X_parts, axis=0)
             y_fit = np.concatenate(y_parts, axis=0)
         elif method == "oea-csp-lda" or method.startswith("oea-zo"):
-            # Visualization-only: use true labels to compute Δ_ref and Q_s for all subjects.
-            if len(class_order) != 2:
-                raise ValueError("oea-csp-lda visualization currently supports 2-class only.")
-            class_pair = (str(class_order[0]), str(class_order[1]))
+            # Visualization-only: use true labels to compute a covariance-signature reference and Q_s for all subjects.
+            class_labels = tuple([str(c) for c in class_order])
 
             ea_by_subject = {}
             z_by_subject = {}
@@ -445,7 +445,7 @@ def main() -> None:
                     class_cov_diff(
                         z,
                         sd.y,
-                        class_order=class_pair,
+                        class_order=class_labels,
                         eps=float(args.oea_eps),
                         shrinkage=float(args.oea_shrinkage),
                     )
@@ -458,7 +458,7 @@ def main() -> None:
                 d_s = class_cov_diff(
                     z_by_subject[int(s)],
                     sd.y,
-                    class_order=class_pair,
+                    class_order=class_labels,
                     eps=float(args.oea_eps),
                     shrinkage=float(args.oea_shrinkage),
                 )

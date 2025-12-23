@@ -228,10 +228,9 @@ def loso_cross_subject_evaluation(
             X_test = _align_one(test_subject)
             y_test = subject_data[test_subject].y
         else:
-            # alignment in {"oea","oea_zo"}: optimistic selection based on discriminative covariance difference Δ.
-            if len(class_order) != 2:
-                raise ValueError("oea currently supports 2-class problems only.")
-            class_pair = (str(class_order[0]), str(class_order[1]))
+            # alignment in {"oea","oea_zo"}: optimistic selection based on a discriminative
+            # covariance signature (binary: Δ=Cov(c1)-Cov(c0); multiclass: between-class scatter).
+            class_labels = tuple([str(c) for c in class_order])
 
             # 1) EA whitening for each subject (no Q yet).
             ea_by_subject: Dict[int, EuclideanAligner] = {}
@@ -248,7 +247,7 @@ def loso_cross_subject_evaluation(
                     class_cov_diff(
                         z_by_subject[int(s)],
                         subject_data[int(s)].y,
-                        class_order=class_pair,
+                        class_order=class_labels,
                         eps=oea_eps,
                         shrinkage=oea_shrinkage,
                     )
@@ -260,7 +259,7 @@ def loso_cross_subject_evaluation(
                 d_s = class_cov_diff(
                     z_by_subject[int(s)],
                     subject_data[int(s)].y,
-                    class_order=class_pair,
+                    class_order=class_labels,
                     eps=oea_eps,
                     shrinkage=oea_shrinkage,
                 )
@@ -281,13 +280,13 @@ def loso_cross_subject_evaluation(
                 for _ in range(int(max(0, oea_pseudo_iters))):
                     X_t_cur = apply_spatial_transform(q_t, z_t)
                     proba = model.predict_proba(X_t_cur)
-                    proba = _reorder_proba_columns(proba, model.classes_, list(class_pair))
+                    proba = _reorder_proba_columns(proba, model.classes_, list(class_labels))
 
                     if oea_pseudo_mode == "soft":
                         d_t = _soft_class_cov_diff(
                             z_t,
                             proba=proba,
-                            class_order=class_pair,
+                            class_order=class_labels,
                             eps=oea_eps,
                             shrinkage=oea_shrinkage,
                         )
@@ -296,7 +295,7 @@ def loso_cross_subject_evaluation(
                         keep = _select_pseudo_indices(
                             y_pseudo=y_pseudo,
                             proba=proba,
-                            class_order=class_pair,
+                            class_order=class_labels,
                             confidence=float(oea_pseudo_confidence),
                             topk_per_class=int(oea_pseudo_topk_per_class),
                             balance=bool(oea_pseudo_balance),
@@ -306,7 +305,7 @@ def loso_cross_subject_evaluation(
                         d_t = class_cov_diff(
                             z_t[keep],
                             y_pseudo[keep],
-                            class_order=class_pair,
+                            class_order=class_labels,
                             eps=oea_eps,
                             shrinkage=oea_shrinkage,
                         )
@@ -316,7 +315,7 @@ def loso_cross_subject_evaluation(
                 q_t = _optimize_qt_oea_zo(
                     z_t=z_t,
                     model=model,
-                    class_pair=class_pair,
+                    class_order=class_labels,
                     d_ref=d_ref,
                     eps=float(oea_eps),
                     shrinkage=float(oea_shrinkage),
@@ -384,7 +383,7 @@ def _select_pseudo_indices(
     *,
     y_pseudo: np.ndarray,
     proba: np.ndarray,
-    class_order: tuple[str, str],
+    class_order: Sequence[str],
     confidence: float,
     topk_per_class: int,
     balance: bool,
@@ -396,33 +395,48 @@ def _select_pseudo_indices(
 
     y_pseudo = np.asarray(y_pseudo)
     proba = np.asarray(proba, dtype=np.float64)
-    if proba.ndim != 2 or proba.shape[1] != 2:
-        raise ValueError(f"Expected proba shape (n_samples,2); got {proba.shape}.")
+    class_order = [str(c) for c in class_order]
+    n_classes = len(class_order)
+    if n_classes < 2:
+        raise ValueError("class_order must contain at least 2 classes.")
+    if proba.ndim != 2 or proba.shape[1] != n_classes:
+        raise ValueError(f"Expected proba shape (n_samples,{n_classes}); got {proba.shape}.")
 
-    pred_idx = np.where(y_pseudo == class_order[0], 0, 1)
+    class_to_idx = {c: i for i, c in enumerate(class_order)}
+    try:
+        pred_idx = np.fromiter((class_to_idx[str(c)] for c in y_pseudo), dtype=int, count=len(y_pseudo))
+    except KeyError as e:
+        raise ValueError(f"Pseudo label contains unknown class '{e.args[0]}'.") from e
+
     conf = proba[np.arange(len(y_pseudo)), pred_idx]
     keep = conf >= float(confidence)
     if not np.any(keep):
         return np.array([], dtype=int)
 
-    idx0 = np.where(keep & (y_pseudo == class_order[0]))[0]
-    idx1 = np.where(keep & (y_pseudo == class_order[1]))[0]
-    if idx0.size == 0 or idx1.size == 0:
+    idx_by_class: Dict[str, np.ndarray] = {}
+    for c in class_order:
+        idx_by_class[c] = np.where(keep & (y_pseudo == c))[0]
+    nonempty = [c for c in class_order if idx_by_class[c].size > 0]
+    if len(nonempty) < 2:
         return np.array([], dtype=int)
 
     if int(topk_per_class) > 0:
         k = int(topk_per_class)
-        idx0 = idx0[np.argsort(proba[idx0, 0])[::-1][:k]]
-        idx1 = idx1[np.argsort(proba[idx1, 1])[::-1][:k]]
-        if idx0.size == 0 or idx1.size == 0:
+        for c in nonempty:
+            idx = idx_by_class[c]
+            ci = class_to_idx[c]
+            idx = idx[np.argsort(proba[idx, ci])[::-1][:k]]
+            idx_by_class[c] = idx
+        nonempty = [c for c in class_order if idx_by_class[c].size > 0]
+        if len(nonempty) < 2:
             return np.array([], dtype=int)
 
     if balance:
-        k = int(min(idx0.size, idx1.size))
-        idx0 = idx0[:k]
-        idx1 = idx1[:k]
+        k = int(min(idx_by_class[c].size for c in nonempty))
+        for c in nonempty:
+            idx_by_class[c] = idx_by_class[c][:k]
 
-    out = np.concatenate([idx0, idx1], axis=0)
+    out = np.concatenate([idx_by_class[c] for c in nonempty], axis=0)
     return np.asarray(out, dtype=int)
 
 
@@ -430,65 +444,73 @@ def _soft_class_cov_diff(
     X: np.ndarray,
     *,
     proba: np.ndarray,
-    class_order: tuple[str, str],
+    class_order: Sequence[str],
     eps: float,
     shrinkage: float,
 ) -> np.ndarray:
-    """Soft pseudo-label covariance difference using class probabilities as weights.
+    """Soft pseudo-label covariance signature using class probabilities as weights.
 
     For each trial i, compute Ci = Xi Xi^T. Then:
-        Cov_c = sum_i w_{i,c} Ci / sum_i w_{i,c}
-    and Δ = Cov_{class1} - Cov_{class0}.
+      Σ_c = sum_i w_{i,c} Ci / sum_i w_{i,c}
+
+    - Binary: return Δ = Σ_1 - Σ_0.
+    - Multiclass: return between-class scatter D = Σ_k π_k (Σ_k - Σ̄)(Σ_k - Σ̄),
+      where π_k is the (soft) class mass and Σ̄ = Σ_k π_k Σ_k.
     """
 
     X = np.asarray(X, dtype=np.float64)
     proba = np.asarray(proba, dtype=np.float64)
+    class_order = [str(c) for c in class_order]
+    n_classes = len(class_order)
     if X.ndim != 3:
         raise ValueError(f"Expected X shape (n_trials,n_channels,n_times); got {X.shape}.")
-    if proba.ndim != 2 or proba.shape[0] != X.shape[0] or proba.shape[1] != 2:
-        raise ValueError(f"Expected proba shape (n_trials,2); got {proba.shape}.")
+    if proba.ndim != 2 or proba.shape[0] != X.shape[0] or proba.shape[1] != n_classes:
+        raise ValueError(f"Expected proba shape (n_trials,{n_classes}); got {proba.shape}.")
 
-    w0 = proba[:, 0].clip(0.0, 1.0)
-    w1 = proba[:, 1].clip(0.0, 1.0)
-    if float(np.sum(w0)) <= 0.0 or float(np.sum(w1)) <= 0.0:
-        raise ValueError("Soft pseudo-label weights degenerate (sum to zero).")
+    w = np.clip(proba, 0.0, 1.0)
+    row_sum = np.sum(w, axis=1, keepdims=True)
+    row_sum = np.maximum(row_sum, 1e-12)
+    w = w / row_sum
+    w_sum = np.sum(w, axis=0)  # (n_classes,)
+    if float(np.min(w_sum)) <= 0.0:
+        raise ValueError("Soft pseudo-label weights degenerate (some class mass sums to zero).")
 
     n_trials, n_channels, _ = X.shape
-    cov0 = np.zeros((n_channels, n_channels), dtype=np.float64)
-    cov1 = np.zeros((n_channels, n_channels), dtype=np.float64)
-    for i in range(n_trials):
-        xi = X[i]
-        ci = xi @ xi.T
-        cov0 += float(w0[i]) * ci
-        cov1 += float(w1[i]) * ci
-    cov0 /= float(np.sum(w0))
-    cov1 /= float(np.sum(w1))
-    cov0 = 0.5 * (cov0 + cov0.T)
-    cov1 = 0.5 * (cov1 + cov1.T)
+    # Trial covariances Ci = Xi Xi^T.
+    cov_trials = np.einsum("nct,ndt->ncd", X, X, optimize=True)
+    covs = np.einsum("nk,ncd->kcd", w, cov_trials, optimize=True)
+    covs = covs / w_sum[:, None, None]
+    covs = 0.5 * (covs + np.transpose(covs, (0, 2, 1)))
 
     if shrinkage > 0.0:
         alpha = float(shrinkage)
-        cov0 = (1.0 - alpha) * cov0 + alpha * (np.trace(cov0) / float(n_channels)) * np.eye(
-            n_channels, dtype=np.float64
-        )
-        cov1 = (1.0 - alpha) * cov1 + alpha * (np.trace(cov1) / float(n_channels)) * np.eye(
-            n_channels, dtype=np.float64
-        )
+        eye = np.eye(n_channels, dtype=np.float64)
+        traces = np.trace(covs, axis1=1, axis2=2) / float(n_channels)
+        covs = (1.0 - alpha) * covs + alpha * traces[:, None, None] * eye[None, :, :]
 
-    # eps only affects eigenvalue flooring in the EA helper; we mimic that by flooring on the diff stage.
-    diff = cov1 - cov0
-    diff = 0.5 * (diff + diff.T)
-    # Light diagonal jitter for numerical stability (keeps symmetry).
-    jitter = float(eps) * float(np.max(np.abs(np.diag(diff))) + 1.0)
-    diff = diff + jitter * np.eye(n_channels, dtype=np.float64)
-    return diff
+    if n_classes == 2:
+        diff = covs[1] - covs[0]
+        diff = 0.5 * (diff + diff.T)
+        jitter = float(eps) * float(np.max(np.abs(np.diag(diff))) + 1.0)
+        diff = diff + jitter * np.eye(n_channels, dtype=np.float64)
+        return diff
+
+    pi = w_sum / float(np.sum(w_sum))
+    cov_mean = np.einsum("k,kcd->cd", pi, covs, optimize=True)
+    cov_mean = 0.5 * (cov_mean + cov_mean.T)
+    delta = covs - cov_mean[None, :, :]
+    sig = np.einsum("k,kce,ked->cd", pi, delta, delta, optimize=True)
+    sig = 0.5 * (sig + sig.T)
+    jitter = float(eps) * float(np.max(np.abs(np.diag(sig))) + 1.0)
+    sig = sig + jitter * np.eye(n_channels, dtype=np.float64)
+    return sig
 
 
 def _optimize_qt_oea_zo(
     *,
     z_t: np.ndarray,
     model: TrainedModel,
-    class_pair: tuple[str, str],
+    class_order: Sequence[str],
     d_ref: np.ndarray,
     eps: float,
     shrinkage: float,
@@ -519,6 +541,10 @@ def _optimize_qt_oea_zo(
     z_t = np.asarray(z_t, dtype=np.float64)
     n_trials, n_channels, _n_times = z_t.shape
     rng = np.random.RandomState(int(seed))
+    class_order = [str(c) for c in class_order]
+    n_classes = len(class_order)
+    if n_classes < 2:
+        raise ValueError("class_order must contain at least 2 classes.")
 
     if pseudo_mode not in {"hard", "soft"}:
         raise ValueError("pseudo_mode must be one of: 'hard', 'soft'")
@@ -566,7 +592,7 @@ def _optimize_qt_oea_zo(
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        return _reorder_proba_columns(proba, lda.classes_, list(class_pair))
+        return _reorder_proba_columns(proba, lda.classes_, list(class_order))
 
     def _maybe_select_keep(proba: np.ndarray) -> np.ndarray:
         """Optionally select a reliable subset based on confidence/top-k/balance settings.
@@ -579,11 +605,12 @@ def _optimize_qt_oea_zo(
         if float(pseudo_confidence) <= 0.0 and int(pseudo_topk_per_class) == 0 and not bool(pseudo_balance):
             return np.arange(proba.shape[0], dtype=int)
         pred_idx = np.argmax(proba, axis=1)
-        y_pseudo = np.where(pred_idx == 0, class_pair[0], class_pair[1])
+        classes_arr = np.asarray(class_order, dtype=object)
+        y_pseudo = classes_arr[pred_idx]
         return _select_pseudo_indices(
             y_pseudo=y_pseudo,
             proba=proba,
-            class_order=class_pair,
+            class_order=class_order,
             confidence=float(pseudo_confidence),
             topk_per_class=int(pseudo_topk_per_class),
             balance=bool(pseudo_balance),
@@ -620,11 +647,12 @@ def _optimize_qt_oea_zo(
         else:
             # pseudo_ce: hard pseudo labels + optional filtering
             pred_idx = np.argmax(proba, axis=1)
-            y_pseudo = np.where(pred_idx == 0, class_pair[0], class_pair[1])
+            classes_arr = np.asarray(class_order, dtype=object)
+            y_pseudo = classes_arr[pred_idx]
             keep = _select_pseudo_indices(
                 y_pseudo=y_pseudo,
                 proba=proba,
-                class_order=class_pair,
+                class_order=class_order,
                 confidence=float(pseudo_confidence),
                 topk_per_class=int(pseudo_topk_per_class),
                 balance=bool(pseudo_balance),
@@ -649,13 +677,13 @@ def _optimize_qt_oea_zo(
         for _ in range(int(warm_iters)):
             X_cur = apply_spatial_transform(q_cur, z_t)
             proba = model.predict_proba(X_cur)
-            proba = _reorder_proba_columns(proba, model.classes_, list(class_pair))
+            proba = _reorder_proba_columns(proba, model.classes_, list(class_order))
             try:
                 if pseudo_mode == "soft":
                     d_t = _soft_class_cov_diff(
                         z_t,
                         proba=proba,
-                        class_order=class_pair,
+                        class_order=class_order,
                         eps=float(eps),
                         shrinkage=float(shrinkage),
                     )
@@ -664,7 +692,7 @@ def _optimize_qt_oea_zo(
                     keep = _select_pseudo_indices(
                         y_pseudo=y_pseudo,
                         proba=proba,
-                        class_order=class_pair,
+                        class_order=class_order,
                         confidence=float(pseudo_confidence),
                         topk_per_class=int(pseudo_topk_per_class),
                         balance=bool(pseudo_balance),
@@ -675,7 +703,7 @@ def _optimize_qt_oea_zo(
                     d_t = class_cov_diff(
                         z_t[keep],
                         y_pseudo[keep],
-                        class_order=class_pair,
+                        class_order=class_order,
                         eps=float(eps),
                         shrinkage=float(shrinkage),
                     )
@@ -760,7 +788,7 @@ def _optimize_qt_oea_zo(
                 power = np.maximum(power, 1e-20)
                 feats = np.log(power) if use_log else power
                 proba_cand = lda.predict_proba(feats)
-                proba_cand = _reorder_proba_columns(proba_cand, lda.classes_, list(class_pair))
+                proba_cand = _reorder_proba_columns(proba_cand, lda.classes_, list(class_order))
                 p_bar_c = np.mean(np.clip(proba_cand, 1e-12, 1.0), axis=0)
                 p_bar_c = p_bar_c / float(np.sum(p_bar_c))
                 ent_c = -float(np.sum(p_bar_c * np.log(p_bar_c)))
