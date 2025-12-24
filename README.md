@@ -142,3 +142,36 @@ conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-ent-csp-lda --oea-z
 ```bash
 conda run -n eeg python run_csp_lda_loso.py --methods oea-zo-ent-csp-lda,oea-zo-im-csp-lda,oea-zo-pce-csp-lda
 ```
+
+## 单被试跨 session（0train→1test）
+
+如果你想先避开“跨被试证书失效”导致的大幅负迁移，可以先做 **单被试跨 session**：
+对每个被试，用 `0train` 训练、在 `1test` 上测试；仍可比较 `ea-csp-lda` vs `ea-zo-* / oea-zo-*`。
+
+运行脚本：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py
+```
+
+输出目录：
+
+- `outputs/YYYYMMDD/<N>class/cross_session/HHMMSS/`
+
+4 类示例（推荐先对齐论文预处理）：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \\
+  --preprocess paper_fir --n-components 6 \\
+  --events left_hand,right_hand,feet,tongue \\
+  --methods ea-csp-lda,ea-zo-imr-csp-lda
+```
+
+2 类示例：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \\
+  --preprocess paper_fir --n-components 6 \\
+  --events left_hand,right_hand \\
+  --methods ea-csp-lda,ea-zo-imr-csp-lda
+```

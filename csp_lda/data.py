@@ -251,3 +251,29 @@ def split_by_subject(X: np.ndarray, y: np.ndarray, meta: pd.DataFrame) -> Dict[i
         mask = meta["subject"].to_numpy() == subject
         out[int(subject)] = SubjectData(subject=int(subject), X=X[mask], y=y[mask])
     return out
+
+
+def split_by_subject_session(
+    X: np.ndarray, y: np.ndarray, meta: pd.DataFrame
+) -> Dict[int, Dict[str, SubjectData]]:
+    """Split MOABB-returned arrays into {subject -> {session -> SubjectData}}."""
+
+    if "subject" not in meta.columns:
+        raise ValueError("MOABB metadata must contain a 'subject' column.")
+    if "session" not in meta.columns:
+        raise ValueError("MOABB metadata must contain a 'session' column.")
+
+    out: Dict[int, Dict[str, SubjectData]] = {}
+    subj_col = meta["subject"].to_numpy()
+    sess_col = meta["session"].astype(str).to_numpy()
+
+    for subject in sorted(meta["subject"].unique()):
+        subject = int(subject)
+        out[subject] = {}
+        subj_mask = subj_col == subject
+        sessions = sorted(pd.Series(sess_col[subj_mask]).unique().tolist())
+        for session in sessions:
+            sess_mask = sess_col == str(session)
+            mask = subj_mask & sess_mask
+            out[subject][str(session)] = SubjectData(subject=subject, X=X[mask], y=y[mask])
+    return out

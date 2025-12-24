@@ -714,6 +714,7 @@ def main() -> None:
         metric_columns=metric_columns,
         overall_metrics_by_method=overall_by_method,
         method_details_by_method=method_details,
+        protocol_name="LOSO",
     )
 
     # Detailed per-trial predictions (for per-subject analysis).

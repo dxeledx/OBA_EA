@@ -29,6 +29,7 @@ def write_results_txt(
     output_path: Path,
     metric_columns: Sequence[str],
     overall_metrics: dict | None = None,
+    protocol_name: str = "LOSO",
 ) -> None:
     summary_df = summarize_results(results_df, metric_columns=metric_columns)
 
@@ -48,7 +49,7 @@ def write_results_txt(
     lines.append(f"scikit-learn: {_pkg_version('scikit-learn')}")
     lines.append("")
 
-    lines.append("=== Per-Subject (LOSO) Results ===")
+    lines.append(f"=== Per-Subject ({protocol_name}) Results ===")
     lines.append(results_df.to_string(index=False))
     lines.append("")
 
@@ -75,6 +76,7 @@ def write_results_txt_multi(
     metric_columns: Sequence[str],
     overall_metrics_by_method: dict[str, dict[str, float]] | None = None,
     method_details_by_method: dict[str, str] | None = None,
+    protocol_name: str = "LOSO",
 ) -> None:
     lines = []
     lines.append(f"Date: {today_yyyymmdd()}")
@@ -103,7 +105,7 @@ def write_results_txt_multi(
         lines.append(f"=== Method: {method_name} ===")
         lines.append(df.to_string(index=False))
         lines.append("")
-        lines.append("Summary (across subjects):")
+        lines.append(f"Summary (across subjects, {protocol_name}):")
         lines.append(summarize_results(df, metric_columns=metric_columns).to_string())
         lines.append("")
         if overall_metrics_by_method is not None and method_name in overall_metrics_by_method:

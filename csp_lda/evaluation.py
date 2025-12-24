@@ -857,6 +857,524 @@ def loso_cross_subject_evaluation(
     )
 
 
+def cross_session_within_subject_evaluation(
+    subject_session_data: Dict[int, Dict[str, SubjectData]],
+    *,
+    train_sessions: Sequence[str],
+    test_sessions: Sequence[str],
+    class_order: Sequence[str],
+    n_components: int = 4,
+    average: str = "macro",
+    alignment: str = "ea",
+    oea_eps: float = 1e-10,
+    oea_shrinkage: float = 0.0,
+    oea_pseudo_iters: int = 2,
+    oea_q_blend: float = 1.0,
+    oea_pseudo_mode: str = "hard",
+    oea_pseudo_confidence: float = 0.0,
+    oea_pseudo_topk_per_class: int = 0,
+    oea_pseudo_balance: bool = False,
+    oea_zo_objective: str = "entropy",
+    oea_zo_infomax_lambda: float = 1.0,
+    oea_zo_reliable_metric: str = "none",
+    oea_zo_reliable_threshold: float = 0.0,
+    oea_zo_reliable_alpha: float = 10.0,
+    oea_zo_trust_lambda: float = 0.0,
+    oea_zo_trust_q0: str = "identity",
+    oea_zo_marginal_mode: str = "none",
+    oea_zo_marginal_beta: float = 0.0,
+    oea_zo_marginal_tau: float = 0.05,
+    oea_zo_marginal_prior: str = "uniform",
+    oea_zo_marginal_prior_mix: float = 0.0,
+    oea_zo_bilevel_iters: int = 5,
+    oea_zo_bilevel_temp: float = 1.0,
+    oea_zo_bilevel_step: float = 1.0,
+    oea_zo_bilevel_coverage_target: float = 0.5,
+    oea_zo_bilevel_coverage_power: float = 1.0,
+    oea_zo_drift_mode: str = "none",
+    oea_zo_drift_gamma: float = 0.0,
+    oea_zo_drift_delta: float = 0.0,
+    oea_zo_selector: str = "objective",
+    oea_zo_calib_ridge_alpha: float = 1.0,
+    oea_zo_calib_max_subjects: int = 0,
+    oea_zo_calib_seed: int = 0,
+    oea_zo_calib_guard_c: float = 1.0,
+    oea_zo_calib_guard_threshold: float = 0.5,
+    oea_zo_calib_guard_margin: float = 0.0,
+    oea_zo_min_improvement: float = 0.0,
+    oea_zo_holdout_fraction: float = 0.0,
+    oea_zo_warm_start: str = "none",
+    oea_zo_warm_iters: int = 1,
+    oea_zo_fallback_min_marginal_entropy: float = 0.0,
+    oea_zo_iters: int = 30,
+    oea_zo_lr: float = 0.5,
+    oea_zo_mu: float = 0.1,
+    oea_zo_k: int = 50,
+    oea_zo_seed: int = 0,
+    oea_zo_l2: float = 0.0,
+    diagnostics_dir: Path | None = None,
+    diagnostics_subjects: Sequence[int] = (),
+    diagnostics_tag: str = "",
+) -> Tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    List[str],
+    Dict[int, TrainedModel],
+]:
+    """Within-subject cross-session evaluation.
+
+    For each subject, train on `train_sessions` and test on `test_sessions`.
+    This is useful for single-subject cross-session domain shift (often smaller than cross-subject).
+    """
+
+    train_sessions = [str(s) for s in train_sessions]
+    test_sessions = [str(s) for s in test_sessions]
+    class_order = [str(c) for c in class_order]
+    if alignment not in {"none", "ea", "ea_zo", "oea_cov", "oea", "oea_zo"}:
+        raise ValueError("alignment must be one of: 'none', 'ea', 'ea_zo', 'oea_cov', 'oea', 'oea_zo'")
+    if oea_pseudo_mode not in {"hard", "soft"}:
+        raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
+
+    subjects = sorted(subject_session_data.keys())
+    if not subjects:
+        raise ValueError("Empty subject_session_data.")
+
+    diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
+
+    fold_rows: List[FoldResult] = []
+    models_by_subject: Dict[int, TrainedModel] = {}
+
+    y_true_all: List[np.ndarray] = []
+    y_pred_all: List[np.ndarray] = []
+    y_proba_all: List[np.ndarray] = []
+    subj_all: List[np.ndarray] = []
+    trial_all: List[np.ndarray] = []
+    train_sess_all: List[np.ndarray] = []
+    test_sess_all: List[np.ndarray] = []
+
+    class_labels = tuple(class_order)
+
+    for subject in subjects:
+        sess_map = subject_session_data[int(subject)]
+        available = sorted(sess_map.keys())
+        missing_train = [s for s in train_sessions if s not in sess_map]
+        missing_test = [s for s in test_sessions if s not in sess_map]
+        if missing_train or missing_test:
+            raise ValueError(
+                f"Subject {int(subject)} missing requested sessions. "
+                f"train_missing={missing_train}, test_missing={missing_test}, available={available}"
+            )
+
+        X_train = np.concatenate([sess_map[s].X for s in train_sessions], axis=0)
+        y_train = np.concatenate([sess_map[s].y for s in train_sessions], axis=0)
+        X_test_raw = np.concatenate([sess_map[s].X for s in test_sessions], axis=0)
+        y_test = np.concatenate([sess_map[s].y for s in test_sessions], axis=0)
+
+        do_diag = diagnostics_dir is not None and int(subject) in diag_subjects_set
+        zo_diag: dict | None = None
+        z_test_base: np.ndarray | None = None
+
+        if alignment == "none":
+            model = fit_csp_lda(X_train, y_train, n_components=n_components)
+            X_test = X_test_raw
+        else:
+            ea_train = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_train)
+            ea_test = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_test_raw)
+            z_train = ea_train.transform(X_train)
+            z_test = ea_test.transform(X_test_raw)
+            z_test_base = z_test
+
+            if alignment == "ea":
+                model = fit_csp_lda(z_train, y_train, n_components=n_components)
+                X_test = z_test
+            elif alignment == "oea_cov":
+                # Session-wise cov-eig alignment: align test eigen-basis to train eigen-basis.
+                _evals_ref, u_ref = sorted_eigh(ea_train.cov_)
+                q_t = u_ref @ ea_test.eigvecs_.T
+                q_t = blend_with_identity(q_t, oea_q_blend)
+                model = fit_csp_lda(z_train, y_train, n_components=n_components)
+                X_test = apply_spatial_transform(q_t, z_test)
+            else:
+                # Discriminative signature reference from labeled train session(s).
+                d_ref = class_cov_diff(
+                    z_train,
+                    y_train,
+                    class_order=class_labels,
+                    eps=oea_eps,
+                    shrinkage=oea_shrinkage,
+                )
+
+                if alignment == "oea":
+                    model = fit_csp_lda(z_train, y_train, n_components=n_components)
+                    q_t = np.eye(z_test.shape[1], dtype=np.float64)
+                    for _ in range(int(max(0, oea_pseudo_iters))):
+                        X_t_cur = apply_spatial_transform(q_t, z_test)
+                        proba = model.predict_proba(X_t_cur)
+                        proba = _reorder_proba_columns(proba, model.classes_, list(class_labels))
+
+                        if oea_pseudo_mode == "soft":
+                            d_t = _soft_class_cov_diff(
+                                z_test,
+                                proba=proba,
+                                class_order=class_labels,
+                                eps=oea_eps,
+                                shrinkage=oea_shrinkage,
+                            )
+                        else:
+                            y_pseudo = np.asarray(model.predict(X_t_cur))
+                            keep = _select_pseudo_indices(
+                                y_pseudo=y_pseudo,
+                                proba=proba,
+                                class_order=class_labels,
+                                confidence=float(oea_pseudo_confidence),
+                                topk_per_class=int(oea_pseudo_topk_per_class),
+                                balance=bool(oea_pseudo_balance),
+                            )
+                            if keep.size == 0:
+                                break
+                            d_t = class_cov_diff(
+                                z_test[keep],
+                                y_pseudo[keep],
+                                class_order=class_labels,
+                                eps=oea_eps,
+                                shrinkage=oea_shrinkage,
+                            )
+                        q_t = orthogonal_align_symmetric(d_t, d_ref)
+                        q_t = blend_with_identity(q_t, oea_q_blend)
+                    X_test = apply_spatial_transform(q_t, z_test)
+                else:
+                    # alignment == "ea_zo" or "oea_zo": freeze classifier, optimize Q_t on unlabeled target.
+                    model = fit_csp_lda(z_train, y_train, n_components=n_components)
+
+                    selector = str(oea_zo_selector)
+                    use_ridge = selector == "calibrated_ridge"
+                    use_guard = selector == "calibrated_guard"
+                    cert = None
+                    guard = None
+
+                    if use_ridge or use_guard:
+                        rng = np.random.RandomState(int(oea_zo_calib_seed) + int(subject) * 997)
+                        calib_subjects = [s for s in subjects if s != int(subject)]
+                        if int(oea_zo_calib_max_subjects) > 0 and int(oea_zo_calib_max_subjects) < len(
+                            calib_subjects
+                        ):
+                            rng.shuffle(calib_subjects)
+                            calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
+
+                        X_calib_rows: List[np.ndarray] = []
+                        y_calib_rows: List[float] = []
+                        y_guard_rows: List[int] = []
+                        feat_names: tuple[str, ...] | None = None
+
+                        for pseudo_t in calib_subjects:
+                            pseudo_map = subject_session_data[int(pseudo_t)]
+                            X_tr_p = np.concatenate([pseudo_map[s].X for s in train_sessions], axis=0)
+                            y_tr_p = np.concatenate([pseudo_map[s].y for s in train_sessions], axis=0)
+                            X_te_p = np.concatenate([pseudo_map[s].X for s in test_sessions], axis=0)
+                            y_te_p = np.concatenate([pseudo_map[s].y for s in test_sessions], axis=0)
+
+                            ea_tr_p = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_tr_p)
+                            ea_te_p = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_te_p)
+                            z_tr_p = ea_tr_p.transform(X_tr_p)
+                            z_te_p = ea_te_p.transform(X_te_p)
+
+                            model_p = fit_csp_lda(z_tr_p, y_tr_p, n_components=n_components)
+                            d_ref_p = class_cov_diff(
+                                z_tr_p,
+                                y_tr_p,
+                                class_order=class_labels,
+                                eps=oea_eps,
+                                shrinkage=oea_shrinkage,
+                            )
+
+                            marginal_prior_p: np.ndarray | None = None
+                            if oea_zo_marginal_mode == "kl_prior":
+                                if oea_zo_marginal_prior == "uniform":
+                                    marginal_prior_p = np.ones(len(class_labels), dtype=np.float64) / float(
+                                        len(class_labels)
+                                    )
+                                elif oea_zo_marginal_prior == "source":
+                                    counts = np.array([(y_tr_p == c).sum() for c in class_labels], dtype=np.float64)
+                                    marginal_prior_p = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                                else:
+                                    proba_id = model_p.predict_proba(z_te_p)
+                                    proba_id = _reorder_proba_columns(
+                                        proba_id, model_p.classes_, list(class_labels)
+                                    )
+                                    marginal_prior_p = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                                    marginal_prior_p = marginal_prior_p / float(np.sum(marginal_prior_p))
+                                mix = float(oea_zo_marginal_prior_mix)
+                                if mix > 0.0 and marginal_prior_p is not None:
+                                    u = np.ones_like(marginal_prior_p) / float(marginal_prior_p.shape[0])
+                                    marginal_prior_p = (1.0 - mix) * marginal_prior_p + mix * u
+                                    marginal_prior_p = marginal_prior_p / float(np.sum(marginal_prior_p))
+
+                            _q_sel, diag_p = _optimize_qt_oea_zo(
+                                z_t=z_te_p,
+                                model=model_p,
+                                class_order=class_labels,
+                                d_ref=d_ref_p,
+                                eps=float(oea_eps),
+                                shrinkage=float(oea_shrinkage),
+                                pseudo_mode=str(oea_pseudo_mode),
+                                warm_start=str(oea_zo_warm_start),
+                                warm_iters=int(oea_zo_warm_iters),
+                                q_blend=float(oea_q_blend),
+                                objective=str(oea_zo_objective),
+                                infomax_lambda=float(oea_zo_infomax_lambda),
+                                reliable_metric=str(oea_zo_reliable_metric),
+                                reliable_threshold=float(oea_zo_reliable_threshold),
+                                reliable_alpha=float(oea_zo_reliable_alpha),
+                                trust_lambda=float(oea_zo_trust_lambda),
+                                trust_q0=str(oea_zo_trust_q0),
+                                marginal_mode=str(oea_zo_marginal_mode),
+                                marginal_beta=float(oea_zo_marginal_beta),
+                                marginal_tau=float(oea_zo_marginal_tau),
+                                marginal_prior=marginal_prior_p,
+                                bilevel_iters=int(oea_zo_bilevel_iters),
+                                bilevel_temp=float(oea_zo_bilevel_temp),
+                                bilevel_step=float(oea_zo_bilevel_step),
+                                bilevel_coverage_target=float(oea_zo_bilevel_coverage_target),
+                                bilevel_coverage_power=float(oea_zo_bilevel_coverage_power),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                                holdout_fraction=float(oea_zo_holdout_fraction),
+                                fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
+                                iters=int(oea_zo_iters),
+                                lr=float(oea_zo_lr),
+                                mu=float(oea_zo_mu),
+                                n_rotations=int(oea_zo_k),
+                                seed=int(oea_zo_seed) + int(pseudo_t) * 997,
+                                l2=float(oea_zo_l2),
+                                pseudo_confidence=float(oea_pseudo_confidence),
+                                pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                                pseudo_balance=bool(oea_pseudo_balance),
+                                return_diagnostics=True,
+                            )
+
+                            recs = list(diag_p.get("records", []))
+                            if not recs:
+                                continue
+                            feats_list: List[np.ndarray] = []
+                            acc_list: List[float] = []
+                            acc_id: float | None = None
+                            for rec in recs:
+                                feats, names = candidate_features_from_record(rec, n_classes=len(class_labels))
+                                if feat_names is None:
+                                    feat_names = names
+                                Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                                yp = model_p.predict(apply_spatial_transform(Q, z_te_p))
+                                acc = float(accuracy_score(y_te_p, yp))
+                                if str(rec.get("kind", "")) == "identity":
+                                    acc_id = acc
+                                feats_list.append(feats)
+                                acc_list.append(acc)
+                            if acc_id is None:
+                                continue
+                            for feats, acc in zip(feats_list, acc_list):
+                                improve = float(acc - float(acc_id))
+                                y_calib_rows.append(float(improve))
+                                y_guard_rows.append(
+                                    1 if float(improve) >= float(oea_zo_calib_guard_margin) else 0
+                                )
+                                X_calib_rows.append(feats)
+
+                        if X_calib_rows and feat_names is not None:
+                            X_cal = np.stack(X_calib_rows, axis=0)
+                            if use_ridge:
+                                cert = train_ridge_certificate(
+                                    X_cal,
+                                    np.asarray(y_calib_rows, dtype=np.float64),
+                                    feature_names=feat_names,
+                                    alpha=float(oea_zo_calib_ridge_alpha),
+                                )
+                            if use_guard:
+                                y_guard = np.asarray(y_guard_rows, dtype=int).reshape(-1)
+                                if np.unique(y_guard).size >= 2:
+                                    guard = train_logistic_guard(
+                                        X_cal,
+                                        y_guard,
+                                        feature_names=feat_names,
+                                        c=float(oea_zo_calib_guard_c),
+                                    )
+                                else:
+                                    guard = None
+
+                    marginal_prior_vec: np.ndarray | None = None
+                    if oea_zo_marginal_mode == "kl_prior":
+                        if oea_zo_marginal_prior == "uniform":
+                            marginal_prior_vec = np.ones(len(class_labels), dtype=np.float64) / float(
+                                len(class_labels)
+                            )
+                        elif oea_zo_marginal_prior == "source":
+                            counts = np.array([(y_train == c).sum() for c in class_labels], dtype=np.float64)
+                            marginal_prior_vec = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                        else:
+                            proba_id = model.predict_proba(z_test)
+                            proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_labels))
+                            marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                            marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+                        mix = float(oea_zo_marginal_prior_mix)
+                        if mix > 0.0 and marginal_prior_vec is not None:
+                            u = np.ones_like(marginal_prior_vec) / float(marginal_prior_vec.shape[0])
+                            marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
+                            marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+
+                    want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None)
+                    opt_res = _optimize_qt_oea_zo(
+                        z_t=z_test,
+                        model=model,
+                        class_order=class_labels,
+                        d_ref=d_ref,
+                        eps=float(oea_eps),
+                        shrinkage=float(oea_shrinkage),
+                        pseudo_mode=str(oea_pseudo_mode),
+                        warm_start=str(oea_zo_warm_start),
+                        warm_iters=int(oea_zo_warm_iters),
+                        q_blend=float(oea_q_blend),
+                        objective=str(oea_zo_objective),
+                        infomax_lambda=float(oea_zo_infomax_lambda),
+                        reliable_metric=str(oea_zo_reliable_metric),
+                        reliable_threshold=float(oea_zo_reliable_threshold),
+                        reliable_alpha=float(oea_zo_reliable_alpha),
+                        trust_lambda=float(oea_zo_trust_lambda),
+                        trust_q0=str(oea_zo_trust_q0),
+                        marginal_mode=str(oea_zo_marginal_mode),
+                        marginal_beta=float(oea_zo_marginal_beta),
+                        marginal_tau=float(oea_zo_marginal_tau),
+                        marginal_prior=marginal_prior_vec,
+                        bilevel_iters=int(oea_zo_bilevel_iters),
+                        bilevel_temp=float(oea_zo_bilevel_temp),
+                        bilevel_step=float(oea_zo_bilevel_step),
+                        bilevel_coverage_target=float(oea_zo_bilevel_coverage_target),
+                        bilevel_coverage_power=float(oea_zo_bilevel_coverage_power),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        holdout_fraction=float(oea_zo_holdout_fraction),
+                        fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
+                        iters=int(oea_zo_iters),
+                        lr=float(oea_zo_lr),
+                        mu=float(oea_zo_mu),
+                        n_rotations=int(oea_zo_k),
+                        seed=int(oea_zo_seed) + int(subject) * 997,
+                        l2=float(oea_zo_l2),
+                        pseudo_confidence=float(oea_pseudo_confidence),
+                        pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                        pseudo_balance=bool(oea_pseudo_balance),
+                        return_diagnostics=bool(want_diag),
+                    )
+                    if want_diag:
+                        q_t, zo_diag = opt_res
+                    else:
+                        q_t = opt_res
+
+                    if zo_diag is not None:
+                        selected: dict | None = None
+                        if use_ridge and cert is not None:
+                            selected = select_by_predicted_improvement(
+                                zo_diag.get("records", []),
+                                cert=cert,
+                                n_classes=len(class_labels),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                            )
+                        elif use_guard and guard is not None:
+                            selected = select_by_guarded_objective(
+                                zo_diag.get("records", []),
+                                guard=guard,
+                                n_classes=len(class_labels),
+                                threshold=float(oea_zo_calib_guard_threshold),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                            )
+                        if selected is not None:
+                            q_t = np.asarray(selected.get("Q"), dtype=np.float64)
+
+                    X_test = apply_spatial_transform(q_t, z_test)
+
+        y_pred = np.asarray(model.predict(X_test))
+        y_proba = np.asarray(model.predict_proba(X_test))
+        y_proba = _reorder_proba_columns(y_proba, model.classes_, list(class_order))
+
+        if zo_diag is not None and do_diag and diagnostics_dir is not None:
+            _write_zo_diagnostics(
+                zo_diag,
+                out_dir=Path(diagnostics_dir),
+                tag=str(diagnostics_tag),
+                subject=int(subject),
+                model=model,
+                z_t=z_test_base if z_test_base is not None else X_test_raw,
+                y_true=y_test,
+                class_order=class_order,
+            )
+
+        metrics = compute_metrics(
+            y_true=y_test,
+            y_pred=y_pred,
+            y_proba=y_proba,
+            class_order=class_order,
+            average=average,
+        )
+
+        fold_rows.append(
+            FoldResult(
+                subject=int(subject),
+                n_train=int(len(y_train)),
+                n_test=int(len(y_test)),
+                **metrics,
+            )
+        )
+        models_by_subject[int(subject)] = model
+        y_true_all.append(y_test)
+        y_pred_all.append(y_pred)
+        y_proba_all.append(y_proba)
+        subj_all.append(np.full(shape=(int(len(y_test)),), fill_value=int(subject), dtype=int))
+        trial_all.append(np.arange(int(len(y_test)), dtype=int))
+        train_sess_all.append(np.full(shape=(int(len(y_test)),), fill_value=",".join(train_sessions), dtype=object))
+        test_sess_all.append(np.full(shape=(int(len(y_test)),), fill_value=",".join(test_sessions), dtype=object))
+
+    results_df = pd.DataFrame([asdict(r) for r in fold_rows]).sort_values("subject")
+    y_true_cat = np.concatenate(y_true_all, axis=0)
+    y_pred_cat = np.concatenate(y_pred_all, axis=0)
+    y_proba_cat = np.concatenate(y_proba_all, axis=0)
+    subj_cat = np.concatenate(subj_all, axis=0)
+    trial_cat = np.concatenate(trial_all, axis=0)
+    tr_sess_cat = np.concatenate(train_sess_all, axis=0)
+    te_sess_cat = np.concatenate(test_sess_all, axis=0)
+
+    pred_df = pd.DataFrame(
+        {
+            "subject": subj_cat,
+            "train_sessions": tr_sess_cat,
+            "test_sessions": te_sess_cat,
+            "trial": trial_cat,
+            "y_true": y_true_cat,
+            "y_pred": y_pred_cat,
+        }
+    )
+    for i, c in enumerate(list(class_order)):
+        pred_df[f"proba_{c}"] = y_proba_cat[:, int(i)]
+
+    return (
+        results_df,
+        pred_df,
+        y_true_cat,
+        y_pred_cat,
+        y_proba_cat,
+        list(class_order),
+        models_by_subject,
+    )
+
+
 def _write_zo_diagnostics(
     zo_diag: dict,
     *,
