@@ -88,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         choices=["entropy", "infomax", "pseudo_ce", "confidence", "entropy_bilevel", "infomax_bilevel"],
         default="infomax_bilevel",
     )
+    p.add_argument(
+        "--oea-zo-transform",
+        choices=["orthogonal", "rot_scale"],
+        default="orthogonal",
+        help="Channel-space transform family for ZO: orthogonal Q or rot_scale A=diag(exp(s))·Q.",
+    )
     p.add_argument("--oea-zo-infomax-lambda", type=float, default=1.0)
     p.add_argument(
         "--oea-zo-marginal-mode",
@@ -117,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--oea-zo-drift-delta", type=float, default=0.0)
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "calibrated_ridge", "calibrated_guard"],
+        choices=["objective", "calibrated_ridge", "calibrated_guard", "oracle"],
         default="objective",
     )
     p.add_argument("--oea-zo-calib-ridge-alpha", type=float, default=1.0)
@@ -284,6 +290,7 @@ def main() -> None:
             oea_pseudo_topk_per_class=int(args.oea_pseudo_topk_per_class),
             oea_pseudo_balance=bool(args.oea_pseudo_balance),
             oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
+            oea_zo_transform=str(args.oea_zo_transform),
             oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
             oea_zo_reliable_metric=str(args.oea_zo_reliable_metric),
             oea_zo_reliable_threshold=float(args.oea_zo_reliable_threshold),
@@ -382,4 +389,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

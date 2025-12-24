@@ -130,6 +130,16 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods: zero-order objective on target unlabeled data.",
     )
     p.add_argument(
+        "--oea-zo-transform",
+        choices=["orthogonal", "rot_scale"],
+        default="orthogonal",
+        help=(
+            "For oea-zo-* methods: channel-space transform family. "
+            "'orthogonal' uses Q∈O(C) (pure rotation); "
+            "'rot_scale' uses A=diag(exp(s))·Q (rotation + per-channel scaling)."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-infomax-lambda",
         type=float,
         default=1.0,
@@ -264,13 +274,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "calibrated_ridge", "calibrated_guard"],
+        choices=["objective", "calibrated_ridge", "calibrated_guard", "oracle"],
         default="objective",
         help=(
             "For oea-zo-* methods: how to select Q_t from the candidate set. "
             "objective selects by the unlabeled objective (plus optional drift guard); "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
-            "calibrated_guard learns a binary guard to reject likely negative transfer."
+            "calibrated_guard learns a binary guard to reject likely negative transfer; "
+            "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
     )
     p.add_argument(
@@ -551,7 +562,7 @@ def main() -> None:
                 "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
                 "(binary Δ; multiclass scatter); "
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
-                f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"(objective={zo_obj}, transform={args.oea_zo_transform}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
                 f"infomax_lambda={args.oea_zo_infomax_lambda}; "
                 f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
@@ -605,7 +616,7 @@ def main() -> None:
             method_details[method] = (
                 "EA-ZO (target optimistic selection): source trains on EA-whitened data (no Q_s selection); "
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
-                f"(objective={zo_obj}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"(objective={zo_obj}, transform={args.oea_zo_transform}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
                 f"infomax_lambda={args.oea_zo_infomax_lambda}; "
                 f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
@@ -652,6 +663,7 @@ def main() -> None:
                 oea_pseudo_topk_per_class=int(args.oea_pseudo_topk_per_class),
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
                 oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
+                oea_zo_transform=str(args.oea_zo_transform),
                 oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
                 oea_zo_marginal_mode=str(args.oea_zo_marginal_mode),
                 oea_zo_marginal_beta=float(args.oea_zo_marginal_beta),

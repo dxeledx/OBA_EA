@@ -66,6 +66,23 @@ Per-subject deltas (EA-ZO-IMR − EA):
 - Output: `outputs/20251224/4class/cross_session/4c_fir6_oea/20251224_results.txt`
 - `oea-csp-lda` mean acc: **0.674383**
 
+#### Oracle headroom (analysis-only)
+
+为了判断“方法还有没有上限空间”（是优化/证书问题，还是变换族太弱），我们做了 oracle 选解：
+在同一组候选变换中，用 **真实标签 accuracy** 选出最优候选（只用于上限分析，不作为方法设置）。
+
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_oracle_Q/20251224_results.txt`
+  - `ea-zo-imr-csp-lda` + oracle selector (orthogonal `Q`) mean acc: **0.681327**（几乎无 headroom）
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_oracle_rot_scale/20251224_results.txt`
+  - `ea-zo-imr-csp-lda` + oracle selector (rot+scale `A=diag(exp(s))·Q`) mean acc: **0.693673**（对比 EA +1.3503%）
+
+对应地，在同样的 rot+scale 变换族下，用当前无标签目标直接选（objective selector）会选错：
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_obj_rot_scale/20251224_results.txt`
+  - `ea-zo-imr-csp-lda` (objective selector, rot+scale) mean acc: **0.677083**（低于 EA）
+
+结论：在跨 session 的 4 类任务里，**“只旋转”很可能变换族太弱**；而加入“旋转+缩放”后出现显著 oracle headroom，
+说明主要瓶颈转移到了 **无标签证书/选择规则**（objective 与真实 accuracy 不一致）。
+
 ### 2-class (paper_fir, CSP=6)
 
 - Output: `outputs/20251224/2class/cross_session/2c_fir6_basic/20251224_results.txt`

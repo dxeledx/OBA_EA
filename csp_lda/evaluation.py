@@ -120,6 +120,7 @@ def loso_cross_subject_evaluation(
     oea_pseudo_topk_per_class: int = 0,
     oea_pseudo_balance: bool = False,
     oea_zo_objective: str = "entropy",
+    oea_zo_transform: str = "orthogonal",
     oea_zo_infomax_lambda: float = 1.0,
     oea_zo_reliable_metric: str = "none",
     oea_zo_reliable_threshold: float = 0.0,
@@ -237,8 +238,10 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_drift_gamma must be >= 0.")
     if float(oea_zo_drift_delta) < 0.0:
         raise ValueError("oea_zo_drift_delta must be >= 0.")
-    if oea_zo_selector not in {"objective", "calibrated_ridge", "calibrated_guard"}:
-        raise ValueError("oea_zo_selector must be one of: 'objective', 'calibrated_ridge', 'calibrated_guard'.")
+    if oea_zo_selector not in {"objective", "calibrated_ridge", "calibrated_guard", "oracle"}:
+        raise ValueError(
+            "oea_zo_selector must be one of: 'objective', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+        )
     if float(oea_zo_calib_ridge_alpha) <= 0.0:
         raise ValueError("oea_zo_calib_ridge_alpha must be > 0.")
     if int(oea_zo_calib_max_subjects) < 0:
@@ -334,11 +337,13 @@ def loso_cross_subject_evaluation(
             X_train = np.concatenate(X_train_parts, axis=0)
             y_train = np.concatenate(y_train_parts, axis=0)
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
+            y_test = subject_data[int(test_subject)].y
 
             # Optional: offline calibrated certificate / guard (trained only on source subjects in this fold).
             selector = str(oea_zo_selector)
             use_ridge = selector == "calibrated_ridge"
             use_guard = selector == "calibrated_guard"
+            use_oracle = selector == "oracle"
             cert = None
             guard = None
             if use_ridge or use_guard:
@@ -411,6 +416,7 @@ def loso_cross_subject_evaluation(
                         warm_iters=int(oea_zo_warm_iters),
                         q_blend=float(oea_q_blend),
                         objective=str(oea_zo_objective),
+                        transform=str(oea_zo_transform),
                         infomax_lambda=float(oea_zo_infomax_lambda),
                         reliable_metric=str(oea_zo_reliable_metric),
                         reliable_threshold=float(oea_zo_reliable_threshold),
@@ -527,7 +533,7 @@ def loso_cross_subject_evaluation(
                     marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
                     marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
-            want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None)
+            want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None) or use_oracle
             opt_res = _optimize_qt_oea_zo(
                 z_t=z_t,
                 model=model,
@@ -540,6 +546,7 @@ def loso_cross_subject_evaluation(
                 warm_iters=int(oea_zo_warm_iters),
                 q_blend=float(oea_q_blend),
                 objective=str(oea_zo_objective),
+                transform=str(oea_zo_transform),
                 infomax_lambda=float(oea_zo_infomax_lambda),
                 reliable_metric=str(oea_zo_reliable_metric),
                 reliable_threshold=float(oea_zo_reliable_threshold),
@@ -579,7 +586,18 @@ def loso_cross_subject_evaluation(
 
             if zo_diag is not None:
                 selected: dict | None = None
-                if use_ridge and cert is not None:
+                if use_oracle:
+                    best_rec = None
+                    best_acc = -1.0
+                    for rec in zo_diag.get("records", []):
+                        Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                        yp = model.predict(apply_spatial_transform(Q, z_t))
+                        acc = float(accuracy_score(y_test, yp))
+                        if acc > best_acc:
+                            best_acc = acc
+                            best_rec = rec
+                    selected = best_rec
+                elif use_ridge and cert is not None:
                     selected = select_by_predicted_improvement(
                         zo_diag.get("records", []),
                         cert=cert,
@@ -601,7 +619,6 @@ def loso_cross_subject_evaluation(
                 if selected is not None:
                     q_t = np.asarray(selected.get("Q"), dtype=np.float64)
             X_test = apply_spatial_transform(q_t, z_t)
-            y_test = subject_data[int(test_subject)].y
         elif alignment == "oea_cov":
             # OEA (cov-eig) selection: pick Q_s = U_ref U_sᵀ, where U_s is eigenbasis of C_s
             # and U_ref from the average covariance of the training subjects.
@@ -736,7 +753,10 @@ def loso_cross_subject_evaluation(
                         marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
                         marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
-                q_t = _optimize_qt_oea_zo(
+                selector = str(oea_zo_selector)
+                use_oracle = selector == "oracle"
+                want_diag = bool(do_diag) or use_oracle
+                opt_res = _optimize_qt_oea_zo(
                     z_t=z_t,
                     model=model,
                     class_order=class_labels,
@@ -748,6 +768,7 @@ def loso_cross_subject_evaluation(
                     warm_iters=int(oea_zo_warm_iters),
                     q_blend=float(oea_q_blend),
                     objective=str(oea_zo_objective),
+                    transform=str(oea_zo_transform),
                     infomax_lambda=float(oea_zo_infomax_lambda),
                     reliable_metric=str(oea_zo_reliable_metric),
                     reliable_threshold=float(oea_zo_reliable_threshold),
@@ -778,10 +799,25 @@ def loso_cross_subject_evaluation(
                     pseudo_confidence=float(oea_pseudo_confidence),
                     pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
                     pseudo_balance=bool(oea_pseudo_balance),
-                    return_diagnostics=bool(do_diag),
+                    return_diagnostics=bool(want_diag),
                 )
-                if do_diag:
-                    q_t, zo_diag = q_t
+                if want_diag:
+                    q_t, zo_diag = opt_res
+                    if use_oracle:
+                        y_test = subject_data[test_subject].y
+                        best_rec = None
+                        best_acc = -1.0
+                        for rec in zo_diag.get("records", []):
+                            Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                            yp = model.predict(apply_spatial_transform(Q, z_t))
+                            acc = float(accuracy_score(y_test, yp))
+                            if acc > best_acc:
+                                best_acc = acc
+                                best_rec = rec
+                        if best_rec is not None:
+                            q_t = np.asarray(best_rec.get("Q"), dtype=np.float64)
+                else:
+                    q_t = opt_res
                 z_test_base = z_t
 
             X_test = apply_spatial_transform(q_t, z_t)
@@ -875,6 +911,7 @@ def cross_session_within_subject_evaluation(
     oea_pseudo_topk_per_class: int = 0,
     oea_pseudo_balance: bool = False,
     oea_zo_objective: str = "entropy",
+    oea_zo_transform: str = "orthogonal",
     oea_zo_infomax_lambda: float = 1.0,
     oea_zo_reliable_metric: str = "none",
     oea_zo_reliable_threshold: float = 0.0,
@@ -1052,6 +1089,7 @@ def cross_session_within_subject_evaluation(
                     selector = str(oea_zo_selector)
                     use_ridge = selector == "calibrated_ridge"
                     use_guard = selector == "calibrated_guard"
+                    use_oracle = selector == "oracle"
                     cert = None
                     guard = None
 
@@ -1124,6 +1162,7 @@ def cross_session_within_subject_evaluation(
                                 warm_iters=int(oea_zo_warm_iters),
                                 q_blend=float(oea_q_blend),
                                 objective=str(oea_zo_objective),
+                                transform=str(oea_zo_transform),
                                 infomax_lambda=float(oea_zo_infomax_lambda),
                                 reliable_metric=str(oea_zo_reliable_metric),
                                 reliable_threshold=float(oea_zo_reliable_threshold),
@@ -1226,6 +1265,8 @@ def cross_session_within_subject_evaluation(
                             marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
                     want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None)
+                    if use_oracle:
+                        want_diag = True
                     opt_res = _optimize_qt_oea_zo(
                         z_t=z_test,
                         model=model,
@@ -1238,6 +1279,7 @@ def cross_session_within_subject_evaluation(
                         warm_iters=int(oea_zo_warm_iters),
                         q_blend=float(oea_q_blend),
                         objective=str(oea_zo_objective),
+                        transform=str(oea_zo_transform),
                         infomax_lambda=float(oea_zo_infomax_lambda),
                         reliable_metric=str(oea_zo_reliable_metric),
                         reliable_threshold=float(oea_zo_reliable_threshold),
@@ -1277,7 +1319,18 @@ def cross_session_within_subject_evaluation(
 
                     if zo_diag is not None:
                         selected: dict | None = None
-                        if use_ridge and cert is not None:
+                        if use_oracle:
+                            best_rec = None
+                            best_acc = -1.0
+                            for rec in zo_diag.get("records", []):
+                                Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                                yp = model.predict(apply_spatial_transform(Q, z_test))
+                                acc = float(accuracy_score(y_test, yp))
+                                if acc > best_acc:
+                                    best_acc = acc
+                                    best_rec = rec
+                            selected = best_rec
+                        elif use_ridge and cert is not None:
                             selected = select_by_predicted_improvement(
                                 zo_diag.get("records", []),
                                 cert=cert,
@@ -1650,6 +1703,7 @@ def _optimize_qt_oea_zo(
     warm_iters: int,
     q_blend: float,
     objective: str,
+    transform: str = "orthogonal",
     infomax_lambda: float,
     reliable_metric: str,
     reliable_threshold: float,
@@ -1682,7 +1736,7 @@ def _optimize_qt_oea_zo(
     pseudo_balance: bool,
     return_diagnostics: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict]:
-    """Zero-order optimize Q_t on the orthogonal group via a low-dim Givens parameterization.
+    """Zero-order optimize a target transform on channel space (Q or A) via a low-dim parameterization.
 
     This implements a practical "optimistic selection" variant for the target subject:
     freeze the trained classifier and update only Q_t using unlabeled target data.
@@ -1744,6 +1798,10 @@ def _optimize_qt_oea_zo(
     if float(bilevel_coverage_power) < 0.0:
         raise ValueError("bilevel_coverage_power must be >= 0.")
 
+    transform = str(transform)
+    if transform not in {"orthogonal", "rot_scale"}:
+        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale'")
+
     # Optional KL(π || p̄) prior (π fixed during optimization).
     marginal_prior_vec: np.ndarray | None = None
     if marginal_mode == "kl_prior":
@@ -1776,8 +1834,10 @@ def _optimize_qt_oea_zo(
 
     # Random set of (i,j) planes; fixed per fold for reproducibility.
     pairs = _sample_givens_pairs(n_channels=n_channels, n_rotations=int(n_rotations), rng=rng)
-    phi = np.zeros(len(pairs), dtype=np.float64)
-    best_phi = phi.copy()
+    rot_dim = int(len(pairs))
+    scale_dim = int(n_channels) if transform == "rot_scale" else 0
+    theta = np.zeros(rot_dim + scale_dim, dtype=np.float64)
+    best_theta = theta.copy()
     best_obj = float("inf")
 
     csp = model.csp
@@ -1787,22 +1847,34 @@ def _optimize_qt_oea_zo(
     # Determine whether CSP uses log(power).
     use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
 
-    def _proba_from_q(phi_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    max_abs_log_scale = 2.0  # exp(±2) ~= [0.135, 7.39]
+
+    def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
+        theta_vec = np.asarray(theta_vec, dtype=np.float64)
+        phi_vec = theta_vec[:rot_dim]
         Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi_vec)
         if float(q_blend) < 1.0:
             Q = blend_with_identity(Q, float(q_blend))
-        FQ = F @ Q
+        if transform == "rot_scale":
+            log_s = np.clip(theta_vec[rot_dim:], -max_abs_log_scale, max_abs_log_scale)
+            scales = np.exp(log_s).reshape(-1, 1)
+            return scales * Q
+        return Q
+
+    def _proba_from_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        A = _build_transform(theta_vec)
+        FQ = F @ A
         Y = np.einsum("kc,nct->nkt", FQ, z_data, optimize=True)
         power = np.mean(Y * Y, axis=2)
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), Q
+        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), A
 
     def _proba_from_Q(Q: np.ndarray, z_data: np.ndarray) -> np.ndarray:
         Q = np.asarray(Q, dtype=np.float64)
         if Q.shape != (int(n_channels), int(n_channels)):
-            raise ValueError(f"Expected Q shape ({n_channels},{n_channels}); got {Q.shape}.")
+            raise ValueError(f"Expected transform shape ({n_channels},{n_channels}); got {Q.shape}.")
         FQ = F @ Q
         Y = np.einsum("kc,nct->nkt", FQ, z_data, optimize=True)
         power = np.mean(Y * Y, axis=2)
@@ -1966,7 +2038,7 @@ def _optimize_qt_oea_zo(
         }
         return w, q, q_bar, stats
 
-    def _objective_from_proba(*, proba: np.ndarray, Q: np.ndarray, phi_vec: np.ndarray | None) -> float:
+    def _objective_from_proba(*, proba: np.ndarray, Q: np.ndarray, theta_vec: np.ndarray | None) -> float:
         proba = np.asarray(proba, dtype=np.float64)
         Q = np.asarray(Q, dtype=np.float64)
 
@@ -2086,12 +2158,12 @@ def _optimize_qt_oea_zo(
 
         if float(trust_lambda) > 0.0:
             val += float(trust_lambda) * float(np.mean((Q - q0) ** 2))
-        if l2 > 0.0 and phi_vec is not None:
-            val += float(l2) * float(np.mean(phi_vec * phi_vec))
+        if l2 > 0.0 and theta_vec is not None:
+            val += float(l2) * float(np.mean(theta_vec * theta_vec))
         return float(val)
 
     def _objective_details_from_proba(
-        *, proba: np.ndarray, Q: np.ndarray, phi_vec: np.ndarray | None
+        *, proba: np.ndarray, Q: np.ndarray, theta_vec: np.ndarray | None
     ) -> tuple[float, dict]:
         proba = np.asarray(proba, dtype=np.float64)
         Q = np.asarray(Q, dtype=np.float64)
@@ -2252,22 +2324,22 @@ def _optimize_qt_oea_zo(
             val += pen_trust
         details["pen_trust"] = float(pen_trust)
         pen_l2 = 0.0
-        if l2 > 0.0 and phi_vec is not None:
-            pen_l2 = float(l2) * float(np.mean(phi_vec * phi_vec))
+        if l2 > 0.0 and theta_vec is not None:
+            pen_l2 = float(l2) * float(np.mean(theta_vec * theta_vec))
             val += pen_l2
         details["pen_l2"] = float(pen_l2)
         details["objective"] = float(val)
         return float(val), details
 
-    def eval_phi(phi_vec: np.ndarray, z_data: np.ndarray) -> float:
-        proba, Q = _proba_from_q(phi_vec, z_data)
-        return _objective_from_proba(proba=proba, Q=Q, phi_vec=phi_vec)
+    def eval_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> float:
+        proba, Q = _proba_from_theta(theta_vec, z_data)
+        return _objective_from_proba(proba=proba, Q=Q, theta_vec=theta_vec)
 
-    def _record_candidate(*, kind: str, iter_idx: int, phi_vec: np.ndarray | None, Q: np.ndarray) -> None:
+    def _record_candidate(*, kind: str, iter_idx: int, theta_vec: np.ndarray | None, Q: np.ndarray) -> None:
         if not do_diag:
             return
         proba_best = _proba_from_Q(Q, z_best)
-        obj, details = _objective_details_from_proba(proba=proba_best, Q=Q, phi_vec=phi_vec)
+        obj, details = _objective_details_from_proba(proba=proba_best, Q=Q, theta_vec=theta_vec)
         drift_best_vec = _kl_drift_vec(proba_anchor_best, proba_best)
         drift_best = float(np.mean(drift_best_vec))
         proba_full = _proba_from_Q(Q, z_t)
@@ -2310,8 +2382,13 @@ def _optimize_qt_oea_zo(
             "eff_n": float(details.get("eff_n", np.nan)),
             "p_bar_full": p_bar_full.astype(np.float64),
             "q_bar": details.get("q_bar", None),
+            "transform": str(transform),
             "Q": np.asarray(Q, dtype=np.float64),
         }
+        if transform == "rot_scale" and theta_vec is not None and int(theta_vec.shape[0]) > rot_dim:
+            log_s = np.asarray(theta_vec[rot_dim:], dtype=np.float64)
+            rec["log_s_mean_abs"] = float(np.mean(np.abs(log_s)))
+            rec["log_s_max_abs"] = float(np.max(np.abs(log_s)))
         diag_records.append(rec)
 
     # Optional warm start: build Q_Δ from pseudo-label Δ-alignment and approximate it with our Givens pairs.
@@ -2361,9 +2438,9 @@ def _optimize_qt_oea_zo(
             q0 = blend_with_identity(q_delta, float(q_blend))
 
         if q_delta is not None:
-            # Greedy 2D Procrustes per plane to get a good phi initialization.
+            # Greedy 2D Procrustes per plane to get a good rotation initialization (angles on our Givens pairs).
             q_work = np.eye(int(n_channels), dtype=np.float64)
-            phi_init = np.zeros(len(pairs), dtype=np.float64)
+            phi_init = np.zeros(rot_dim, dtype=np.float64)
             for k, (i, j) in enumerate(pairs):
                 a = q_work[:, i]
                 b = q_work[:, j]
@@ -2373,84 +2450,83 @@ def _optimize_qt_oea_zo(
                 m12 = float(np.dot(a, tj))
                 m21 = float(np.dot(b, ti))
                 m22 = float(np.dot(b, tj))
-                theta = float(np.arctan2(m21 - m12, m11 + m22))
-                phi_init[k] = theta
+                angle = float(np.arctan2(m21 - m12, m11 + m22))
+                phi_init[k] = angle
                 # Apply the rotation to q_work columns i,j (right multiplication).
-                c = float(np.cos(theta))
-                s = float(np.sin(theta))
+                c = float(np.cos(angle))
+                s = float(np.sin(angle))
                 col_i = q_work[:, i].copy()
                 col_j = q_work[:, j].copy()
                 q_work[:, i] = c * col_i + s * col_j
                 q_work[:, j] = -s * col_i + c * col_j
             if warm_start == "delta":
-                phi = phi_init.copy()
+                theta[:rot_dim] = phi_init.copy()
 
     # Candidate set on holdout (Step A): always include identity (EA) and, if available, Q_delta.
     best_Q_override: np.ndarray | None = None
-    phi_id = np.zeros_like(best_phi)
+    theta_id = np.zeros_like(best_theta)
     proba_id = proba_anchor_best
-    obj_id = _objective_from_proba(proba=proba_id, Q=np.eye(int(n_channels), dtype=np.float64), phi_vec=phi_id)
+    obj_id = _objective_from_proba(proba=proba_id, Q=np.eye(int(n_channels), dtype=np.float64), theta_vec=theta_id)
     score_id = _score_with_drift(float(obj_id), 0.0)
-    _record_candidate(kind="identity", iter_idx=-1, phi_vec=phi_id, Q=np.eye(int(n_channels), dtype=np.float64))
-    best_phi = phi_id.copy()
+    _record_candidate(kind="identity", iter_idx=-1, theta_vec=theta_id, Q=np.eye(int(n_channels), dtype=np.float64))
+    best_theta = theta_id.copy()
     best_obj = float(obj_id)
     best_score = float(score_id)
 
     if q_delta is not None:
         q_delta_b = blend_with_identity(q_delta, float(q_blend))
         proba_qd = _proba_from_Q(q_delta_b, z_best)
-        obj_qd = _objective_from_proba(proba=proba_qd, Q=q_delta_b, phi_vec=None)
+        obj_qd = _objective_from_proba(proba=proba_qd, Q=q_delta_b, theta_vec=None)
         drift_qd = _kl_drift(proba_anchor_best, proba_qd)
         score_qd = _score_with_drift(float(obj_qd), float(drift_qd))
-        _record_candidate(kind="q_delta", iter_idx=-2, phi_vec=None, Q=q_delta_b)
+        _record_candidate(kind="q_delta", iter_idx=-2, theta_vec=None, Q=q_delta_b)
         if score_qd < best_score:
             best_obj = float(obj_qd)
             best_score = float(score_qd)
             best_Q_override = q_delta_b
 
-    # If we warm-started (Givens), compare that initial point too.
-    if np.any(phi != 0.0):
-        proba_init, Q_init = _proba_from_q(phi, z_best)
-        obj_init = _objective_from_proba(proba=proba_init, Q=Q_init, phi_vec=phi)
+    # If we warm-started (rotation angles), compare that initial point too.
+    if np.any(theta != 0.0):
+        proba_init, Q_init = _proba_from_theta(theta, z_best)
+        obj_init = _objective_from_proba(proba=proba_init, Q=Q_init, theta_vec=theta)
         drift_init = _kl_drift(proba_anchor_best, proba_init)
         score_init = _score_with_drift(float(obj_init), float(drift_init))
         if do_diag:
-            q_init = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi)
-            q_init = blend_with_identity(q_init, float(q_blend))
-            _record_candidate(kind="warm_init", iter_idx=0, phi_vec=phi.copy(), Q=q_init)
+            q_init = _build_transform(theta)
+            _record_candidate(kind="warm_init", iter_idx=0, theta_vec=theta.copy(), Q=q_init)
         if score_init < best_score:
             best_obj = float(obj_init)
             best_score = float(score_init)
-            best_phi = phi.copy()
+            best_theta = theta.copy()
             best_Q_override = None
 
     # SPSA / two-point random-direction estimator
     for t in range(int(iters)):
-        u = rng.choice([-1.0, 1.0], size=phi.shape[0]).astype(np.float64)
-        phi_plus = phi + float(mu) * u
-        phi_minus = phi - float(mu) * u
-        f_plus = eval_phi(phi_plus, z_opt)
-        f_minus = eval_phi(phi_minus, z_opt)
+        u = rng.choice([-1.0, 1.0], size=theta.shape[0]).astype(np.float64)
+        theta_plus = theta + float(mu) * u
+        theta_minus = theta - float(mu) * u
+        f_plus = eval_theta(theta_plus, z_opt)
+        f_minus = eval_theta(theta_minus, z_opt)
         g = (f_plus - f_minus) / (2.0 * float(mu)) * u
         step = float(lr) / np.sqrt(float(t) + 1.0)
-        phi = phi - step * g
+        theta = theta - step * g
 
         # Track best iterate (not the +/- perturbations used only for gradient estimation).
-        proba_tmp, Q_tmp = _proba_from_q(phi, z_best)
-        f_phi = _objective_from_proba(proba=proba_tmp, Q=Q_tmp, phi_vec=phi)
+        proba_tmp, Q_tmp = _proba_from_theta(theta, z_best)
+        f_theta = _objective_from_proba(proba=proba_tmp, Q=Q_tmp, theta_vec=theta)
         drift_tmp = _kl_drift(proba_anchor_best, proba_tmp)
-        score_tmp = _score_with_drift(float(f_phi), float(drift_tmp))
+        score_tmp = _score_with_drift(float(f_theta), float(drift_tmp))
         if do_diag:
-            _record_candidate(kind="iter", iter_idx=int(t + 1), phi_vec=phi.copy(), Q=Q_tmp)
+            _record_candidate(kind="iter", iter_idx=int(t + 1), theta_vec=theta.copy(), Q=Q_tmp)
         if score_tmp < best_score:
-            best_obj = float(f_phi)
+            best_obj = float(f_theta)
             best_score = float(score_tmp)
-            best_phi = phi.copy()
+            best_theta = theta.copy()
             best_Q_override = None
 
     # Optional safety: require a minimum improvement over identity (otherwise keep identity).
     if float(min_improvement) > 0.0 and (float(score_id) - float(best_score)) < float(min_improvement):
-        best_phi = phi_id.copy()
+        best_theta = theta_id.copy()
         best_obj = float(obj_id)
         best_score = float(score_id)
         best_Q_override = None
@@ -2458,8 +2534,7 @@ def _optimize_qt_oea_zo(
     if best_Q_override is not None:
         Q = best_Q_override
     else:
-        Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=best_phi)
-        Q = blend_with_identity(Q, float(q_blend))
+        Q = _build_transform(best_theta)
 
     # Safety fallback: if target predictions collapse to a single class, fall back to a safer Q.
     if float(fallback_min_marginal_entropy) > 0.0:
@@ -2495,6 +2570,7 @@ def _optimize_qt_oea_zo(
         diag = {
             "records": diag_records,
             "class_order": list(class_order),
+            "transform": str(transform),
             "marginal_mode": str(marginal_mode),
             "marginal_prior": None if marginal_prior_vec is None else marginal_prior_vec.astype(np.float64),
             "drift_mode": str(drift_mode),
