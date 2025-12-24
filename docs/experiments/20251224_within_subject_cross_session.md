@@ -170,3 +170,29 @@ Rot+scale:
 - `ea-zo-imr-csp-lda` + evidence selector mean acc: **0.801698**（低于 EA）
 
 结论：2 类上 evidence selector 也没有优于已有 IMR/objective 选择（且 rot+scale 可能更不稳）。
+
+## MixUp probe selector attempt (Dec 24)
+
+动机：既然 oracle headroom 在 rot+scale 里存在，但常规无标签证书（objective / evidence）难以选到好解，
+尝试一个更“判别式”的无标签证书：在 CSP 特征空间做 MixUp-style probe，一致性越好分数越低（越优）。
+
+Command:
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector probe_mixup \
+  --run-name 4c_fir6_probe_mixup_sel_rot_scale
+```
+
+Results:
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_probe_mixup_sel_rot_scale/20251224_results.txt`
+- `ea-csp-lda` mean acc: **0.680170**
+- `ea-zo-imr-csp-lda` + probe_mixup selector mean acc: **0.680556**（+0.0386%）
+
+结论：probe_mixup 相比 “objective selector (rot+scale)” 的 **明显掉点**（0.677083）更稳（接近 EA），
+但仍未能逼近 oracle headroom（0.693673），说明证书/选择问题仍然是主瓶颈。
