@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--oea-zo-objective",
-        choices=["entropy", "infomax", "pseudo_ce", "confidence", "entropy_bilevel", "infomax_bilevel"],
+        choices=["entropy", "infomax", "pseudo_ce", "confidence", "lda_nll", "entropy_bilevel", "infomax_bilevel"],
         default="infomax_bilevel",
     )
     p.add_argument(
@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--oea-zo-drift-delta", type=float, default=0.0)
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "calibrated_ridge", "calibrated_guard", "oracle"],
+        choices=["objective", "evidence", "calibrated_ridge", "calibrated_guard", "oracle"],
         default="objective",
     )
     p.add_argument("--oea-zo-calib-ridge-alpha", type=float, default=1.0)

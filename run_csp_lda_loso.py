@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-objective",
-        choices=["entropy", "infomax", "pseudo_ce", "confidence", "entropy_bilevel", "infomax_bilevel"],
+        choices=["entropy", "infomax", "pseudo_ce", "confidence", "lda_nll", "entropy_bilevel", "infomax_bilevel"],
         default="entropy",
         help="For oea-zo-* methods: zero-order objective on target unlabeled data.",
     )
@@ -274,11 +274,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "calibrated_ridge", "calibrated_guard", "oracle"],
+        choices=["objective", "evidence", "calibrated_ridge", "calibrated_guard", "oracle"],
         default="objective",
         help=(
             "For oea-zo-* methods: how to select Q_t from the candidate set. "
             "objective selects by the unlabeled objective (plus optional drift guard); "
+            "evidence selects by LDA evidence (-log p(z)) under the frozen CSP+LDA model; "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
             "calibrated_guard learns a binary guard to reject likely negative transfer; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."

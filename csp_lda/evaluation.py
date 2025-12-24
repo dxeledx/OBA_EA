@@ -26,11 +26,99 @@ from .alignment import (
 from .model import TrainedModel, fit_csp_lda
 from .certificate import (
     candidate_features_from_record,
+    select_by_evidence_nll,
     select_by_guarded_objective,
     select_by_predicted_improvement,
     train_logistic_guard,
     train_ridge_certificate,
 )
+
+def _csp_features_from_filters(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
+    """Compute CSP log-power features (same convention as ZO evaluation)."""
+
+    X = np.asarray(X, dtype=np.float64)
+    csp = model.csp
+    F = np.asarray(csp.filters_[: int(csp.n_components)], dtype=np.float64)
+
+    use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
+    Y = np.einsum("kc,nct->nkt", F, X, optimize=True)
+    power = np.mean(Y * Y, axis=2)
+    power = np.maximum(power, 1e-20)
+    return np.log(power) if use_log else power
+
+
+def _compute_lda_evidence_params(
+    *,
+    model: TrainedModel,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    class_order: Sequence[str],
+    ridge: float = 1e-6,
+) -> dict:
+    """Build Gaussian-mixture evidence params from CSP+LDA training data.
+
+    Returns a dict with:
+    - mu: (K,d) class means in feature space
+    - priors: (K,) class priors
+    - cov: (d,d) pooled within-class covariance (ridge-stabilized)
+    - cov_inv: (d,d) inverse covariance
+    - logdet: log|cov|
+    """
+
+    class_order = [str(c) for c in class_order]
+    feats = _csp_features_from_filters(model=model, X=X_train)
+    y_train = np.asarray(y_train)
+    n = int(feats.shape[0])
+    if n != int(y_train.shape[0]):
+        raise ValueError("X_train/y_train length mismatch for evidence params.")
+    k = int(len(class_order))
+    if k < 2:
+        raise ValueError("Need at least 2 classes for evidence params.")
+
+    mu = np.zeros((k, feats.shape[1]), dtype=np.float64)
+    priors = np.zeros(k, dtype=np.float64)
+    present = 0
+    for i, c in enumerate(class_order):
+        mask = y_train == c
+        if not np.any(mask):
+            continue
+        present += 1
+        priors[i] = float(np.sum(mask)) / float(n)
+        mu[i] = np.mean(feats[mask], axis=0)
+    if present < 2:
+        raise ValueError("At least two classes must be present to compute evidence params.")
+
+    priors = np.clip(priors, 1e-12, 1.0)
+    priors = priors / float(np.sum(priors))
+
+    # Pooled within-class covariance.
+    d = int(feats.shape[1])
+    scatter = np.zeros((d, d), dtype=np.float64)
+    for i, c in enumerate(class_order):
+        mask = y_train == c
+        if not np.any(mask):
+            continue
+        fc = feats[mask] - mu[i]
+        scatter += fc.T @ fc
+
+    denom = max(1, int(n - present))
+    cov = scatter / float(denom)
+    cov = 0.5 * (cov + cov.T)
+    scale = float(np.trace(cov)) / float(d) if float(np.trace(cov)) > 0.0 else 1.0
+    cov = cov + float(ridge) * float(scale) * np.eye(d, dtype=np.float64)
+    sign, logdet = np.linalg.slogdet(cov)
+    if sign <= 0.0 or not np.isfinite(logdet):
+        cov = cov + 1e-3 * np.eye(d, dtype=np.float64)
+        sign, logdet = np.linalg.slogdet(cov)
+    cov_inv = np.linalg.pinv(cov) if (sign <= 0.0 or not np.isfinite(logdet)) else np.linalg.inv(cov)
+
+    return {
+        "mu": mu,
+        "priors": priors,
+        "cov": cov,
+        "cov_inv": cov_inv,
+        "logdet": float(logdet) if np.isfinite(logdet) else float("nan"),
+    }
 
 
 @dataclass(frozen=True)
@@ -209,12 +297,13 @@ def loso_cross_subject_evaluation(
         "pseudo_ce",
         "confidence",
         "infomax",
+        "lda_nll",
         "entropy_bilevel",
         "infomax_bilevel",
     }:
         raise ValueError(
             "oea_zo_objective must be one of: "
-            "'entropy', 'pseudo_ce', 'confidence', 'infomax', 'entropy_bilevel', 'infomax_bilevel'"
+            "'entropy', 'pseudo_ce', 'confidence', 'infomax', 'lda_nll', 'entropy_bilevel', 'infomax_bilevel'"
         )
     if float(oea_zo_infomax_lambda) <= 0.0:
         raise ValueError("oea_zo_infomax_lambda must be > 0.")
@@ -238,9 +327,10 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_drift_gamma must be >= 0.")
     if float(oea_zo_drift_delta) < 0.0:
         raise ValueError("oea_zo_drift_delta must be >= 0.")
-    if oea_zo_selector not in {"objective", "calibrated_ridge", "calibrated_guard", "oracle"}:
+    if oea_zo_selector not in {"objective", "evidence", "calibrated_ridge", "calibrated_guard", "oracle"}:
         raise ValueError(
-            "oea_zo_selector must be one of: 'objective', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "oea_zo_selector must be one of: "
+            "'objective', 'evidence', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
         )
     if float(oea_zo_calib_ridge_alpha) <= 0.0:
         raise ValueError("oea_zo_calib_ridge_alpha must be > 0.")
@@ -343,6 +433,7 @@ def loso_cross_subject_evaluation(
             selector = str(oea_zo_selector)
             use_ridge = selector == "calibrated_ridge"
             use_guard = selector == "calibrated_guard"
+            use_evidence = selector == "evidence"
             use_oracle = selector == "oracle"
             cert = None
             guard = None
@@ -404,11 +495,21 @@ def loso_cross_subject_evaluation(
                             marginal_prior_inner = (1.0 - mix) * marginal_prior_inner + mix * u
                             marginal_prior_inner = marginal_prior_inner / float(np.sum(marginal_prior_inner))
 
+                    lda_ev_inner = None
+                    if str(oea_zo_objective) == "lda_nll":
+                        lda_ev_inner = _compute_lda_evidence_params(
+                            model=model_inner,
+                            X_train=X_inner,
+                            y_train=y_inner,
+                            class_order=class_labels,
+                        )
+
                     _qt_inner, diag_inner = _optimize_qt_oea_zo(
                         z_t=z_pseudo,
                         model=model_inner,
                         class_order=class_labels,
                         d_ref=d_ref_inner,
+                        lda_evidence=lda_ev_inner,
                         eps=float(oea_eps),
                         shrinkage=float(oea_shrinkage),
                         pseudo_mode=str(oea_pseudo_mode),
@@ -533,12 +634,27 @@ def loso_cross_subject_evaluation(
                     marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
                     marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
-            want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None) or use_oracle
+            want_diag = (
+                bool(do_diag)
+                or (use_ridge and cert is not None)
+                or (use_guard and guard is not None)
+                or use_evidence
+                or use_oracle
+            )
+            lda_ev = None
+            if str(oea_zo_objective) == "lda_nll" or use_evidence:
+                lda_ev = _compute_lda_evidence_params(
+                    model=model,
+                    X_train=X_train,
+                    y_train=y_train,
+                    class_order=class_labels,
+                )
             opt_res = _optimize_qt_oea_zo(
                 z_t=z_t,
                 model=model,
                 class_order=class_labels,
                 d_ref=d_ref,
+                lda_evidence=lda_ev,
                 eps=float(oea_eps),
                 shrinkage=float(oea_shrinkage),
                 pseudo_mode=str(oea_pseudo_mode),
@@ -597,6 +713,14 @@ def loso_cross_subject_evaluation(
                             best_acc = acc
                             best_rec = rec
                     selected = best_rec
+                elif use_evidence:
+                    selected = select_by_evidence_nll(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
                 elif use_ridge and cert is not None:
                     selected = select_by_predicted_improvement(
                         zo_diag.get("records", []),
@@ -754,13 +878,23 @@ def loso_cross_subject_evaluation(
                         marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
                 selector = str(oea_zo_selector)
+                use_evidence = selector == "evidence"
                 use_oracle = selector == "oracle"
-                want_diag = bool(do_diag) or use_oracle
+                want_diag = bool(do_diag) or use_evidence or use_oracle
+                lda_ev = None
+                if str(oea_zo_objective) == "lda_nll" or use_evidence:
+                    lda_ev = _compute_lda_evidence_params(
+                        model=model,
+                        X_train=X_train,
+                        y_train=y_train,
+                        class_order=class_labels,
+                    )
                 opt_res = _optimize_qt_oea_zo(
                     z_t=z_t,
                     model=model,
                     class_order=class_labels,
                     d_ref=d_ref,
+                    lda_evidence=lda_ev,
                     eps=float(oea_eps),
                     shrinkage=float(oea_shrinkage),
                     pseudo_mode=str(oea_pseudo_mode),
@@ -816,6 +950,16 @@ def loso_cross_subject_evaluation(
                                 best_rec = rec
                         if best_rec is not None:
                             q_t = np.asarray(best_rec.get("Q"), dtype=np.float64)
+                    elif use_evidence:
+                        sel = select_by_evidence_nll(
+                            zo_diag.get("records", []),
+                            drift_mode=str(oea_zo_drift_mode),
+                            drift_gamma=float(oea_zo_drift_gamma),
+                            drift_delta=float(oea_zo_drift_delta),
+                            min_improvement=float(oea_zo_min_improvement),
+                        )
+                        if sel is not None:
+                            q_t = np.asarray(sel.get("Q"), dtype=np.float64)
                 else:
                     q_t = opt_res
                 z_test_base = z_t
@@ -1089,6 +1233,7 @@ def cross_session_within_subject_evaluation(
                     selector = str(oea_zo_selector)
                     use_ridge = selector == "calibrated_ridge"
                     use_guard = selector == "calibrated_guard"
+                    use_evidence = selector == "evidence"
                     use_oracle = selector == "oracle"
                     cert = None
                     guard = None
@@ -1150,11 +1295,20 @@ def cross_session_within_subject_evaluation(
                                     marginal_prior_p = (1.0 - mix) * marginal_prior_p + mix * u
                                     marginal_prior_p = marginal_prior_p / float(np.sum(marginal_prior_p))
 
+                            lda_ev_p = None
+                            if str(oea_zo_objective) == "lda_nll":
+                                lda_ev_p = _compute_lda_evidence_params(
+                                    model=model_p,
+                                    X_train=z_tr_p,
+                                    y_train=y_tr_p,
+                                    class_order=class_labels,
+                                )
                             _q_sel, diag_p = _optimize_qt_oea_zo(
                                 z_t=z_te_p,
                                 model=model_p,
                                 class_order=class_labels,
                                 d_ref=d_ref_p,
+                                lda_evidence=lda_ev_p,
                                 eps=float(oea_eps),
                                 shrinkage=float(oea_shrinkage),
                                 pseudo_mode=str(oea_pseudo_mode),
@@ -1264,14 +1418,29 @@ def cross_session_within_subject_evaluation(
                             marginal_prior_vec = (1.0 - mix) * marginal_prior_vec + mix * u
                             marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
 
-                    want_diag = bool(do_diag) or (use_ridge and cert is not None) or (use_guard and guard is not None)
+                    want_diag = (
+                        bool(do_diag)
+                        or (use_ridge and cert is not None)
+                        or (use_guard and guard is not None)
+                        or use_evidence
+                        or use_oracle
+                    )
                     if use_oracle:
                         want_diag = True
+                    lda_ev = None
+                    if str(oea_zo_objective) == "lda_nll" or use_evidence:
+                        lda_ev = _compute_lda_evidence_params(
+                            model=model,
+                            X_train=z_train,
+                            y_train=y_train,
+                            class_order=class_labels,
+                        )
                     opt_res = _optimize_qt_oea_zo(
                         z_t=z_test,
                         model=model,
                         class_order=class_labels,
                         d_ref=d_ref,
+                        lda_evidence=lda_ev,
                         eps=float(oea_eps),
                         shrinkage=float(oea_shrinkage),
                         pseudo_mode=str(oea_pseudo_mode),
@@ -1330,6 +1499,14 @@ def cross_session_within_subject_evaluation(
                                     best_acc = acc
                                     best_rec = rec
                             selected = best_rec
+                        elif use_evidence:
+                            selected = select_by_evidence_nll(
+                                zo_diag.get("records", []),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                            )
                         elif use_ridge and cert is not None:
                             selected = select_by_predicted_improvement(
                                 zo_diag.get("records", []),
@@ -1465,6 +1642,8 @@ def _write_zo_diagnostics(
             "objective": float(rec.get("objective", np.nan)),
             "score": float(rec.get("score", np.nan)),
             "objective_base": float(rec.get("objective_base", np.nan)),
+            "evidence_nll_best": float(rec.get("evidence_nll_best", np.nan)),
+            "evidence_nll_full": float(rec.get("evidence_nll_full", np.nan)),
             "pen_marginal": float(rec.get("pen_marginal", np.nan)),
             "pen_trust": float(rec.get("pen_trust", np.nan)),
             "pen_l2": float(rec.get("pen_l2", np.nan)),
@@ -1494,6 +1673,14 @@ def _write_zo_diagnostics(
     acc_r = acc.argsort().argsort().astype(np.float64)
     spearman = float(np.corrcoef(obj_r, acc_r)[0, 1]) if obj.size >= 2 else float("nan")
 
+    ev = df["evidence_nll_best"].to_numpy(dtype=np.float64)
+    pearson_ev = float("nan")
+    spearman_ev = float("nan")
+    if ev.size >= 2 and np.isfinite(ev).any():
+        pearson_ev = float(np.corrcoef(ev, acc)[0, 1])
+        ev_r = ev.argsort().argsort().astype(np.float64)
+        spearman_ev = float(np.corrcoef(ev_r, acc_r)[0, 1])
+
     prior = zo_diag.get("marginal_prior")
     prior_arr = None if prior is None else np.asarray(prior, dtype=np.float64).reshape(-1)
 
@@ -1517,6 +1704,13 @@ def _write_zo_diagnostics(
         output_path=diag_dir / "objective_vs_accuracy.png",
         title=f"Subject {subject} — objective vs acc (pearson={pearson:.3f}, spearman={spearman:.3f})",
     )
+    if np.isfinite(ev).any():
+        plot_objective_vs_accuracy_scatter(
+            ev,
+            acc,
+            output_path=diag_dir / "evidence_vs_accuracy.png",
+            title=f"Subject {subject} — evidence(-log p) vs acc (pearson={pearson_ev:.3f}, spearman={spearman_ev:.3f})",
+        )
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
         score = df["score"].to_numpy(dtype=np.float64)
         pearson_s = float(np.corrcoef(score, acc)[0, 1]) if score.size >= 2 else float("nan")
@@ -1530,13 +1724,22 @@ def _write_zo_diagnostics(
         )
 
     # Small text summary
+    best_by_evidence = -1
+    if np.isfinite(ev).any():
+        try:
+            best_by_evidence = int(df.loc[df["evidence_nll_best"].idxmin(), "idx"])
+        except Exception:
+            best_by_evidence = -1
     lines = [
         f"tag: {tag}",
         f"subject: {subject}",
         f"n_candidates: {len(df)}",
         f"pearson(objective, accuracy): {pearson:.6f}",
         f"spearman(objective, accuracy): {spearman:.6f}",
+        f"pearson(evidence, accuracy): {pearson_ev:.6f}",
+        f"spearman(evidence, accuracy): {spearman_ev:.6f}",
         f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
+        f"best_by_evidence: idx={best_by_evidence}",
         f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",
     ]
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
@@ -1696,6 +1899,7 @@ def _optimize_qt_oea_zo(
     model: TrainedModel,
     class_order: Sequence[str],
     d_ref: np.ndarray,
+    lda_evidence: dict | None,
     eps: float,
     shrinkage: float,
     pseudo_mode: str,
@@ -1861,7 +2065,7 @@ def _optimize_qt_oea_zo(
             return scales * Q
         return Q
 
-    def _proba_from_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _proba_from_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         A = _build_transform(theta_vec)
         FQ = F @ A
         Y = np.einsum("kc,nct->nkt", FQ, z_data, optimize=True)
@@ -1869,9 +2073,9 @@ def _optimize_qt_oea_zo(
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), A
+        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), A, feats
 
-    def _proba_from_Q(Q: np.ndarray, z_data: np.ndarray) -> np.ndarray:
+    def _proba_from_Q(Q: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         Q = np.asarray(Q, dtype=np.float64)
         if Q.shape != (int(n_channels), int(n_channels)):
             raise ValueError(f"Expected transform shape ({n_channels},{n_channels}); got {Q.shape}.")
@@ -1881,11 +2085,11 @@ def _optimize_qt_oea_zo(
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
         proba = lda.predict_proba(feats)
-        return _reorder_proba_columns(proba, lda.classes_, list(class_order))
+        return _reorder_proba_columns(proba, lda.classes_, list(class_order)), feats
 
     # Anchor predictions at EA (Q=I). Used for drift guard/certificate.
-    proba_anchor_best = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_best)
-    proba_anchor_full = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_t)
+    proba_anchor_best, feats_anchor_best = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_best)
+    proba_anchor_full, feats_anchor_full = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_t)
 
     def _kl_drift_vec(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
         """Per-sample KL(p0 || p1)."""
@@ -1942,10 +2146,10 @@ def _optimize_qt_oea_zo(
     objective_name = str(objective)
     is_bilevel = objective_name.endswith("_bilevel")
     objective_core = objective_name[: -len("_bilevel")] if is_bilevel else objective_name
-    if objective_core not in {"entropy", "infomax", "confidence", "pseudo_ce"}:
+    if objective_core not in {"entropy", "infomax", "confidence", "pseudo_ce", "lda_nll"}:
         raise ValueError(
             "objective must be one of: "
-            "'entropy', 'infomax', 'confidence', 'pseudo_ce', or bilevel variants ending with '_bilevel'."
+            "'entropy', 'infomax', 'confidence', 'pseudo_ce', 'lda_nll', or bilevel variants ending with '_bilevel'."
         )
 
     def _row_entropy(p: np.ndarray) -> np.ndarray:
@@ -2038,21 +2242,68 @@ def _optimize_qt_oea_zo(
         }
         return w, q, q_bar, stats
 
-    def _objective_from_proba(*, proba: np.ndarray, Q: np.ndarray, theta_vec: np.ndarray | None) -> float:
+    def _objective_from_proba(
+        *, proba: np.ndarray, feats: np.ndarray | None, Q: np.ndarray, theta_vec: np.ndarray | None
+    ) -> float:
         proba = np.asarray(proba, dtype=np.float64)
         Q = np.asarray(Q, dtype=np.float64)
 
-        if objective_core in {"entropy", "infomax", "confidence"}:
+        if objective_core in {"entropy", "infomax", "confidence", "lda_nll"}:
             keep = _maybe_select_keep(proba)
             if keep.size == 0:
                 return 1e6
             proba = proba[keep]
+            if feats is not None:
+                feats = np.asarray(feats, dtype=np.float64)[keep]
 
         # Normalize to a valid distribution for entropy computations.
         p = np.clip(proba, 1e-12, 1.0)
         p = p / np.sum(p, axis=1, keepdims=True)
 
-        if objective_core == "pseudo_ce":
+        if objective_core == "lda_nll":
+            if feats is None:
+                return 1e6
+            if lda_evidence is None:
+                raise ValueError("lda_evidence must be provided when objective='lda_nll'.")
+            mu_e = np.asarray(lda_evidence.get("mu"), dtype=np.float64)
+            priors_e = np.asarray(lda_evidence.get("priors"), dtype=np.float64).reshape(-1)
+            cov_inv_e = np.asarray(lda_evidence.get("cov_inv"), dtype=np.float64)
+            logdet_e = float(lda_evidence.get("logdet", 0.0))
+            if mu_e.ndim != 2:
+                return 1e6
+            if cov_inv_e.ndim != 2:
+                return 1e6
+            if priors_e.shape[0] != int(mu_e.shape[0]):
+                return 1e6
+            if feats.shape[1] != int(mu_e.shape[1]):
+                return 1e6
+            if cov_inv_e.shape != (int(mu_e.shape[1]), int(mu_e.shape[1])):
+                return 1e6
+
+            f = np.asarray(feats, dtype=np.float64)
+            diff = f[:, None, :] - mu_e[None, :, :]
+            qf = np.einsum("nkd,dd,nkd->nk", diff, cov_inv_e, diff, optimize=True)
+            log_norm = float(mu_e.shape[1]) * float(np.log(2.0 * np.pi)) + float(logdet_e)
+            log_gauss = -0.5 * (log_norm + qf)
+            log_pr = np.log(np.clip(priors_e, 1e-12, 1.0)).reshape(1, -1)
+            log_joint = log_pr + log_gauss
+            m = np.max(log_joint, axis=1, keepdims=True)
+            log_p = m[:, 0] + np.log(np.sum(np.exp(log_joint - m), axis=1))
+
+            # Optional reliability weighting w_i based on posterior entropy/confidence.
+            w = np.ones(p.shape[0], dtype=np.float64)
+            if reliable_metric != "none":
+                ent = _row_entropy(p)
+                conf = np.max(p, axis=1)
+                if reliable_metric == "confidence":
+                    w = w * _sigmoid(float(reliable_alpha) * (conf - float(reliable_threshold)))
+                else:
+                    w = w * _sigmoid(float(reliable_alpha) * (float(reliable_threshold) - ent))
+            w_sum = float(np.sum(w))
+            if w_sum <= 1e-12:
+                return 1e6
+            val = float(-np.sum(w * log_p) / w_sum)
+        elif objective_core == "pseudo_ce":
             pred_idx = np.argmax(p, axis=1)
             classes_arr = np.asarray(class_order, dtype=object)
             y_pseudo = classes_arr[pred_idx]
@@ -2163,18 +2414,20 @@ def _optimize_qt_oea_zo(
         return float(val)
 
     def _objective_details_from_proba(
-        *, proba: np.ndarray, Q: np.ndarray, theta_vec: np.ndarray | None
+        *, proba: np.ndarray, feats: np.ndarray | None, Q: np.ndarray, theta_vec: np.ndarray | None
     ) -> tuple[float, dict]:
         proba = np.asarray(proba, dtype=np.float64)
         Q = np.asarray(Q, dtype=np.float64)
         details: dict = {}
 
         keep = np.arange(proba.shape[0], dtype=int)
-        if objective_core in {"entropy", "infomax", "confidence"}:
+        if objective_core in {"entropy", "infomax", "confidence", "lda_nll"}:
             keep = _maybe_select_keep(proba)
             if keep.size == 0:
                 return 1e6, {"n_keep": 0}
             proba = proba[keep]
+            if feats is not None:
+                feats = np.asarray(feats, dtype=np.float64)[keep]
         details["n_keep"] = int(keep.size)
 
         # Normalize to a valid distribution for entropy computations.
@@ -2182,7 +2435,71 @@ def _optimize_qt_oea_zo(
         p = p / np.sum(p, axis=1, keepdims=True)
         details["n_samples"] = int(p.shape[0])
 
-        if objective_core == "pseudo_ce":
+        if objective_core == "lda_nll":
+            if feats is None:
+                return 1e6, {"n_keep": int(keep.size)}
+            if lda_evidence is None:
+                raise ValueError("lda_evidence must be provided when objective='lda_nll'.")
+            mu_e = np.asarray(lda_evidence.get("mu"), dtype=np.float64)
+            priors_e = np.asarray(lda_evidence.get("priors"), dtype=np.float64).reshape(-1)
+            cov_inv_e = np.asarray(lda_evidence.get("cov_inv"), dtype=np.float64)
+            logdet_e = float(lda_evidence.get("logdet", 0.0))
+
+            f = np.asarray(feats, dtype=np.float64)
+            diff = f[:, None, :] - mu_e[None, :, :]
+            qf = np.einsum("nkd,dd,nkd->nk", diff, cov_inv_e, diff, optimize=True)
+            log_norm = float(mu_e.shape[1]) * float(np.log(2.0 * np.pi)) + float(logdet_e)
+            log_gauss = -0.5 * (log_norm + qf)
+            log_pr = np.log(np.clip(priors_e, 1e-12, 1.0)).reshape(1, -1)
+            log_joint = log_pr + log_gauss
+            m = np.max(log_joint, axis=1, keepdims=True)
+            log_p = m[:, 0] + np.log(np.sum(np.exp(log_joint - m), axis=1))
+
+            ent_p = _row_entropy(p)
+            conf = np.max(p, axis=1)
+            w = np.ones(p.shape[0], dtype=np.float64)
+            if reliable_metric != "none":
+                if reliable_metric == "confidence":
+                    w = w * _sigmoid(float(reliable_alpha) * (conf - float(reliable_threshold)))
+                else:
+                    w = w * _sigmoid(float(reliable_alpha) * (float(reliable_threshold) - ent_p))
+            w_sum = float(np.sum(w))
+            if w_sum <= 1e-12:
+                return 1e6, {"n_keep": int(keep.size)}
+            base = float(-np.sum(w * log_p) / w_sum)
+            details["mean_entropy"] = float(np.sum(w * ent_p) / w_sum)
+            details["mean_confidence"] = float(np.sum(w * conf) / w_sum)
+            details["objective_base"] = float(base)
+            val = float(base)
+
+            p_bar = np.mean(p, axis=0)
+            p_bar = np.clip(p_bar, 1e-12, 1.0)
+            p_bar = p_bar / float(np.sum(p_bar))
+            ent_bar = -float(np.sum(p_bar * np.log(p_bar)))
+            details["entropy_bar"] = float(ent_bar)
+
+            if marginal_mode != "none":
+                tau = float(marginal_tau)
+                pen = 0.0
+                if marginal_mode == "hard_min":
+                    if float(np.min(p_bar)) < tau:
+                        return 1e6, details
+                elif marginal_mode == "kl_prior":
+                    if marginal_prior_vec is None:
+                        return 1e6, details
+                    pen = float(-np.sum(marginal_prior_vec * np.log(p_bar)))
+                elif float(marginal_beta) > 0.0:
+                    if marginal_mode == "l2_uniform":
+                        u = 1.0 / float(n_classes)
+                        pen = float(np.mean((p_bar - u) ** 2))
+                    elif marginal_mode == "kl_uniform":
+                        pen = float(-np.mean(np.log(p_bar)))
+                    else:
+                        pen = float(np.mean(np.maximum(0.0, tau - p_bar) ** 2))
+                if float(marginal_beta) > 0.0 and marginal_mode != "hard_min":
+                    val = float(val) + float(marginal_beta) * float(pen)
+                details["pen_marginal"] = float(pen)
+        elif objective_core == "pseudo_ce":
             # pseudo_ce: hard pseudo labels + optional filtering
             pred_idx = np.argmax(p, axis=1)
             classes_arr = np.asarray(class_order, dtype=object)
@@ -2332,21 +2649,72 @@ def _optimize_qt_oea_zo(
         return float(val), details
 
     def eval_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> float:
-        proba, Q = _proba_from_theta(theta_vec, z_data)
-        return _objective_from_proba(proba=proba, Q=Q, theta_vec=theta_vec)
+        proba, Q, feats = _proba_from_theta(theta_vec, z_data)
+        return _objective_from_proba(proba=proba, feats=feats, Q=Q, theta_vec=theta_vec)
+
+    def _evidence_nll_from_outputs(*, proba: np.ndarray, feats: np.ndarray) -> float:
+        """Compute -log p(z) under the frozen CSP+LDA Gaussian mixture (if available)."""
+
+        if lda_evidence is None:
+            return float("nan")
+
+        proba = np.asarray(proba, dtype=np.float64)
+        feats = np.asarray(feats, dtype=np.float64)
+
+        keep = _maybe_select_keep(proba)
+        if keep.size == 0:
+            return float("nan")
+        proba = proba[keep]
+        feats = feats[keep]
+
+        p = np.clip(proba, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+
+        mu_e = np.asarray(lda_evidence.get("mu"), dtype=np.float64)
+        priors_e = np.asarray(lda_evidence.get("priors"), dtype=np.float64).reshape(-1)
+        cov_inv_e = np.asarray(lda_evidence.get("cov_inv"), dtype=np.float64)
+        logdet_e = float(lda_evidence.get("logdet", 0.0))
+        if mu_e.ndim != 2:
+            return float("nan")
+        if feats.shape[1] != int(mu_e.shape[1]):
+            return float("nan")
+
+        diff = feats[:, None, :] - mu_e[None, :, :]
+        qf = np.einsum("nkd,dd,nkd->nk", diff, cov_inv_e, diff, optimize=True)
+        log_norm = float(mu_e.shape[1]) * float(np.log(2.0 * np.pi)) + float(logdet_e)
+        log_gauss = -0.5 * (log_norm + qf)
+        log_pr = np.log(np.clip(priors_e, 1e-12, 1.0)).reshape(1, -1)
+        log_joint = log_pr + log_gauss
+        m = np.max(log_joint, axis=1, keepdims=True)
+        log_p = m[:, 0] + np.log(np.sum(np.exp(log_joint - m), axis=1))
+
+        w = np.ones(p.shape[0], dtype=np.float64)
+        if reliable_metric != "none":
+            ent = _row_entropy(p)
+            conf = np.max(p, axis=1)
+            if reliable_metric == "confidence":
+                w = w * _sigmoid(float(reliable_alpha) * (conf - float(reliable_threshold)))
+            else:
+                w = w * _sigmoid(float(reliable_alpha) * (float(reliable_threshold) - ent))
+        w_sum = float(np.sum(w))
+        if w_sum <= 1e-12:
+            return float("nan")
+        return float(-np.sum(w * log_p) / w_sum)
 
     def _record_candidate(*, kind: str, iter_idx: int, theta_vec: np.ndarray | None, Q: np.ndarray) -> None:
         if not do_diag:
             return
-        proba_best = _proba_from_Q(Q, z_best)
-        obj, details = _objective_details_from_proba(proba=proba_best, Q=Q, theta_vec=theta_vec)
+        proba_best, feats_best = _proba_from_Q(Q, z_best)
+        obj, details = _objective_details_from_proba(proba=proba_best, feats=feats_best, Q=Q, theta_vec=theta_vec)
         drift_best_vec = _kl_drift_vec(proba_anchor_best, proba_best)
         drift_best = float(np.mean(drift_best_vec))
-        proba_full = _proba_from_Q(Q, z_t)
+        proba_full, feats_full = _proba_from_Q(Q, z_t)
         drift_full_vec = _kl_drift_vec(proba_anchor_full, proba_full)
         drift_full = float(np.mean(drift_full_vec))
         p_bar_full = np.mean(np.clip(proba_full, 1e-12, 1.0), axis=0)
         p_bar_full = p_bar_full / float(np.sum(p_bar_full))
+        evidence_nll_best = _evidence_nll_from_outputs(proba=proba_best, feats=feats_best)
+        evidence_nll_full = _evidence_nll_from_outputs(proba=proba_full, feats=feats_full)
         rec = {
             "kind": str(kind),
             "iter": int(iter_idx),
@@ -2364,6 +2732,8 @@ def _optimize_qt_oea_zo(
             "n_keep": int(details.get("n_keep", -1)),
             "n_best_total": int(z_best.shape[0]),
             "n_full_total": int(z_t.shape[0]),
+            "evidence_nll_best": float(evidence_nll_best),
+            "evidence_nll_full": float(evidence_nll_full),
             "drift_best": float(drift_best),
             "drift_best_std": float(np.std(drift_best_vec)),
             "drift_best_q50": float(np.quantile(drift_best_vec, 0.50)),
@@ -2466,7 +2836,12 @@ def _optimize_qt_oea_zo(
     best_Q_override: np.ndarray | None = None
     theta_id = np.zeros_like(best_theta)
     proba_id = proba_anchor_best
-    obj_id = _objective_from_proba(proba=proba_id, Q=np.eye(int(n_channels), dtype=np.float64), theta_vec=theta_id)
+    obj_id = _objective_from_proba(
+        proba=proba_id,
+        feats=feats_anchor_best,
+        Q=np.eye(int(n_channels), dtype=np.float64),
+        theta_vec=theta_id,
+    )
     score_id = _score_with_drift(float(obj_id), 0.0)
     _record_candidate(kind="identity", iter_idx=-1, theta_vec=theta_id, Q=np.eye(int(n_channels), dtype=np.float64))
     best_theta = theta_id.copy()
@@ -2475,8 +2850,8 @@ def _optimize_qt_oea_zo(
 
     if q_delta is not None:
         q_delta_b = blend_with_identity(q_delta, float(q_blend))
-        proba_qd = _proba_from_Q(q_delta_b, z_best)
-        obj_qd = _objective_from_proba(proba=proba_qd, Q=q_delta_b, theta_vec=None)
+        proba_qd, feats_qd = _proba_from_Q(q_delta_b, z_best)
+        obj_qd = _objective_from_proba(proba=proba_qd, feats=feats_qd, Q=q_delta_b, theta_vec=None)
         drift_qd = _kl_drift(proba_anchor_best, proba_qd)
         score_qd = _score_with_drift(float(obj_qd), float(drift_qd))
         _record_candidate(kind="q_delta", iter_idx=-2, theta_vec=None, Q=q_delta_b)
@@ -2487,8 +2862,8 @@ def _optimize_qt_oea_zo(
 
     # If we warm-started (rotation angles), compare that initial point too.
     if np.any(theta != 0.0):
-        proba_init, Q_init = _proba_from_theta(theta, z_best)
-        obj_init = _objective_from_proba(proba=proba_init, Q=Q_init, theta_vec=theta)
+        proba_init, Q_init, feats_init = _proba_from_theta(theta, z_best)
+        obj_init = _objective_from_proba(proba=proba_init, feats=feats_init, Q=Q_init, theta_vec=theta)
         drift_init = _kl_drift(proba_anchor_best, proba_init)
         score_init = _score_with_drift(float(obj_init), float(drift_init))
         if do_diag:
@@ -2512,8 +2887,8 @@ def _optimize_qt_oea_zo(
         theta = theta - step * g
 
         # Track best iterate (not the +/- perturbations used only for gradient estimation).
-        proba_tmp, Q_tmp = _proba_from_theta(theta, z_best)
-        f_theta = _objective_from_proba(proba=proba_tmp, Q=Q_tmp, theta_vec=theta)
+        proba_tmp, Q_tmp, feats_tmp = _proba_from_theta(theta, z_best)
+        f_theta = _objective_from_proba(proba=proba_tmp, feats=feats_tmp, Q=Q_tmp, theta_vec=theta)
         drift_tmp = _kl_drift(proba_anchor_best, proba_tmp)
         score_tmp = _score_with_drift(float(f_theta), float(drift_tmp))
         if do_diag:
@@ -2538,7 +2913,7 @@ def _optimize_qt_oea_zo(
 
     # Safety fallback: if target predictions collapse to a single class, fall back to a safer Q.
     if float(fallback_min_marginal_entropy) > 0.0:
-        proba_best = _proba_from_Q(Q, z_t)
+        proba_best, _feats_best = _proba_from_Q(Q, z_t)
         p_bar = np.mean(np.clip(proba_best, 1e-12, 1.0), axis=0)
         p_bar = p_bar / float(np.sum(p_bar))
         ent_bar = -float(np.sum(p_bar * np.log(p_bar)))

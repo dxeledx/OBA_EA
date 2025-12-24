@@ -307,3 +307,66 @@ def select_by_guarded_objective(
     for rec in records:
         return rec
     raise ValueError("No candidates to select from.")
+
+
+def select_by_evidence_nll(
+    records: Iterable[dict],
+    *,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    min_improvement: float = 0.0,
+) -> dict:
+    """Select the best candidate using LDA evidence (-log p(z)).
+
+    Candidates must have `evidence_nll_best` recorded (smaller is better).
+    If no candidate improves over the identity anchor, return identity.
+    """
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec in records:
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        try:
+            ev = float(rec.get("evidence_nll_best", float("nan")))
+        except Exception:
+            ev = float("nan")
+        if not np.isfinite(ev):
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        score = float(ev)
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if identity is None:
+        return best if best is not None else next(iter(records))
+
+    try:
+        ev_id = float(identity.get("evidence_nll_best", float("nan")))
+    except Exception:
+        ev_id = float("nan")
+    if not np.isfinite(ev_id):
+        return best if best is not None else identity
+
+    if best is None:
+        return identity
+
+    if float(min_improvement) > 0.0 and (float(ev_id) - float(best_score)) < float(min_improvement):
+        return identity
+
+    if float(best_score) >= float(ev_id):
+        return identity
+
+    return best

@@ -90,3 +90,83 @@ Per-subject deltas (EA-ZO-IMR − EA):
 - `ea-zo-imr-csp-lda` mean acc: **0.805556**（小幅提升 +0.2315%）
 
 结论：2 类跨 session 下，EA-ZO-IMR 有轻微增益，但幅度较小。
+
+## LDA evidence certificate attempt (Dec 24)
+
+动机：既然分类器是 CSP+LDA（近似高斯生成式），尝试用 **LDA 的无标签边缘似然**（evidence, `-log p(z)`）作为 candidate selection 的“证书”，看能否缓解无标签证书失效。
+
+### 4-class: IMR optimization + evidence selector (rot+scale)
+
+Command:
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector evidence \
+  --run-name 4c_fir6_imr_opt_evidence_sel_rot_scale \
+  --diagnose-subjects 4
+```
+
+Results:
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_imr_opt_evidence_sel_rot_scale/20251224_results.txt`
+- `ea-csp-lda` mean acc: **0.680170**
+- `ea-zo-imr-csp-lda` + evidence selector mean acc: **0.680556**（+0.0386%）
+
+Diagnostics (S4):
+- `outputs/20251224/4class/cross_session/4c_fir6_imr_opt_evidence_sel_rot_scale/diagnostics/ea-zo-imr-csp-lda/subject_04/summary.txt`
+  - best_by_accuracy ≠ best_by_evidence（evidence 仍会选回 identity）
+  - 证书相关性仍不稳定（`pearson(evidence, accuracy)` 为正）
+
+结论：evidence 作为 selector 在 4 类跨 session 上并没有显著解决“选不到 oracle candidate”的问题。
+
+### 4-class: evidence as the optimization objective (lda_nll)
+
+Command:
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-csp-lda \
+  --oea-zo-objective lda_nll \
+  --oea-zo-transform rot_scale \
+  --run-name 4c_fir6_lda_nll_rot_scale \
+  --diagnose-subjects 4
+```
+
+Results:
+- Output: `outputs/20251224/4class/cross_session/4c_fir6_lda_nll_rot_scale/20251224_results.txt`
+- `ea-zo-csp-lda` mean acc: **0.680170**（与 EA 完全一致；几乎总回退 identity）
+
+结论：直接用 evidence 做优化目标会导致 SPSA 在 rot+scale 下更容易跑飞（产生极差 candidates），最终策略倾向选择 identity。
+
+### 2-class: evidence selector
+
+Orthogonal Q (more comparable to earlier 2-class basic):
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform orthogonal \
+  --oea-zo-selector evidence \
+  --run-name 2c_fir6_imr_evidence_sel_Q
+```
+
+- Output: `outputs/20251224/2class/cross_session/2c_fir6_imr_evidence_sel_Q/20251224_results.txt`
+- `ea-csp-lda` overall acc: **0.803241**
+- `ea-zo-imr-csp-lda` + evidence selector overall acc: **0.804012**（+0.0771%）
+
+Rot+scale:
+
+- Output: `outputs/20251224/2class/cross_session/2c_fir6_imr_opt_evidence_sel_rot_scale/20251224_results.txt`
+- `ea-zo-imr-csp-lda` + evidence selector mean acc: **0.801698**（低于 EA）
+
+结论：2 类上 evidence selector 也没有优于已有 IMR/objective 选择（且 rot+scale 可能更不稳）。
