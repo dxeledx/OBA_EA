@@ -8,7 +8,7 @@ from typing import Sequence
 import pandas as pd
 
 from .config import ExperimentConfig
-from .evaluation import summarize_results
+from .metrics import summarize_results
 
 
 def today_yyyymmdd() -> str:
