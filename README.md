@@ -99,7 +99,7 @@ conda run -n eeg python run_csp_lda_loso.py --preprocess paper_fir --n-component
 - `--oea-zo-min-improvement`：若 holdout 上相对 `Q=I` 改善不足则回退 `Q=I`
 - `--oea-zo-marginal-mode` + `--oea-zo-marginal-beta`：类边际均衡/先验约束（4 类可先试 `kl_uniform`；或用 `kl_prior` + `--oea-zo-marginal-prior` 替代“强行均匀”假设）
 - `--oea-zo-drift-mode`：预测漂移守门员（相对 EA 锚点 `Q=I`）：`penalty` 用 `γ·KL(p0||pQ)` 惩罚，`hard` 用阈值 `δ` 约束
-- `--oea-zo-selector`：候选集选择器（`objective` 或 `calibrated_ridge`；后者会在每个 LOSO fold 上用源被试离线标定一个“无标签证书”回归器，不用目标标签）
+- `--oea-zo-selector`：候选集选择器：`objective`（无标签目标）/ `evidence`（LDA evidence NLL）/ `probe_mixup`（MixUp probe）/ `calibrated_ridge`（源域离线标定回归器预测提升）/ `calibrated_guard`（源域离线标定 guard 拒绝负迁移）/ `oracle`（用真标签选，仅分析上限）
 - `--diagnose-subjects 4`：输出 ZO 过程诊断图（`p̄` 轨迹、objective vs acc 散点、候选表；分析用）
 
 运行示例：

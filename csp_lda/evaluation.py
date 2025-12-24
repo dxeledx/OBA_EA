@@ -29,6 +29,7 @@ from .certificate import (
     select_by_evidence_nll,
     select_by_guarded_objective,
     select_by_predicted_improvement,
+    select_by_probe_mixup,
     train_logistic_guard,
     train_ridge_certificate,
 )
@@ -327,10 +328,10 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_drift_gamma must be >= 0.")
     if float(oea_zo_drift_delta) < 0.0:
         raise ValueError("oea_zo_drift_delta must be >= 0.")
-    if oea_zo_selector not in {"objective", "evidence", "calibrated_ridge", "calibrated_guard", "oracle"}:
+    if oea_zo_selector not in {"objective", "evidence", "probe_mixup", "calibrated_ridge", "calibrated_guard", "oracle"}:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'evidence', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "'objective', 'evidence', 'probe_mixup', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
         )
     if float(oea_zo_calib_ridge_alpha) <= 0.0:
         raise ValueError("oea_zo_calib_ridge_alpha must be > 0.")
@@ -434,6 +435,7 @@ def loso_cross_subject_evaluation(
             use_ridge = selector == "calibrated_ridge"
             use_guard = selector == "calibrated_guard"
             use_evidence = selector == "evidence"
+            use_probe_mixup = selector == "probe_mixup"
             use_oracle = selector == "oracle"
             cert = None
             guard = None
@@ -639,6 +641,7 @@ def loso_cross_subject_evaluation(
                 or (use_ridge and cert is not None)
                 or (use_guard and guard is not None)
                 or use_evidence
+                or use_probe_mixup
                 or use_oracle
             )
             lda_ev = None
@@ -715,6 +718,14 @@ def loso_cross_subject_evaluation(
                     selected = best_rec
                 elif use_evidence:
                     selected = select_by_evidence_nll(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
+                elif use_probe_mixup:
+                    selected = select_by_probe_mixup(
                         zo_diag.get("records", []),
                         drift_mode=str(oea_zo_drift_mode),
                         drift_gamma=float(oea_zo_drift_gamma),
@@ -879,8 +890,9 @@ def loso_cross_subject_evaluation(
 
                 selector = str(oea_zo_selector)
                 use_evidence = selector == "evidence"
+                use_probe_mixup = selector == "probe_mixup"
                 use_oracle = selector == "oracle"
-                want_diag = bool(do_diag) or use_evidence or use_oracle
+                want_diag = bool(do_diag) or use_evidence or use_probe_mixup or use_oracle
                 lda_ev = None
                 if str(oea_zo_objective) == "lda_nll" or use_evidence:
                     lda_ev = _compute_lda_evidence_params(
@@ -952,6 +964,16 @@ def loso_cross_subject_evaluation(
                             q_t = np.asarray(best_rec.get("Q"), dtype=np.float64)
                     elif use_evidence:
                         sel = select_by_evidence_nll(
+                            zo_diag.get("records", []),
+                            drift_mode=str(oea_zo_drift_mode),
+                            drift_gamma=float(oea_zo_drift_gamma),
+                            drift_delta=float(oea_zo_drift_delta),
+                            min_improvement=float(oea_zo_min_improvement),
+                        )
+                        if sel is not None:
+                            q_t = np.asarray(sel.get("Q"), dtype=np.float64)
+                    elif use_probe_mixup:
+                        sel = select_by_probe_mixup(
                             zo_diag.get("records", []),
                             drift_mode=str(oea_zo_drift_mode),
                             drift_gamma=float(oea_zo_drift_gamma),
@@ -1234,6 +1256,7 @@ def cross_session_within_subject_evaluation(
                     use_ridge = selector == "calibrated_ridge"
                     use_guard = selector == "calibrated_guard"
                     use_evidence = selector == "evidence"
+                    use_probe_mixup = selector == "probe_mixup"
                     use_oracle = selector == "oracle"
                     cert = None
                     guard = None
@@ -1423,6 +1446,7 @@ def cross_session_within_subject_evaluation(
                         or (use_ridge and cert is not None)
                         or (use_guard and guard is not None)
                         or use_evidence
+                        or use_probe_mixup
                         or use_oracle
                     )
                     if use_oracle:
@@ -1501,6 +1525,14 @@ def cross_session_within_subject_evaluation(
                             selected = best_rec
                         elif use_evidence:
                             selected = select_by_evidence_nll(
+                                zo_diag.get("records", []),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                            )
+                        elif use_probe_mixup:
+                            selected = select_by_probe_mixup(
                                 zo_diag.get("records", []),
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
@@ -2701,6 +2733,106 @@ def _optimize_qt_oea_zo(
             return float("nan")
         return float(-np.sum(w * log_p) / w_sum)
 
+    def _probe_mixup_from_outputs(
+        *,
+        proba: np.ndarray,
+        feats: np.ndarray,
+        seed_local: int,
+        n_pairs: int = 200,
+        lam: float = 0.5,
+    ) -> tuple[float, dict]:
+        """MixUp-style probe score on CSP feature space (label-free).
+
+        Lower is better. Uses pseudo labels from `proba` after reliable filtering.
+        """
+
+        proba = np.asarray(proba, dtype=np.float64)
+        feats = np.asarray(feats, dtype=np.float64)
+        keep = _maybe_select_keep(proba)
+        if keep.size == 0:
+            return float("nan"), {"n_keep": 0, "n_pairs": 0}
+
+        p = np.asarray(proba[keep], dtype=np.float64)
+        p = np.clip(p, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+        f = np.asarray(feats[keep], dtype=np.float64)
+
+        y_idx = np.argmax(p, axis=1).astype(int)
+        classes = np.unique(y_idx).tolist()
+        idx_by_class = {c: np.flatnonzero(y_idx == c) for c in classes}
+        classes_intra = [c for c in classes if int(idx_by_class[c].size) >= 2]
+        has_inter = len(classes) >= 2
+        if not classes_intra and not has_inter:
+            return float("nan"), {"n_keep": int(keep.size), "n_pairs": 0}
+
+        rng_probe = np.random.RandomState(int(seed_local))
+        n_pairs = int(max(0, n_pairs))
+        if n_pairs == 0:
+            return float("nan"), {"n_keep": int(keep.size), "n_pairs": 0}
+        n_pairs = min(n_pairs, 10_000)
+
+        i_list: list[int] = []
+        j_list: list[int] = []
+        ki_list: list[int] = []
+        kj_list: list[int] = []
+        lam_list: list[float] = []
+        same_list: list[bool] = []
+
+        # Fallback to all indices for sampling.
+        for _ in range(n_pairs):
+            use_intra = bool(classes_intra) and (not has_inter or rng_probe.rand() < 0.5)
+            if use_intra:
+                c = int(rng_probe.choice(classes_intra))
+                idxs = idx_by_class[c]
+                a, b = rng_probe.choice(idxs, size=2, replace=False).tolist()
+                i_list.append(int(a))
+                j_list.append(int(b))
+                ki_list.append(int(c))
+                kj_list.append(int(c))
+                lam_list.append(float(lam))
+                same_list.append(True)
+            else:
+                # Inter-class: sample two different classes.
+                if not has_inter:
+                    continue
+                c1, c2 = rng_probe.choice(classes, size=2, replace=False).tolist()
+                a = int(rng_probe.choice(idx_by_class[int(c1)]))
+                b = int(rng_probe.choice(idx_by_class[int(c2)]))
+                i_list.append(int(a))
+                j_list.append(int(b))
+                ki_list.append(int(c1))
+                kj_list.append(int(c2))
+                lam_list.append(float(lam))
+                same_list.append(False)
+
+        if not i_list:
+            return float("nan"), {"n_keep": int(keep.size), "n_pairs": 0}
+
+        i_arr = np.asarray(i_list, dtype=int)
+        j_arr = np.asarray(j_list, dtype=int)
+        lam_arr = np.asarray(lam_list, dtype=np.float64)
+        ki_arr = np.asarray(ki_list, dtype=int)
+        kj_arr = np.asarray(kj_list, dtype=int)
+        same_arr = np.asarray(same_list, dtype=bool)
+
+        f_mix = lam_arr.reshape(-1, 1) * f[i_arr] + (1.0 - lam_arr).reshape(-1, 1) * f[j_arr]
+        proba_mix = lda.predict_proba(f_mix)
+        proba_mix = _reorder_proba_columns(proba_mix, lda.classes_, list(class_order))
+        proba_mix = np.clip(proba_mix, 1e-12, 1.0)
+        proba_mix = proba_mix / np.sum(proba_mix, axis=1, keepdims=True)
+        logp = np.log(proba_mix)
+
+        lp_i = logp[np.arange(logp.shape[0]), ki_arr]
+        lp_j = logp[np.arange(logp.shape[0]), kj_arr]
+        ce = np.where(same_arr, -lp_i, -(lam_arr * lp_i + (1.0 - lam_arr) * lp_j))
+        score = float(np.mean(ce))
+        stats = {
+            "n_keep": int(keep.size),
+            "n_pairs": int(ce.size),
+            "frac_intra": float(np.mean(same_arr)) if same_arr.size else float("nan"),
+        }
+        return float(score), stats
+
     def _record_candidate(*, kind: str, iter_idx: int, theta_vec: np.ndarray | None, Q: np.ndarray) -> None:
         if not do_diag:
             return
@@ -2715,6 +2847,16 @@ def _optimize_qt_oea_zo(
         p_bar_full = p_bar_full / float(np.sum(p_bar_full))
         evidence_nll_best = _evidence_nll_from_outputs(proba=proba_best, feats=feats_best)
         evidence_nll_full = _evidence_nll_from_outputs(proba=proba_full, feats=feats_full)
+        probe_mixup_best, probe_stats_best = _probe_mixup_from_outputs(
+            proba=proba_best,
+            feats=feats_best,
+            seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1),
+        )
+        probe_mixup_full, probe_stats_full = _probe_mixup_from_outputs(
+            proba=proba_full,
+            feats=feats_full,
+            seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1) + 13,
+        )
         rec = {
             "kind": str(kind),
             "iter": int(iter_idx),
@@ -2734,6 +2876,14 @@ def _optimize_qt_oea_zo(
             "n_full_total": int(z_t.shape[0]),
             "evidence_nll_best": float(evidence_nll_best),
             "evidence_nll_full": float(evidence_nll_full),
+            "probe_mixup_best": float(probe_mixup_best),
+            "probe_mixup_full": float(probe_mixup_full),
+            "probe_mixup_pairs_best": int(probe_stats_best.get("n_pairs", 0)),
+            "probe_mixup_pairs_full": int(probe_stats_full.get("n_pairs", 0)),
+            "probe_mixup_keep_best": int(probe_stats_best.get("n_keep", 0)),
+            "probe_mixup_keep_full": int(probe_stats_full.get("n_keep", 0)),
+            "probe_mixup_frac_intra_best": float(probe_stats_best.get("frac_intra", np.nan)),
+            "probe_mixup_frac_intra_full": float(probe_stats_full.get("frac_intra", np.nan)),
             "drift_best": float(drift_best),
             "drift_best_std": float(np.std(drift_best_vec)),
             "drift_best_q50": float(np.quantile(drift_best_vec, 0.50)),

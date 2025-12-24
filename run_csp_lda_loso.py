@@ -274,12 +274,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "evidence", "calibrated_ridge", "calibrated_guard", "oracle"],
+        choices=["objective", "evidence", "probe_mixup", "calibrated_ridge", "calibrated_guard", "oracle"],
         default="objective",
         help=(
             "For oea-zo-* methods: how to select Q_t from the candidate set. "
             "objective selects by the unlabeled objective (plus optional drift guard); "
             "evidence selects by LDA evidence (-log p(z)) under the frozen CSP+LDA model; "
+            "probe_mixup selects by a MixUp-style probe score in CSP feature space; "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
             "calibrated_guard learns a binary guard to reject likely negative transfer; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
