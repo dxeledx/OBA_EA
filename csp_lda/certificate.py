@@ -319,6 +319,128 @@ def select_by_iwcv_nll(
     return best
 
 
+def select_by_iwcv_ucb(
+    records: Iterable[dict],
+    *,
+    model: TrainedModel,
+    z_source: np.ndarray,
+    y_source: np.ndarray,
+    z_target: np.ndarray,
+    class_order: Sequence[str],
+    kappa: float = 1.0,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    min_improvement: float = 0.0,
+    seed: int = 0,
+) -> dict:
+    """Select candidate by an IWCV-UCB certificate (risk estimate + uncertainty penalty).
+
+    Certificate (smaller is better):
+      mean_w[nll] + kappa * sqrt(var_w[nll] / n_eff),
+    where n_eff = (sum w)^2 / sum w^2 is the effective sample size of the (clipped) density ratios.
+
+    This is intended to be a more *mathematically grounded* certificate:
+    - If weights are unstable (small n_eff), the uncertainty term increases -> safer selection.
+    - If the estimated target risk is genuinely low and stable, it can beat the identity anchor.
+    """
+
+    if float(kappa) < 0.0:
+        raise ValueError("kappa must be >= 0.")
+
+    class_order = [str(c) for c in class_order]
+    class_to_idx = {c: i for i, c in enumerate(class_order)}
+    y_source = np.asarray(y_source)
+    try:
+        y_idx = np.fromiter((class_to_idx[str(c)] for c in y_source), dtype=int, count=len(y_source))
+    except KeyError as e:
+        raise ValueError(f"y_source contains unknown class '{e.args[0]}'.") from e
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec_i, rec in enumerate(records):
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        Q = rec.get("Q", None)
+        if Q is None:
+            continue
+        Q = np.asarray(Q, dtype=np.float64)
+        if Q.ndim != 2:
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        Xs = apply_spatial_transform(Q, z_source)
+        Xt = apply_spatial_transform(Q, z_target)
+        fs = _csp_logvar_features(model=model, X=Xs)
+        ft = _csp_logvar_features(model=model, X=Xt)
+
+        w = _fit_domain_logreg_ratio(X_source=fs, X_target=ft, seed=int(seed) + 9973 * int(rec_i))
+        w_sum = float(np.sum(w))
+        w_sq_sum = float(np.sum(w * w))
+        eff_n = (w_sum * w_sum / w_sq_sum) if w_sq_sum > 1e-12 else 0.0
+
+        proba_s = np.asarray(model.predict_proba(Xs), dtype=np.float64)
+        proba_s = _reorder_proba_columns(proba_s, model.classes_, class_order)
+        p = np.clip(proba_s, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+        nll = -np.log(p[np.arange(p.shape[0]), y_idx])
+
+        if w_sum <= 1e-12:
+            score = float("inf")
+            mean = float("nan")
+            var = float("nan")
+            se = float("nan")
+        else:
+            mean = float(np.sum(w * nll) / max(1e-12, w_sum))
+            var = float(np.sum(w * (nll - mean) * (nll - mean)) / max(1e-12, w_sum))
+            se = float(np.sqrt(max(0.0, var) / max(1e-12, eff_n)))
+            score = float(mean) + float(kappa) * float(se)
+
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        # Store for diagnostics / calibrated models.
+        rec["iwcv_nll"] = float(mean) if np.isfinite(mean) else float(rec.get("iwcv_nll", float("nan")))
+        rec["iwcv_eff_n"] = float(eff_n)
+        rec["iwcv_var"] = float(var) if np.isfinite(var) else float("nan")
+        rec["iwcv_se"] = float(se) if np.isfinite(se) else float("nan")
+        rec["iwcv_ucb"] = float(score)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if identity is None:
+        return best if best is not None else next(iter(records))
+
+    try:
+        s_id = float(identity.get("iwcv_ucb", float("nan")))
+    except Exception:
+        s_id = float("nan")
+    if not np.isfinite(s_id):
+        # Ensure identity has a score if we computed none for it.
+        if best is not None:
+            return best
+        return identity
+
+    if best is None:
+        return identity
+
+    if float(min_improvement) > 0.0 and (float(s_id) - float(best_score)) < float(min_improvement):
+        return identity
+
+    if float(best_score) >= float(s_id):
+        return identity
+
+    return best
+
+
 def train_ridge_certificate(
     X: np.ndarray,
     y: np.ndarray,

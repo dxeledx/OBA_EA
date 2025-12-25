@@ -113,6 +113,36 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
   - `rho_probe_mean ≈ 0.040`（probe 仍接近 0）
   - `rho_iwcv_mean ≈ 0.033`（IWCV 对“排序”仍弱，但更像一个 safety gate：能稳定避免掉点）
 
+### Run（iwcv_ucb selector, diag-all）
+
+动机：把 IWCV 从点估计升级为带不确定性惩罚的 UCB 证书：
+\( \text{IWCV-UCB}(Q)=\widehat{R}(Q)+\kappa\sqrt{\widehat{\mathrm{Var}}(Q)/n_{\text{eff}}(Q)} \)。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector iwcv_ucb \
+  --oea-zo-iwcv-kappa 1.0 \
+  --run-name 4c_fir6_iwcv_ucb_k1_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_iwcv_ucb_k1_rot_scale_diagall_v1 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- Selected mean acc (iwcv_ucb, kappa=1): `0.681713`（本次与 iwcv 选择几乎一致）
+- `rho_iwcv_ucb_mean ≈ 0.037`（相比 iwcv 略增，但仍很弱）
+
 ### Run（calibrated_ridge selector, diag-all）
 
 动机：把“候选选择”显式当作无标签模型选择问题，在其他被试上用 **label-only** 的 improvement 数据把证书校准成一个回归器：
@@ -195,6 +225,7 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 | `objective` | 0.676697 | 0.014661 | 0.555556 | `rho_score_mean=0.299418` |
 | `evidence` | 0.680556 | 0.010802 | 0.000000 | `rho_ev_mean=-0.075179` |
 | `iwcv` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_mean=0.033065` |
+| `iwcv_ucb (k=1.0)` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_ucb_mean=0.037097` |
 | `calibrated_ridge` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
 | `calibrated_guard` | 0.685185 | 0.006173 | 0.222222 | `rho_guard_mean=0.337858` |
 
@@ -265,6 +296,25 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Negative transfer rate: `0.111111`
 - Spearman mean：`rho_iwcv_mean ≈ 0.007`（仍接近 0；收益更像来自“避免选到坏 candidate”而不是“精确挑到 oracle”）
 
+### Run（iwcv_ucb selector, diag-all）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector iwcv_ucb \
+  --oea-zo-iwcv-kappa 1.0 \
+  --run-name 2c_fir6_iwcv_ucb_k1_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+关键汇总：
+- Selected mean acc: `0.807099`（略低于 iwcv `0.808642`）
+- `rho_iwcv_ucb_mean ≈ 0.033`（比 iwcv 的 `0.007` 大，但仍不强）
+
 ### Run（calibrated_ridge selector, diag-all）
 
 ```bash
@@ -319,5 +369,6 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 |---|---:|---:|---:|---:|
 | `evidence` | 0.801698 | 0.013117 | 0.333333 | `rho_ev_mean=-0.542966` |
 | `iwcv` | 0.808642 | 0.006173 | 0.111111 | `rho_iwcv_mean=0.007034` |
+| `iwcv_ucb (k=1.0)` | 0.807099 | 0.007716 | 0.111111 | `rho_iwcv_ucb_mean=0.033423` |
 | `calibrated_ridge` | 0.799383 | 0.015432 | 0.222222 | `rho_ridge_mean=0.023163` |
 | `calibrated_guard` | 0.803241 | 0.011574 | 0.222222 | `rho_guard_mean=-0.290860` |

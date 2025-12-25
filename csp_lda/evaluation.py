@@ -23,6 +23,7 @@ from .certificate import (
     select_by_evidence_nll,
     select_by_guarded_objective,
     select_by_iwcv_nll,
+    select_by_iwcv_ucb,
     select_by_predicted_improvement,
     select_by_probe_mixup,
     select_by_probe_mixup_hard,
@@ -176,6 +177,7 @@ def loso_cross_subject_evaluation(
     oea_zo_drift_gamma: float = 0.0,
     oea_zo_drift_delta: float = 0.0,
     oea_zo_selector: str = "objective",
+    oea_zo_iwcv_kappa: float = 1.0,
     oea_zo_calib_ridge_alpha: float = 1.0,
     oea_zo_calib_max_subjects: int = 0,
     oea_zo_calib_seed: int = 0,
@@ -280,14 +282,17 @@ def loso_cross_subject_evaluation(
         "probe_mixup",
         "probe_mixup_hard",
         "iwcv",
+        "iwcv_ucb",
         "calibrated_ridge",
         "calibrated_guard",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "'objective', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
         )
+    if float(oea_zo_iwcv_kappa) < 0.0:
+        raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
     if float(oea_zo_calib_ridge_alpha) <= 0.0:
         raise ValueError("oea_zo_calib_ridge_alpha must be > 0.")
     if int(oea_zo_calib_max_subjects) < 0:
@@ -393,6 +398,7 @@ def loso_cross_subject_evaluation(
             use_probe_mixup = selector == "probe_mixup"
             use_probe_mixup_hard = selector == "probe_mixup_hard"
             use_iwcv = selector == "iwcv"
+            use_iwcv_ucb = selector == "iwcv_ucb"
             use_oracle = selector == "oracle"
             cert = None
             guard = None
@@ -601,6 +607,7 @@ def loso_cross_subject_evaluation(
                 or use_probe_mixup
                 or use_probe_mixup_hard
                 or use_iwcv
+                or use_iwcv_ucb
                 or use_oracle
             )
             lda_ev = None
@@ -707,6 +714,21 @@ def loso_cross_subject_evaluation(
                         y_source=y_train,
                         z_target=z_t,
                         class_order=class_labels,
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
+                elif use_iwcv_ucb:
+                    selected = select_by_iwcv_ucb(
+                        zo_diag.get("records", []),
+                        model=model,
+                        z_source=X_train,
+                        y_source=y_train,
+                        z_target=z_t,
+                        class_order=class_labels,
+                        kappa=float(oea_zo_iwcv_kappa),
                         drift_mode=str(oea_zo_drift_mode),
                         drift_gamma=float(oea_zo_drift_gamma),
                         drift_delta=float(oea_zo_drift_delta),
@@ -874,6 +896,7 @@ def loso_cross_subject_evaluation(
                 use_probe_mixup = selector == "probe_mixup"
                 use_probe_mixup_hard = selector == "probe_mixup_hard"
                 use_iwcv = selector == "iwcv"
+                use_iwcv_ucb = selector == "iwcv_ucb"
                 use_oracle = selector == "oracle"
                 want_diag = (
                     bool(do_diag)
@@ -881,6 +904,7 @@ def loso_cross_subject_evaluation(
                     or use_probe_mixup
                     or use_probe_mixup_hard
                     or use_iwcv
+                    or use_iwcv_ucb
                     or use_oracle
                 )
                 lda_ev = None
@@ -990,6 +1014,23 @@ def loso_cross_subject_evaluation(
                             y_source=y_train,
                             z_target=z_t,
                             class_order=class_labels,
+                            drift_mode=str(oea_zo_drift_mode),
+                            drift_gamma=float(oea_zo_drift_gamma),
+                            drift_delta=float(oea_zo_drift_delta),
+                            min_improvement=float(oea_zo_min_improvement),
+                            seed=int(oea_zo_seed) + int(test_subject) * 997,
+                        )
+                        if sel is not None:
+                            q_t = np.asarray(sel.get("Q"), dtype=np.float64)
+                    elif use_iwcv_ucb:
+                        sel = select_by_iwcv_ucb(
+                            zo_diag.get("records", []),
+                            model=model,
+                            z_source=X_train,
+                            y_source=y_train,
+                            z_target=z_t,
+                            class_order=class_labels,
+                            kappa=float(oea_zo_iwcv_kappa),
                             drift_mode=str(oea_zo_drift_mode),
                             drift_gamma=float(oea_zo_drift_gamma),
                             drift_delta=float(oea_zo_drift_delta),
@@ -1114,6 +1155,7 @@ def cross_session_within_subject_evaluation(
     oea_zo_drift_gamma: float = 0.0,
     oea_zo_drift_delta: float = 0.0,
     oea_zo_selector: str = "objective",
+    oea_zo_iwcv_kappa: float = 1.0,
     oea_zo_calib_ridge_alpha: float = 1.0,
     oea_zo_calib_max_subjects: int = 0,
     oea_zo_calib_seed: int = 0,
@@ -1275,6 +1317,7 @@ def cross_session_within_subject_evaluation(
                     use_probe_mixup = selector == "probe_mixup"
                     use_probe_mixup_hard = selector == "probe_mixup_hard"
                     use_iwcv = selector == "iwcv"
+                    use_iwcv_ucb = selector == "iwcv_ucb"
                     use_oracle = selector == "oracle"
                     cert = None
                     guard = None
@@ -1467,6 +1510,7 @@ def cross_session_within_subject_evaluation(
                         or use_probe_mixup
                         or use_probe_mixup_hard
                         or use_iwcv
+                        or use_iwcv_ucb
                         or use_oracle
                     )
                     if use_oracle:
@@ -1575,6 +1619,21 @@ def cross_session_within_subject_evaluation(
                                 y_source=y_train,
                                 z_target=z_test,
                                 class_order=class_labels,
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                                seed=int(oea_zo_seed) + int(subject) * 997,
+                            )
+                        elif use_iwcv_ucb:
+                            selected = select_by_iwcv_ucb(
+                                zo_diag.get("records", []),
+                                model=model,
+                                z_source=z_train,
+                                y_source=y_train,
+                                z_target=z_test,
+                                class_order=class_labels,
+                                kappa=float(oea_zo_iwcv_kappa),
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
                                 drift_delta=float(oea_zo_drift_delta),

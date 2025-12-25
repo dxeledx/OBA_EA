@@ -106,6 +106,13 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if iw_mask.any():
                 best_iwcv_acc = float(df.loc[iw[iw_mask].idxmin(), "accuracy"])
 
+        best_iwcv_ucb_acc = float("nan")
+        if "iwcv_ucb" in df.columns:
+            iw_u = df["iwcv_ucb"].astype(float)
+            iw_u_mask = np.isfinite(iw_u.to_numpy())
+            if iw_u_mask.any():
+                best_iwcv_ucb_acc = float(df.loc[iw_u[iw_u_mask].idxmin(), "accuracy"])
+
         best_ridge_acc = float("nan")
         if "ridge_pred_improve" in df.columns:
             rp = df["ridge_pred_improve"].astype(float)
@@ -143,6 +150,11 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             iw = df["iwcv_nll"].astype(float).to_numpy()
             rho_iwcv = _spearman_pos(-iw, acc)
 
+        rho_iwcv_ucb = float("nan")
+        if "iwcv_ucb" in df.columns:
+            iw_u = df["iwcv_ucb"].astype(float).to_numpy()
+            rho_iwcv_ucb = _spearman_pos(-iw_u, acc)
+
         rho_ridge = float("nan")
         if "ridge_pred_improve" in df.columns:
             rp = df["ridge_pred_improve"].astype(float).to_numpy()
@@ -173,6 +185,8 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_probe_hard": oracle_acc - best_pmh_acc,
                 "best_iwcv_acc": best_iwcv_acc,
                 "gap_iwcv": oracle_acc - best_iwcv_acc,
+                "best_iwcv_ucb_acc": best_iwcv_ucb_acc,
+                "gap_iwcv_ucb": oracle_acc - best_iwcv_ucb_acc,
                 "best_ridge_acc": best_ridge_acc,
                 "gap_ridge": oracle_acc - best_ridge_acc,
                 "best_guard_acc": best_guard_acc,
@@ -182,6 +196,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "rho_probe": rho_pm,
                 "rho_probe_hard": rho_pmh,
                 "rho_iwcv": rho_iwcv,
+                "rho_iwcv_ucb": rho_iwcv_ucb,
                 "rho_ridge": rho_ridge,
                 "rho_guard": rho_guard,
                 "neg_transfer": float((sel_acc + tol) < id_acc),
@@ -202,6 +217,9 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_probe_mean": float(table["rho_probe"].mean()),
         "rho_probe_hard_mean": float(table["rho_probe_hard"].mean()),
         "rho_iwcv_mean": float(table["rho_iwcv"].mean()) if "rho_iwcv" in table.columns else float("nan"),
+        "rho_iwcv_ucb_mean": float(table["rho_iwcv_ucb"].mean())
+        if "rho_iwcv_ucb" in table.columns
+        else float("nan"),
         "rho_ridge_mean": float(table["rho_ridge"].mean()) if "rho_ridge" in table.columns else float("nan"),
         "rho_guard_mean": float(table["rho_guard"].mean()) if "rho_guard" in table.columns else float("nan"),
         "best_score_mean": float(table["best_score_acc"].mean()),
@@ -209,6 +227,9 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "best_probe_mean": float(table["best_probe_acc"].mean()),
         "best_probe_hard_mean": float(table["best_probe_hard_acc"].mean()),
         "best_iwcv_mean": float(table["best_iwcv_acc"].mean()) if "best_iwcv_acc" in table.columns else float("nan"),
+        "best_iwcv_ucb_mean": float(table["best_iwcv_ucb_acc"].mean())
+        if "best_iwcv_ucb_acc" in table.columns
+        else float("nan"),
         "best_ridge_mean": float(table["best_ridge_acc"].mean()) if "best_ridge_acc" in table.columns else float("nan"),
         "best_guard_mean": float(table["best_guard_acc"].mean()) if "best_guard_acc" in table.columns else float("nan"),
     }
@@ -239,6 +260,7 @@ def main() -> None:
         "rho_probe_mean",
         "rho_probe_hard_mean",
         "rho_iwcv_mean",
+        "rho_iwcv_ucb_mean",
         "rho_ridge_mean",
         "rho_guard_mean",
         "best_score_mean",
@@ -246,6 +268,7 @@ def main() -> None:
         "best_probe_mean",
         "best_probe_hard_mean",
         "best_iwcv_mean",
+        "best_iwcv_ucb_mean",
         "best_ridge_mean",
         "best_guard_mean",
     ]:

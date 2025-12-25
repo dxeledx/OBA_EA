@@ -129,11 +129,18 @@ def parse_args() -> argparse.Namespace:
             "probe_mixup",
             "probe_mixup_hard",
             "iwcv",
+            "iwcv_ucb",
             "calibrated_ridge",
             "calibrated_guard",
             "oracle",
         ],
         default="objective",
+    )
+    p.add_argument(
+        "--oea-zo-iwcv-kappa",
+        type=float,
+        default=1.0,
+        help="UCB penalty strength for iwcv_ucb selector (kappa>=0).",
     )
     p.add_argument("--oea-zo-calib-ridge-alpha", type=float, default=1.0)
     p.add_argument("--oea-zo-calib-max-subjects", type=int, default=0)
@@ -320,6 +327,7 @@ def main() -> None:
             oea_zo_drift_gamma=float(args.oea_zo_drift_gamma),
             oea_zo_drift_delta=float(args.oea_zo_drift_delta),
             oea_zo_selector=str(args.oea_zo_selector),
+            oea_zo_iwcv_kappa=float(args.oea_zo_iwcv_kappa),
             oea_zo_calib_ridge_alpha=float(args.oea_zo_calib_ridge_alpha),
             oea_zo_calib_max_subjects=int(args.oea_zo_calib_max_subjects),
             oea_zo_calib_seed=int(args.oea_zo_calib_seed),

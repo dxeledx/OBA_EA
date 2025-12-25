@@ -280,6 +280,7 @@ def parse_args() -> argparse.Namespace:
             "probe_mixup",
             "probe_mixup_hard",
             "iwcv",
+            "iwcv_ucb",
             "calibrated_ridge",
             "calibrated_guard",
             "oracle",
@@ -292,10 +293,17 @@ def parse_args() -> argparse.Namespace:
             "probe_mixup selects by a MixUp-style probe score in CSP feature space; "
             "probe_mixup_hard selects by a MixUp-style probe with hard-major pseudo labels (MixVal-style λ>0.5); "
             "iwcv selects by importance-weighted NLL on labeled source (covariate-shift certificate); "
+            "iwcv_ucb selects by IWCV-UCB (IWCV-NLL plus kappa*SE via n_eff); "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
             "calibrated_guard learns a binary guard to reject likely negative transfer; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
+    )
+    p.add_argument(
+        "--oea-zo-iwcv-kappa",
+        type=float,
+        default=1.0,
+        help="For selector=iwcv_ucb: UCB penalty strength kappa (>=0).",
     )
     p.add_argument(
         "--oea-zo-calib-ridge-alpha",
@@ -697,6 +705,7 @@ def main() -> None:
                 oea_zo_drift_gamma=float(args.oea_zo_drift_gamma),
                 oea_zo_drift_delta=float(args.oea_zo_drift_delta),
                 oea_zo_selector=str(args.oea_zo_selector),
+                oea_zo_iwcv_kappa=float(args.oea_zo_iwcv_kappa),
                 oea_zo_calib_ridge_alpha=float(args.oea_zo_calib_ridge_alpha),
                 oea_zo_calib_max_subjects=int(args.oea_zo_calib_max_subjects),
                 oea_zo_calib_seed=int(args.oea_zo_calib_seed),
