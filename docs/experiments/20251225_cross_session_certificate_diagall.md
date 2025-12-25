@@ -247,6 +247,28 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Negative transfer rate: `0.222222`
 - `rho_guard_mean ≈ 0.338`（guard 概率与 acc 的相关性比 ridge 略高，但更容易出现少数被试掉点）
 
+### Run（calibrated_ridge_guard selector, diag-all）
+
+动机：把 `calibrated_ridge` 和 `calibrated_guard` 组合成一个更“安全”的选择器：
+先用 guard 过滤，再在保留集合里按 ridge 预测提升选最优（若预测提升≤0 则回退 identity）。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_ridge_guard \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-guard-c 1.0 --oea-zo-calib-guard-threshold 0.5 --oea-zo-calib-guard-margin 0.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_calib_ridge_guard_all_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+关键汇总（本次实现下）：`calibrated_ridge_guard` 与 `calibrated_ridge` 基本等价（Selected mean acc `0.684414`，Neg transfer `0.111111`），未带来额外收益。
+
 ### 4-class 对比表（可复现）
 
 固定：EA mean `0.680170`，Oracle mean `0.691358`（headroom ≈ `+0.011188`）。
@@ -260,6 +282,7 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 | `iwcv_ucb (k=1.0)` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_ucb_mean=0.037097` |
 | `calibrated_ridge` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
 | `calibrated_guard` | 0.685185 | 0.006173 | 0.222222 | `rho_guard_mean=0.337858` |
+| `calibrated_ridge_guard` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
 
 ## 2-class（left vs right）
 
@@ -423,6 +446,25 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 - Selected mean acc: `0.803241`（几乎等同 EA）
 - `rho_guard_mean ≈ -0.291`（相关性为负，说明该 guard 在 2 类下并不可靠）
 
+### Run（calibrated_ridge_guard selector, diag-all）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_ridge_guard \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-guard-c 1.0 --oea-zo-calib-guard-threshold 0.5 --oea-zo-calib-guard-margin 0.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 2c_fir6_calib_ridge_guard_all_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+结论：2 类下该组合选择器更差（Selected mean acc `0.802469` < EA `0.803241`，Neg transfer `0.222222`），不推荐用于 2 类主结果。
+
 ### 2-class 对比表（可复现）
 
 固定：EA mean `0.803241`，Oracle mean `0.814815`（headroom ≈ `+0.011574`）。
@@ -435,3 +477,4 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 | `iwcv_ucb (k=1.0)` | 0.807099 | 0.007716 | 0.111111 | `rho_iwcv_ucb_mean=0.033423` |
 | `calibrated_ridge` | 0.799383 | 0.015432 | 0.222222 | `rho_ridge_mean=0.023163` |
 | `calibrated_guard` | 0.803241 | 0.011574 | 0.222222 | `rho_guard_mean=-0.290860` |
+| `calibrated_ridge_guard` | 0.802469 | 0.012346 | 0.222222 | `rho_ridge_mean=0.023163` |

@@ -133,6 +133,7 @@ def parse_args() -> argparse.Namespace:
             "iwcv_ucb",
             "calibrated_ridge",
             "calibrated_guard",
+            "calibrated_ridge_guard",
             "oracle",
         ],
         default="objective",

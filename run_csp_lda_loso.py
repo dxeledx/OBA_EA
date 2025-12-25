@@ -284,6 +284,7 @@ def parse_args() -> argparse.Namespace:
             "iwcv_ucb",
             "calibrated_ridge",
             "calibrated_guard",
+            "calibrated_ridge_guard",
             "oracle",
         ],
         default="objective",
@@ -298,6 +299,7 @@ def parse_args() -> argparse.Namespace:
             "iwcv_ucb selects by IWCV-UCB (IWCV-NLL plus kappa*SE via n_eff); "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
             "calibrated_guard learns a binary guard to reject likely negative transfer; "
+            "calibrated_ridge_guard uses the learned guard to filter candidates, then selects by ridge-predicted improvement; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
     )

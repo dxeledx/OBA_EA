@@ -732,6 +732,67 @@ def select_by_guarded_objective(
     raise ValueError("No candidates to select from.")
 
 
+def select_by_guarded_predicted_improvement(
+    records: Iterable[dict],
+    *,
+    cert: RidgeCertificate,
+    guard: LogisticGuard,
+    n_classes: int,
+    threshold: float = 0.5,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+) -> dict:
+    """Guarded selection: reject likely negative-transfer candidates, then pick by ridge prediction.
+
+    Selection rule:
+    - keep candidates with P(pos_improve) >= threshold (identity is always allowed),
+    - apply optional drift hard/penalty,
+    - choose the maximum predicted improvement; if <= 0, fall back to identity.
+    """
+
+    if not (0.0 <= float(threshold) <= 1.0):
+        raise ValueError("threshold must be in [0,1].")
+
+    best: dict | None = None
+    best_score = -float("inf")
+    identity: dict | None = None
+
+    for rec in records:
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        p_pos = float(guard.predict_pos_proba(feats)[0])
+        pred_improve = float(cert.predict_accuracy(feats)[0])
+        # Record for diagnostics / analysis.
+        rec["guard_p_pos"] = float(p_pos)
+        rec["ridge_pred_improve"] = float(pred_improve)
+
+        if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            pred_improve = float(pred_improve) - float(drift_gamma) * float(drift)
+
+        if pred_improve > best_score:
+            best_score = float(pred_improve)
+            best = rec
+
+    # Safety: if the best predicted improvement is non-positive, fall back to identity.
+    if best is None or best_score <= 0.0:
+        if identity is not None:
+            return identity
+        for rec in records:
+            return rec
+        raise ValueError("No candidates to select from.")
+
+    return best
+
+
 def select_by_evidence_nll(
     records: Iterable[dict],
     *,

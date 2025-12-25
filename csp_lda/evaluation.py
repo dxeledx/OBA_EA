@@ -22,6 +22,7 @@ from .certificate import (
     candidate_features_from_record,
     select_by_dev_nll,
     select_by_evidence_nll,
+    select_by_guarded_predicted_improvement,
     select_by_guarded_objective,
     select_by_iwcv_nll,
     select_by_iwcv_ucb,
@@ -287,11 +288,12 @@ def loso_cross_subject_evaluation(
         "iwcv_ucb",
         "calibrated_ridge",
         "calibrated_guard",
+        "calibrated_ridge_guard",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -394,8 +396,9 @@ def loso_cross_subject_evaluation(
 
             # Optional: offline calibrated certificate / guard (trained only on source subjects in this fold).
             selector = str(oea_zo_selector)
-            use_ridge = selector == "calibrated_ridge"
-            use_guard = selector == "calibrated_guard"
+            use_ridge_guard = selector == "calibrated_ridge_guard"
+            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard"}
+            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
             use_evidence = selector == "evidence"
             use_probe_mixup = selector == "probe_mixup"
             use_probe_mixup_hard = selector == "probe_mixup_hard"
@@ -751,6 +754,17 @@ def loso_cross_subject_evaluation(
                         drift_delta=float(oea_zo_drift_delta),
                         min_improvement=float(oea_zo_min_improvement),
                         seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
+                elif use_ridge_guard and cert is not None and guard is not None:
+                    selected = select_by_guarded_predicted_improvement(
+                        zo_diag.get("records", []),
+                        cert=cert,
+                        guard=guard,
+                        n_classes=len(class_labels),
+                        threshold=float(oea_zo_calib_guard_threshold),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
                     )
                 elif use_ridge and cert is not None:
                     selected = select_by_predicted_improvement(
@@ -1346,8 +1360,9 @@ def cross_session_within_subject_evaluation(
                     model = fit_csp_lda(z_train, y_train, n_components=n_components)
 
                     selector = str(oea_zo_selector)
-                    use_ridge = selector == "calibrated_ridge"
-                    use_guard = selector == "calibrated_guard"
+                    use_ridge_guard = selector == "calibrated_ridge_guard"
+                    use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard"}
+                    use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
                     use_evidence = selector == "evidence"
                     use_probe_mixup = selector == "probe_mixup"
                     use_probe_mixup_hard = selector == "probe_mixup_hard"
@@ -1690,6 +1705,17 @@ def cross_session_within_subject_evaluation(
                                 drift_delta=float(oea_zo_drift_delta),
                                 min_improvement=float(oea_zo_min_improvement),
                                 seed=int(oea_zo_seed) + int(subject) * 997,
+                            )
+                        elif use_ridge_guard and cert is not None and guard is not None:
+                            selected = select_by_guarded_predicted_improvement(
+                                zo_diag.get("records", []),
+                                cert=cert,
+                                guard=guard,
+                                n_classes=len(class_labels),
+                                threshold=float(oea_zo_calib_guard_threshold),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
                             )
                         elif use_ridge and cert is not None:
                             selected = select_by_predicted_improvement(
