@@ -243,6 +243,98 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Oracle gap mean: `0.004244`
 - Negative transfer rate: `0.000000`
 
+### Seed 稳定性检查（4-class）
+
+说明：`calibrated_stack_ridge` 的主要随机性来自 `--oea-zo-seed`（影响候选生成/证书 probe 计算/校准阶段的 ZO 轨迹）。
+
+固定参数同上，仅改变 `--oea-zo-seed`，不输出 diagnostics（更快）。
+
+seed=1：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --oea-zo-seed 1 \
+  --run-name 4c_fir6_stack_ridge_seed1
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_stack_ridge_seed1/20251225_results.txt`
+
+seed=2：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --oea-zo-seed 2 \
+  --run-name 4c_fir6_stack_ridge_seed2
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_stack_ridge_seed2/20251225_results.txt`
+
+seed=3：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --oea-zo-seed 3 \
+  --run-name 4c_fir6_stack_ridge_seed3
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_stack_ridge_seed3/20251225_results.txt`
+
+seed=4：
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --oea-zo-seed 4 \
+  --run-name 4c_fir6_stack_ridge_seed4
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_stack_ridge_seed4/20251225_results.txt`
+
+汇总（mean acc across subjects）：
+
+| oea_zo_seed | Selected mean acc | Δ vs EA mean | #neg subjects |
+|---:|---:|---:|---:|
+| 0 | 0.687114 | +0.006944 | 0 |
+| 1 | 0.685957 | +0.005787 | 0 |
+| 2 | 0.684799 | +0.004630 | 2 |
+| 3 | 0.684028 | +0.003858 | 1 |
+| 4 | 0.685571 | +0.005401 | 1 |
+
+Across seeds（0–4）：`mean=0.685494`, `std=0.001170`（对应 Δ vs EA：`mean=0.005324`, `std=0.001170`）。
+
+注意：平均提升相对稳定，但仍存在少数 seed 下个别 subject 负迁移（总计 4/45 的 subject×seed 为负迁移），说明证书仍未“完全可靠”。
+
 ### Run（calibrated_guard selector, diag-all）
 
 动机：学习一个二分类守门员 `P(improve ≥ margin | features)`，先拒绝更可能负迁移的 candidates，再在保留集合里按 objective/score 选最优（identity 总是允许）。
