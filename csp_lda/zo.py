@@ -56,6 +56,14 @@ def _write_zo_diagnostics(
             "objective_base": float(rec.get("objective_base", np.nan)),
             "evidence_nll_best": float(rec.get("evidence_nll_best", np.nan)),
             "evidence_nll_full": float(rec.get("evidence_nll_full", np.nan)),
+            "probe_mixup_best": float(rec.get("probe_mixup_best", np.nan)),
+            "probe_mixup_full": float(rec.get("probe_mixup_full", np.nan)),
+            "probe_mixup_pairs_best": int(rec.get("probe_mixup_pairs_best", -1)),
+            "probe_mixup_pairs_full": int(rec.get("probe_mixup_pairs_full", -1)),
+            "probe_mixup_keep_best": int(rec.get("probe_mixup_keep_best", -1)),
+            "probe_mixup_keep_full": int(rec.get("probe_mixup_keep_full", -1)),
+            "probe_mixup_frac_intra_best": float(rec.get("probe_mixup_frac_intra_best", np.nan)),
+            "probe_mixup_frac_intra_full": float(rec.get("probe_mixup_frac_intra_full", np.nan)),
             "pen_marginal": float(rec.get("pen_marginal", np.nan)),
             "pen_trust": float(rec.get("pen_trust", np.nan)),
             "pen_l2": float(rec.get("pen_l2", np.nan)),
@@ -93,6 +101,14 @@ def _write_zo_diagnostics(
         ev_r = ev.argsort().argsort().astype(np.float64)
         spearman_ev = float(np.corrcoef(ev_r, acc_r)[0, 1])
 
+    pm = df["probe_mixup_best"].to_numpy(dtype=np.float64)
+    pearson_pm = float("nan")
+    spearman_pm = float("nan")
+    if pm.size >= 2 and np.isfinite(pm).any():
+        pearson_pm = float(np.corrcoef(pm, acc)[0, 1])
+        pm_r = pm.argsort().argsort().astype(np.float64)
+        spearman_pm = float(np.corrcoef(pm_r, acc_r)[0, 1])
+
     prior = zo_diag.get("marginal_prior")
     prior_arr = None if prior is None else np.asarray(prior, dtype=np.float64).reshape(-1)
 
@@ -123,6 +139,13 @@ def _write_zo_diagnostics(
             output_path=diag_dir / "evidence_vs_accuracy.png",
             title=f"Subject {subject} — evidence(-log p) vs acc (pearson={pearson_ev:.3f}, spearman={spearman_ev:.3f})",
         )
+    if np.isfinite(pm).any():
+        plot_objective_vs_accuracy_scatter(
+            pm,
+            acc,
+            output_path=diag_dir / "probe_mixup_vs_accuracy.png",
+            title=f"Subject {subject} — probe_mixup vs acc (pearson={pearson_pm:.3f}, spearman={spearman_pm:.3f})",
+        )
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
         score = df["score"].to_numpy(dtype=np.float64)
         pearson_s = float(np.corrcoef(score, acc)[0, 1]) if score.size >= 2 else float("nan")
@@ -142,6 +165,12 @@ def _write_zo_diagnostics(
             best_by_evidence = int(df.loc[df["evidence_nll_best"].idxmin(), "idx"])
         except Exception:
             best_by_evidence = -1
+    best_by_probe = -1
+    if np.isfinite(pm).any():
+        try:
+            best_by_probe = int(df.loc[df["probe_mixup_best"].idxmin(), "idx"])
+        except Exception:
+            best_by_probe = -1
     lines = [
         f"tag: {tag}",
         f"subject: {subject}",
@@ -150,8 +179,11 @@ def _write_zo_diagnostics(
         f"spearman(objective, accuracy): {spearman:.6f}",
         f"pearson(evidence, accuracy): {pearson_ev:.6f}",
         f"spearman(evidence, accuracy): {spearman_ev:.6f}",
+        f"pearson(probe_mixup, accuracy): {pearson_pm:.6f}",
+        f"spearman(probe_mixup, accuracy): {spearman_pm:.6f}",
         f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
         f"best_by_evidence: idx={best_by_evidence}",
+        f"best_by_probe_mixup: idx={best_by_probe}",
         f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",
     ]
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
