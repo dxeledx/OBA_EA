@@ -134,6 +134,7 @@ def parse_args() -> argparse.Namespace:
             "calibrated_ridge",
             "calibrated_guard",
             "calibrated_ridge_guard",
+            "calibrated_stack_ridge",
             "oracle",
         ],
         default="objective",

@@ -20,6 +20,7 @@ from .alignment import (
 from .model import TrainedModel, fit_csp_lda
 from .certificate import (
     candidate_features_from_record,
+    stacked_candidate_features_from_record,
     select_by_dev_nll,
     select_by_evidence_nll,
     select_by_guarded_predicted_improvement,
@@ -289,11 +290,12 @@ def loso_cross_subject_evaluation(
         "calibrated_ridge",
         "calibrated_guard",
         "calibrated_ridge_guard",
+        "calibrated_stack_ridge",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -396,8 +398,9 @@ def loso_cross_subject_evaluation(
 
             # Optional: offline calibrated certificate / guard (trained only on source subjects in this fold).
             selector = str(oea_zo_selector)
+            use_stack = selector == "calibrated_stack_ridge"
             use_ridge_guard = selector == "calibrated_ridge_guard"
-            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard"}
+            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard", "calibrated_stack_ridge"}
             use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
             use_evidence = selector == "evidence"
             use_probe_mixup = selector == "probe_mixup"
@@ -467,7 +470,7 @@ def loso_cross_subject_evaluation(
                             marginal_prior_inner = marginal_prior_inner / float(np.sum(marginal_prior_inner))
 
                     lda_ev_inner = None
-                    if str(oea_zo_objective) == "lda_nll":
+                    if str(oea_zo_objective) == "lda_nll" or use_stack:
                         lda_ev_inner = _compute_lda_evidence_params(
                             model=model_inner,
                             X_train=X_inner,
@@ -528,7 +531,10 @@ def loso_cross_subject_evaluation(
                     acc_list: List[float] = []
                     acc_id: float | None = None
                     for rec in recs:
-                        feats, names = candidate_features_from_record(rec, n_classes=len(class_labels))
+                        if use_stack:
+                            feats, names = stacked_candidate_features_from_record(rec, n_classes=len(class_labels))
+                        else:
+                            feats, names = candidate_features_from_record(rec, n_classes=len(class_labels))
                         if feat_names is None:
                             feat_names = names
                         Q = np.asarray(rec.get("Q"), dtype=np.float64)
@@ -617,7 +623,7 @@ def loso_cross_subject_evaluation(
                 or use_oracle
             )
             lda_ev = None
-            if str(oea_zo_objective) == "lda_nll" or use_evidence or bool(do_diag):
+            if str(oea_zo_objective) == "lda_nll" or use_evidence or use_stack or bool(do_diag):
                 lda_ev = _compute_lda_evidence_params(
                     model=model,
                     X_train=X_train,
@@ -774,6 +780,7 @@ def loso_cross_subject_evaluation(
                         drift_mode=str(oea_zo_drift_mode),
                         drift_gamma=float(oea_zo_drift_gamma),
                         drift_delta=float(oea_zo_drift_delta),
+                        feature_set="stacked" if use_stack else "base",
                     )
                 elif use_guard and guard is not None:
                     selected = select_by_guarded_objective(
@@ -1360,8 +1367,9 @@ def cross_session_within_subject_evaluation(
                     model = fit_csp_lda(z_train, y_train, n_components=n_components)
 
                     selector = str(oea_zo_selector)
+                    use_stack = selector == "calibrated_stack_ridge"
                     use_ridge_guard = selector == "calibrated_ridge_guard"
-                    use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard"}
+                    use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard", "calibrated_stack_ridge"}
                     use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
                     use_evidence = selector == "evidence"
                     use_probe_mixup = selector == "probe_mixup"
@@ -1431,7 +1439,7 @@ def cross_session_within_subject_evaluation(
                                     marginal_prior_p = marginal_prior_p / float(np.sum(marginal_prior_p))
 
                             lda_ev_p = None
-                            if str(oea_zo_objective) == "lda_nll":
+                            if str(oea_zo_objective) == "lda_nll" or use_stack:
                                 lda_ev_p = _compute_lda_evidence_params(
                                     model=model_p,
                                     X_train=z_tr_p,
@@ -1492,7 +1500,12 @@ def cross_session_within_subject_evaluation(
                             acc_list: List[float] = []
                             acc_id: float | None = None
                             for rec in recs:
-                                feats, names = candidate_features_from_record(rec, n_classes=len(class_labels))
+                                if use_stack:
+                                    feats, names = stacked_candidate_features_from_record(
+                                        rec, n_classes=len(class_labels)
+                                    )
+                                else:
+                                    feats, names = candidate_features_from_record(rec, n_classes=len(class_labels))
                                 if feat_names is None:
                                     feat_names = names
                                 Q = np.asarray(rec.get("Q"), dtype=np.float64)
@@ -1568,7 +1581,7 @@ def cross_session_within_subject_evaluation(
                     if use_oracle:
                         want_diag = True
                     lda_ev = None
-                    if str(oea_zo_objective) == "lda_nll" or use_evidence or bool(do_diag):
+                    if str(oea_zo_objective) == "lda_nll" or use_evidence or use_stack or bool(do_diag):
                         lda_ev = _compute_lda_evidence_params(
                             model=model,
                             X_train=z_train,
@@ -1725,6 +1738,7 @@ def cross_session_within_subject_evaluation(
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
                                 drift_delta=float(oea_zo_drift_delta),
+                                feature_set="stacked" if use_stack else "base",
                             )
                         elif use_guard and guard is not None:
                             selected = select_by_guarded_objective(

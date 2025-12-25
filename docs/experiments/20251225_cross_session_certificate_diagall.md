@@ -210,6 +210,39 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Negative transfer rate: `0.111111`
 - `rho_ridge_mean ≈ 0.319`（相比 evidence/probe 更“对齐”，但仍不算强相关）
 
+### Run（calibrated_stack_ridge selector, diag-all）
+
+动机：把候选选择当作“无标签证书有效性/模型选择”问题：在校准阶段对每个 candidate 计算多种证书信号（objective+drift+evidence+probe），再用 ridge 回归拟合“相对 identity 的提升”，用于目标域选择。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_calib_stack_ridge_all_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_calib_stack_ridge_all_rot_scale_diagall_v1 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- EA mean acc: `0.680170`
+- Selected mean acc (calibrated_stack_ridge): `0.687114`
+- Oracle mean acc: `0.691358`
+- Oracle gap mean: `0.004244`
+- Negative transfer rate: `0.000000`
+
 ### Run（calibrated_guard selector, diag-all）
 
 动机：学习一个二分类守门员 `P(improve ≥ margin | features)`，先拒绝更可能负迁移的 candidates，再在保留集合里按 objective/score 选最优（identity 总是允许）。
@@ -283,6 +316,7 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 | `calibrated_ridge` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
 | `calibrated_guard` | 0.685185 | 0.006173 | 0.222222 | `rho_guard_mean=0.337858` |
 | `calibrated_ridge_guard` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
+| `calibrated_stack_ridge` | 0.687114 | 0.004244 | 0.000000 | `rho_ridge_mean=0.293459` |
 
 ## 2-class（left vs right）
 

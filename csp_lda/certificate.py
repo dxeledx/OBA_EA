@@ -63,6 +63,16 @@ def _safe_float(x) -> float:
     return v
 
 
+def _safe_float_or(x, default: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        return float(default)
+    if not np.isfinite(v):
+        return float(default)
+    return float(v)
+
+
 def candidate_features_from_record(
     rec: dict,
     *,
@@ -147,6 +157,74 @@ def candidate_features_from_record(
         names.extend([f"qbar_{k}" for k in range(n_classes)])
 
     return np.asarray(feats, dtype=np.float64), tuple(names)
+
+
+def stacked_candidate_features_from_record(
+    rec: dict,
+    *,
+    n_classes: int,
+    include_pbar: bool = True,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Feature vector that also includes multiple certificate signals (evidence/probe/etc).
+
+    Intended for calibrated model selection (certificate stacking).
+    """
+
+    base_feats, base_names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=include_pbar)
+
+    # Note: for NLL-like certificates, missing values are set to a large default
+    # so that "missing" never looks artificially good.
+    LARGE = 1e6
+    extras: list[float] = [
+        _safe_float(rec.get("objective", 0.0)),
+        _safe_float(rec.get("score", 0.0)),
+        _safe_float(rec.get("mean_confidence", 0.0)),
+        _safe_float_or(rec.get("evidence_nll_best", np.nan), LARGE),
+        _safe_float_or(rec.get("evidence_nll_full", np.nan), LARGE),
+        _safe_float_or(rec.get("probe_mixup_best", np.nan), LARGE),
+        _safe_float_or(rec.get("probe_mixup_full", np.nan), LARGE),
+        _safe_float_or(rec.get("probe_mixup_hard_best", np.nan), LARGE),
+        _safe_float_or(rec.get("probe_mixup_hard_full", np.nan), LARGE),
+        _safe_float(rec.get("probe_mixup_pairs_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_pairs_full", 0.0)),
+        _safe_float(rec.get("probe_mixup_keep_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_keep_full", 0.0)),
+        _safe_float(rec.get("probe_mixup_frac_intra_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_frac_intra_full", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_pairs_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_pairs_full", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_keep_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_keep_full", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_frac_intra_best", 0.0)),
+        _safe_float(rec.get("probe_mixup_hard_frac_intra_full", 0.0)),
+    ]
+    extra_names: list[str] = [
+        "objective",
+        "score",
+        "mean_confidence",
+        "evidence_nll_best",
+        "evidence_nll_full",
+        "probe_mixup_best",
+        "probe_mixup_full",
+        "probe_mixup_hard_best",
+        "probe_mixup_hard_full",
+        "probe_mixup_pairs_best",
+        "probe_mixup_pairs_full",
+        "probe_mixup_keep_best",
+        "probe_mixup_keep_full",
+        "probe_mixup_frac_intra_best",
+        "probe_mixup_frac_intra_full",
+        "probe_mixup_hard_pairs_best",
+        "probe_mixup_hard_pairs_full",
+        "probe_mixup_hard_keep_best",
+        "probe_mixup_hard_keep_full",
+        "probe_mixup_hard_frac_intra_best",
+        "probe_mixup_hard_frac_intra_full",
+    ]
+
+    feats = np.concatenate([base_feats, np.asarray(extras, dtype=np.float64)], axis=0)
+    names = tuple(base_names) + tuple(extra_names)
+    return feats, names
 
 
 def _csp_logvar_features(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
@@ -634,6 +712,7 @@ def select_by_predicted_improvement(
     drift_mode: str = "none",
     drift_gamma: float = 0.0,
     drift_delta: float = 0.0,
+    feature_set: str = "base",
 ) -> dict:
     """Select the best candidate record using the calibrated certificate.
 
@@ -648,7 +727,10 @@ def select_by_predicted_improvement(
         if str(rec.get("kind", "")) == "identity":
             identity = rec
 
-        feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        if feature_set == "stacked":
+            feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        else:
+            feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         pred_improve = float(cert.predict_accuracy(feats)[0])
         # Record for diagnostics / analysis.
         rec["ridge_pred_improve"] = float(pred_improve)

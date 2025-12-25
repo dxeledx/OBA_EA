@@ -285,6 +285,7 @@ def parse_args() -> argparse.Namespace:
             "calibrated_ridge",
             "calibrated_guard",
             "calibrated_ridge_guard",
+            "calibrated_stack_ridge",
             "oracle",
         ],
         default="objective",
@@ -300,6 +301,7 @@ def parse_args() -> argparse.Namespace:
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "
             "calibrated_guard learns a binary guard to reject likely negative transfer; "
             "calibrated_ridge_guard uses the learned guard to filter candidates, then selects by ridge-predicted improvement; "
+            "calibrated_stack_ridge learns a ridge regressor on stacked certificate features (objective+evidence+probe+drift) to predict improvement; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
     )
