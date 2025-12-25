@@ -106,6 +106,20 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if iw_mask.any():
                 best_iwcv_acc = float(df.loc[iw[iw_mask].idxmin(), "accuracy"])
 
+        best_ridge_acc = float("nan")
+        if "ridge_pred_improve" in df.columns:
+            rp = df["ridge_pred_improve"].astype(float)
+            rp_mask = np.isfinite(rp.to_numpy())
+            if rp_mask.any():
+                best_ridge_acc = float(df.loc[rp[rp_mask].idxmax(), "accuracy"])
+
+        best_guard_acc = float("nan")
+        if "guard_p_pos" in df.columns:
+            gp = df["guard_p_pos"].astype(float)
+            gp_mask = np.isfinite(gp.to_numpy())
+            if gp_mask.any():
+                best_guard_acc = float(df.loc[gp[gp_mask].idxmax(), "accuracy"])
+
         acc = df["accuracy"].astype(float).to_numpy()
         rho_score = _spearman_pos(-score.to_numpy(), acc)
 
@@ -129,6 +143,16 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             iw = df["iwcv_nll"].astype(float).to_numpy()
             rho_iwcv = _spearman_pos(-iw, acc)
 
+        rho_ridge = float("nan")
+        if "ridge_pred_improve" in df.columns:
+            rp = df["ridge_pred_improve"].astype(float).to_numpy()
+            rho_ridge = _spearman_pos(rp, acc)
+
+        rho_guard = float("nan")
+        if "guard_p_pos" in df.columns:
+            gp = df["guard_p_pos"].astype(float).to_numpy()
+            rho_guard = _spearman_pos(gp, acc)
+
         sel_acc = float(method_acc.get(subj, float("nan")))
         # Results in *_results.txt are printed with limited decimals, so use a small tolerance.
         tol = 1e-6
@@ -149,11 +173,17 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_probe_hard": oracle_acc - best_pmh_acc,
                 "best_iwcv_acc": best_iwcv_acc,
                 "gap_iwcv": oracle_acc - best_iwcv_acc,
+                "best_ridge_acc": best_ridge_acc,
+                "gap_ridge": oracle_acc - best_ridge_acc,
+                "best_guard_acc": best_guard_acc,
+                "gap_guard": oracle_acc - best_guard_acc,
                 "rho_score": rho_score,
                 "rho_ev": rho_ev,
                 "rho_probe": rho_pm,
                 "rho_probe_hard": rho_pmh,
                 "rho_iwcv": rho_iwcv,
+                "rho_ridge": rho_ridge,
+                "rho_guard": rho_guard,
                 "neg_transfer": float((sel_acc + tol) < id_acc),
             }
         )
@@ -172,11 +202,15 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_probe_mean": float(table["rho_probe"].mean()),
         "rho_probe_hard_mean": float(table["rho_probe_hard"].mean()),
         "rho_iwcv_mean": float(table["rho_iwcv"].mean()) if "rho_iwcv" in table.columns else float("nan"),
+        "rho_ridge_mean": float(table["rho_ridge"].mean()) if "rho_ridge" in table.columns else float("nan"),
+        "rho_guard_mean": float(table["rho_guard"].mean()) if "rho_guard" in table.columns else float("nan"),
         "best_score_mean": float(table["best_score_acc"].mean()),
         "best_ev_mean": float(table["best_ev_acc"].mean()),
         "best_probe_mean": float(table["best_probe_acc"].mean()),
         "best_probe_hard_mean": float(table["best_probe_hard_acc"].mean()),
         "best_iwcv_mean": float(table["best_iwcv_acc"].mean()) if "best_iwcv_acc" in table.columns else float("nan"),
+        "best_ridge_mean": float(table["best_ridge_acc"].mean()) if "best_ridge_acc" in table.columns else float("nan"),
+        "best_guard_mean": float(table["best_guard_acc"].mean()) if "best_guard_acc" in table.columns else float("nan"),
     }
     return table, summary
 
@@ -205,11 +239,15 @@ def main() -> None:
         "rho_probe_mean",
         "rho_probe_hard_mean",
         "rho_iwcv_mean",
+        "rho_ridge_mean",
+        "rho_guard_mean",
         "best_score_mean",
         "best_ev_mean",
         "best_probe_mean",
         "best_probe_hard_mean",
         "best_iwcv_mean",
+        "best_ridge_mean",
+        "best_guard_mean",
     ]:
         v = summary.get(k, float("nan"))
         print(f"{k}: {v:.6f}")

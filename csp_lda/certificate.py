@@ -405,6 +405,8 @@ def select_by_predicted_improvement(
 
         feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         pred_improve = float(cert.predict_accuracy(feats)[0])
+        # Record for diagnostics / analysis.
+        rec["ridge_pred_improve"] = float(pred_improve)
         drift = _safe_float(rec.get("drift_best", 0.0))
 
         if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
@@ -459,6 +461,8 @@ def select_by_guarded_objective(
 
         feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         p_pos = float(guard.predict_pos_proba(feats)[0])
+        # Record for diagnostics / analysis.
+        rec["guard_p_pos"] = float(p_pos)
         if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
             continue
 

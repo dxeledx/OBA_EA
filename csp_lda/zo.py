@@ -74,6 +74,8 @@ def _write_zo_diagnostics(
             "probe_mixup_hard_keep_full": int(rec.get("probe_mixup_hard_keep_full", -1)),
             "probe_mixup_hard_frac_intra_best": float(rec.get("probe_mixup_hard_frac_intra_best", np.nan)),
             "probe_mixup_hard_frac_intra_full": float(rec.get("probe_mixup_hard_frac_intra_full", np.nan)),
+            "ridge_pred_improve": float(rec.get("ridge_pred_improve", np.nan)),
+            "guard_p_pos": float(rec.get("guard_p_pos", np.nan)),
             "pen_marginal": float(rec.get("pen_marginal", np.nan)),
             "pen_trust": float(rec.get("pen_trust", np.nan)),
             "pen_l2": float(rec.get("pen_l2", np.nan)),
@@ -186,6 +188,34 @@ def _write_zo_diagnostics(
             output_path=diag_dir / "probe_mixup_hard_vs_accuracy.png",
             title=f"Subject {subject} — probe_mixup_hard vs acc (pearson={pearson_pmh:.3f}, spearman={spearman_pmh:.3f})",
         )
+
+    ridge_pred = df["ridge_pred_improve"].to_numpy(dtype=np.float64)
+    pearson_ridge = float("nan")
+    spearman_ridge = float("nan")
+    if ridge_pred.size >= 2 and np.isfinite(ridge_pred).any():
+        pearson_ridge = float(np.corrcoef(ridge_pred, acc)[0, 1])
+        rp_r = ridge_pred.argsort().argsort().astype(np.float64)
+        spearman_ridge = float(np.corrcoef(rp_r, acc_r)[0, 1])
+        plot_objective_vs_accuracy_scatter(
+            ridge_pred,
+            acc,
+            output_path=diag_dir / "ridge_pred_improve_vs_accuracy.png",
+            title=f"Subject {subject} — ridge_pred vs acc (pearson={pearson_ridge:.3f}, spearman={spearman_ridge:.3f})",
+        )
+
+    guard_p = df["guard_p_pos"].to_numpy(dtype=np.float64)
+    pearson_guard = float("nan")
+    spearman_guard = float("nan")
+    if guard_p.size >= 2 and np.isfinite(guard_p).any():
+        pearson_guard = float(np.corrcoef(guard_p, acc)[0, 1])
+        gp_r = guard_p.argsort().argsort().astype(np.float64)
+        spearman_guard = float(np.corrcoef(gp_r, acc_r)[0, 1])
+        plot_objective_vs_accuracy_scatter(
+            guard_p,
+            acc,
+            output_path=diag_dir / "guard_p_pos_vs_accuracy.png",
+            title=f"Subject {subject} — guard_p_pos vs acc (pearson={pearson_guard:.3f}, spearman={spearman_guard:.3f})",
+        )
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
         score = df["score"].to_numpy(dtype=np.float64)
         pearson_s = float(np.corrcoef(score, acc)[0, 1]) if score.size >= 2 else float("nan")
@@ -223,6 +253,18 @@ def _write_zo_diagnostics(
             best_by_probe_hard = int(df.loc[df["probe_mixup_hard_best"].idxmin(), "idx"])
         except Exception:
             best_by_probe_hard = -1
+    best_by_ridge = -1
+    if np.isfinite(ridge_pred).any():
+        try:
+            best_by_ridge = int(df.loc[df["ridge_pred_improve"].idxmax(), "idx"])
+        except Exception:
+            best_by_ridge = -1
+    best_by_guard = -1
+    if np.isfinite(guard_p).any():
+        try:
+            best_by_guard = int(df.loc[df["guard_p_pos"].idxmax(), "idx"])
+        except Exception:
+            best_by_guard = -1
     lines = [
         f"tag: {tag}",
         f"subject: {subject}",
@@ -237,11 +279,17 @@ def _write_zo_diagnostics(
         f"spearman(probe_mixup, accuracy): {spearman_pm:.6f}",
         f"pearson(probe_mixup_hard, accuracy): {pearson_pmh:.6f}",
         f"spearman(probe_mixup_hard, accuracy): {spearman_pmh:.6f}",
+        f"pearson(ridge_pred_improve, accuracy): {pearson_ridge:.6f}",
+        f"spearman(ridge_pred_improve, accuracy): {spearman_ridge:.6f}",
+        f"pearson(guard_p_pos, accuracy): {pearson_guard:.6f}",
+        f"spearman(guard_p_pos, accuracy): {spearman_guard:.6f}",
         f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
         f"best_by_evidence: idx={best_by_evidence}",
         f"best_by_iwcv_nll: idx={best_by_iwcv}",
         f"best_by_probe_mixup: idx={best_by_probe}",
         f"best_by_probe_mixup_hard: idx={best_by_probe_hard}",
+        f"best_by_ridge_pred_improve: idx={best_by_ridge}",
+        f"best_by_guard_p_pos: idx={best_by_guard}",
         f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",
     ]
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():

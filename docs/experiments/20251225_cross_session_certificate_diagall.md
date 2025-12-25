@@ -113,6 +113,91 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
   - `rho_probe_mean ≈ 0.040`（probe 仍接近 0）
   - `rho_iwcv_mean ≈ 0.033`（IWCV 对“排序”仍弱，但更像一个 safety gate：能稳定避免掉点）
 
+### Run（calibrated_ridge selector, diag-all）
+
+动机：把“候选选择”显式当作无标签模型选择问题，在其他被试上用 **label-only** 的 improvement 数据把证书校准成一个回归器：
+`(candidate features) -> (expected improvement over identity/EA)`。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 \
+  --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_calib_ridge_all_rot_scale_diagall_v3 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_calib_ridge_all_rot_scale_diagall_v3 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- EA mean acc: `0.680170`
+- Selected mean acc (calibrated_ridge): `0.684414`
+- Oracle mean acc: `0.691358`（headroom ≈ +1.12% abs）
+- Oracle gap mean: `0.006944`
+- Negative transfer rate: `0.111111`
+- `rho_ridge_mean ≈ 0.319`（相比 evidence/probe 更“对齐”，但仍不算强相关）
+
+### Run（calibrated_guard selector, diag-all）
+
+动机：学习一个二分类守门员 `P(improve ≥ margin | features)`，先拒绝更可能负迁移的 candidates，再在保留集合里按 objective/score 选最优（identity 总是允许）。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_guard \
+  --oea-zo-calib-guard-c 1.0 \
+  --oea-zo-calib-guard-threshold 0.5 \
+  --oea-zo-calib-guard-margin 0.0 \
+  --oea-zo-calib-max-subjects 0 \
+  --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_calib_guard_all_rot_scale_diagall_v3 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_calib_guard_all_rot_scale_diagall_v3 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- EA mean acc: `0.680170`
+- Selected mean acc (calibrated_guard): `0.685185`
+- Oracle mean acc: `0.691358`
+- Oracle gap mean: `0.006173`
+- Negative transfer rate: `0.222222`
+- `rho_guard_mean ≈ 0.338`（guard 概率与 acc 的相关性比 ridge 略高，但更容易出现少数被试掉点）
+
+### 4-class 对比表（可复现）
+
+固定：EA mean `0.680170`，Oracle mean `0.691358`（headroom ≈ `+0.011188`）。
+
+| Selector | Selected mean acc | Oracle gap mean | Neg transfer rate | Certificate Spearman mean |
+|---|---:|---:|---:|---:|
+| `objective` | 0.676697 | 0.014661 | 0.555556 | `rho_score_mean=0.299418` |
+| `evidence` | 0.680556 | 0.010802 | 0.000000 | `rho_ev_mean=-0.075179` |
+| `iwcv` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_mean=0.033065` |
+| `calibrated_ridge` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
+| `calibrated_guard` | 0.685185 | 0.006173 | 0.222222 | `rho_guard_mean=0.337858` |
+
 ## 2-class（left vs right）
 
 ### Run（evidence selector, diag-all）
@@ -179,3 +264,60 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Oracle gap mean: `0.006173`
 - Negative transfer rate: `0.111111`
 - Spearman mean：`rho_iwcv_mean ≈ 0.007`（仍接近 0；收益更像来自“避免选到坏 candidate”而不是“精确挑到 oracle”）
+
+### Run（calibrated_ridge selector, diag-all）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 \
+  --oea-zo-calib-max-subjects 0 \
+  --oea-zo-calib-seed 0 \
+  --run-name 2c_fir6_calib_ridge_all_rot_scale_diagall_v3 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+关键汇总：
+- EA mean acc: `0.803241`
+- Selected mean acc: `0.799383`（更差）
+- `rho_ridge_mean ≈ 0.023`（几乎无相关性）
+
+### Run（calibrated_guard selector, diag-all）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector calibrated_guard \
+  --oea-zo-calib-guard-c 1.0 \
+  --oea-zo-calib-guard-threshold 0.5 \
+  --oea-zo-calib-guard-margin 0.0 \
+  --oea-zo-calib-max-subjects 0 \
+  --oea-zo-calib-seed 0 \
+  --run-name 2c_fir6_calib_guard_all_rot_scale_diagall_v3 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+关键汇总：
+- EA mean acc: `0.803241`
+- Selected mean acc: `0.803241`（几乎等同 EA）
+- `rho_guard_mean ≈ -0.291`（相关性为负，说明该 guard 在 2 类下并不可靠）
+
+### 2-class 对比表（可复现）
+
+固定：EA mean `0.803241`，Oracle mean `0.814815`（headroom ≈ `+0.011574`）。
+
+| Selector | Selected mean acc | Oracle gap mean | Neg transfer rate | Certificate Spearman mean |
+|---|---:|---:|---:|---:|
+| `evidence` | 0.801698 | 0.013117 | 0.333333 | `rho_ev_mean=-0.542966` |
+| `iwcv` | 0.808642 | 0.006173 | 0.111111 | `rho_iwcv_mean=0.007034` |
+| `calibrated_ridge` | 0.799383 | 0.015432 | 0.222222 | `rho_ridge_mean=0.023163` |
+| `calibrated_guard` | 0.803241 | 0.011574 | 0.222222 | `rho_guard_mean=-0.290860` |
