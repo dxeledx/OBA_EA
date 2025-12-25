@@ -56,6 +56,8 @@ def _write_zo_diagnostics(
             "objective_base": float(rec.get("objective_base", np.nan)),
             "evidence_nll_best": float(rec.get("evidence_nll_best", np.nan)),
             "evidence_nll_full": float(rec.get("evidence_nll_full", np.nan)),
+            "iwcv_nll": float(rec.get("iwcv_nll", np.nan)),
+            "iwcv_eff_n": float(rec.get("iwcv_eff_n", np.nan)),
             "probe_mixup_best": float(rec.get("probe_mixup_best", np.nan)),
             "probe_mixup_full": float(rec.get("probe_mixup_full", np.nan)),
             "probe_mixup_pairs_best": int(rec.get("probe_mixup_pairs_best", -1)),
@@ -109,6 +111,14 @@ def _write_zo_diagnostics(
         ev_r = ev.argsort().argsort().astype(np.float64)
         spearman_ev = float(np.corrcoef(ev_r, acc_r)[0, 1])
 
+    iw = df["iwcv_nll"].to_numpy(dtype=np.float64)
+    pearson_iw = float("nan")
+    spearman_iw = float("nan")
+    if iw.size >= 2 and np.isfinite(iw).any():
+        pearson_iw = float(np.corrcoef(iw, acc)[0, 1])
+        iw_r = iw.argsort().argsort().astype(np.float64)
+        spearman_iw = float(np.corrcoef(iw_r, acc_r)[0, 1])
+
     pm = df["probe_mixup_best"].to_numpy(dtype=np.float64)
     pearson_pm = float("nan")
     spearman_pm = float("nan")
@@ -155,6 +165,13 @@ def _write_zo_diagnostics(
             output_path=diag_dir / "evidence_vs_accuracy.png",
             title=f"Subject {subject} — evidence(-log p) vs acc (pearson={pearson_ev:.3f}, spearman={spearman_ev:.3f})",
         )
+    if np.isfinite(iw).any():
+        plot_objective_vs_accuracy_scatter(
+            iw,
+            acc,
+            output_path=diag_dir / "iwcv_nll_vs_accuracy.png",
+            title=f"Subject {subject} — IWCV-NLL vs acc (pearson={pearson_iw:.3f}, spearman={spearman_iw:.3f})",
+        )
     if np.isfinite(pm).any():
         plot_objective_vs_accuracy_scatter(
             pm,
@@ -188,6 +205,12 @@ def _write_zo_diagnostics(
             best_by_evidence = int(df.loc[df["evidence_nll_best"].idxmin(), "idx"])
         except Exception:
             best_by_evidence = -1
+    best_by_iwcv = -1
+    if np.isfinite(iw).any():
+        try:
+            best_by_iwcv = int(df.loc[df["iwcv_nll"].idxmin(), "idx"])
+        except Exception:
+            best_by_iwcv = -1
     best_by_probe = -1
     if np.isfinite(pm).any():
         try:
@@ -208,12 +231,15 @@ def _write_zo_diagnostics(
         f"spearman(objective, accuracy): {spearman:.6f}",
         f"pearson(evidence, accuracy): {pearson_ev:.6f}",
         f"spearman(evidence, accuracy): {spearman_ev:.6f}",
+        f"pearson(iwcv_nll, accuracy): {pearson_iw:.6f}",
+        f"spearman(iwcv_nll, accuracy): {spearman_iw:.6f}",
         f"pearson(probe_mixup, accuracy): {pearson_pm:.6f}",
         f"spearman(probe_mixup, accuracy): {spearman_pm:.6f}",
         f"pearson(probe_mixup_hard, accuracy): {pearson_pmh:.6f}",
         f"spearman(probe_mixup_hard, accuracy): {spearman_pmh:.6f}",
         f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
         f"best_by_evidence: idx={best_by_evidence}",
+        f"best_by_iwcv_nll: idx={best_by_iwcv}",
         f"best_by_probe_mixup: idx={best_by_probe}",
         f"best_by_probe_mixup_hard: idx={best_by_probe_hard}",
         f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",

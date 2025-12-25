@@ -128,6 +128,7 @@ def parse_args() -> argparse.Namespace:
             "evidence",
             "probe_mixup",
             "probe_mixup_hard",
+            "iwcv",
             "calibrated_ridge",
             "calibrated_guard",
             "oracle",

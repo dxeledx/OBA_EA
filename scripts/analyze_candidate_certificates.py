@@ -99,6 +99,13 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if pmh_mask.any():
                 best_pmh_acc = float(df.loc[pmh[pmh_mask].idxmin(), "accuracy"])
 
+        best_iwcv_acc = float("nan")
+        if "iwcv_nll" in df.columns:
+            iw = df["iwcv_nll"].astype(float)
+            iw_mask = np.isfinite(iw.to_numpy())
+            if iw_mask.any():
+                best_iwcv_acc = float(df.loc[iw[iw_mask].idxmin(), "accuracy"])
+
         acc = df["accuracy"].astype(float).to_numpy()
         rho_score = _spearman_pos(-score.to_numpy(), acc)
 
@@ -117,7 +124,14 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             pmh = df["probe_mixup_hard_best"].astype(float).to_numpy()
             rho_pmh = _spearman_pos(-pmh, acc)
 
+        rho_iwcv = float("nan")
+        if "iwcv_nll" in df.columns:
+            iw = df["iwcv_nll"].astype(float).to_numpy()
+            rho_iwcv = _spearman_pos(-iw, acc)
+
         sel_acc = float(method_acc.get(subj, float("nan")))
+        # Results in *_results.txt are printed with limited decimals, so use a small tolerance.
+        tol = 1e-6
         rows.append(
             {
                 "subject": subj,
@@ -133,11 +147,14 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_probe": oracle_acc - best_pm_acc,
                 "best_probe_hard_acc": best_pmh_acc,
                 "gap_probe_hard": oracle_acc - best_pmh_acc,
+                "best_iwcv_acc": best_iwcv_acc,
+                "gap_iwcv": oracle_acc - best_iwcv_acc,
                 "rho_score": rho_score,
                 "rho_ev": rho_ev,
                 "rho_probe": rho_pm,
                 "rho_probe_hard": rho_pmh,
-                "neg_transfer": float(sel_acc < id_acc),
+                "rho_iwcv": rho_iwcv,
+                "neg_transfer": float((sel_acc + tol) < id_acc),
             }
         )
 
@@ -154,10 +171,12 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_ev_mean": float(table["rho_ev"].mean()),
         "rho_probe_mean": float(table["rho_probe"].mean()),
         "rho_probe_hard_mean": float(table["rho_probe_hard"].mean()),
+        "rho_iwcv_mean": float(table["rho_iwcv"].mean()) if "rho_iwcv" in table.columns else float("nan"),
         "best_score_mean": float(table["best_score_acc"].mean()),
         "best_ev_mean": float(table["best_ev_acc"].mean()),
         "best_probe_mean": float(table["best_probe_acc"].mean()),
         "best_probe_hard_mean": float(table["best_probe_hard_acc"].mean()),
+        "best_iwcv_mean": float(table["best_iwcv_acc"].mean()) if "best_iwcv_acc" in table.columns else float("nan"),
     }
     return table, summary
 
@@ -185,10 +204,12 @@ def main() -> None:
         "rho_ev_mean",
         "rho_probe_mean",
         "rho_probe_hard_mean",
+        "rho_iwcv_mean",
         "best_score_mean",
         "best_ev_mean",
         "best_probe_mean",
         "best_probe_hard_mean",
+        "best_iwcv_mean",
     ]:
         v = summary.get(k, float("nan"))
         print(f"{k}: {v:.6f}")

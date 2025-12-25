@@ -8,6 +8,10 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from .alignment import apply_spatial_transform
+from .model import TrainedModel
+from .proba import reorder_proba_columns as _reorder_proba_columns
+
 
 @dataclass(frozen=True)
 class RidgeCertificate:
@@ -143,6 +147,176 @@ def candidate_features_from_record(
         names.extend([f"qbar_{k}" for k in range(n_classes)])
 
     return np.asarray(feats, dtype=np.float64), tuple(names)
+
+
+def _csp_logvar_features(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
+    """Compute CSP log-variance features with the already-fitted CSP filters."""
+
+    X = np.asarray(X, dtype=np.float64)
+    csp = model.csp
+    F = np.asarray(csp.filters_[: int(csp.n_components)], dtype=np.float64)
+    use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
+    Y = np.einsum("kc,nct->nkt", F, X, optimize=True)
+    power = np.mean(Y * Y, axis=2)
+    power = np.maximum(power, 1e-20)
+    return np.log(power) if use_log else power
+
+
+def _fit_domain_logreg_ratio(
+    *,
+    X_source: np.ndarray,
+    X_target: np.ndarray,
+    seed: int,
+    c: float = 1.0,
+    clip_max: float = 20.0,
+) -> np.ndarray:
+    """Estimate density ratio w(x)=p_T(x)/p_S(x) via a domain classifier in feature space.
+
+    Uses a balanced training set (subsampling) so that w(x) = p(d=1|x)/p(d=0|x).
+    """
+
+    X_source = np.asarray(X_source, dtype=np.float64)
+    X_target = np.asarray(X_target, dtype=np.float64)
+    if X_source.ndim != 2 or X_target.ndim != 2:
+        raise ValueError("Expected 2D feature arrays for domain ratio.")
+    if X_source.shape[1] != X_target.shape[1]:
+        raise ValueError("Source/target feature dim mismatch.")
+    n_s = int(X_source.shape[0])
+    n_t = int(X_target.shape[0])
+    if n_s < 2 or n_t < 2:
+        return np.ones(n_s, dtype=np.float64)
+
+    rng = np.random.RandomState(int(seed))
+    n = int(min(n_s, n_t))
+    idx_s = rng.choice(n_s, size=n, replace=False)
+    idx_t = rng.choice(n_t, size=n, replace=False)
+    X = np.concatenate([X_source[idx_s], X_target[idx_t]], axis=0)
+    y = np.concatenate([np.zeros(n, dtype=int), np.ones(n, dtype=int)], axis=0)
+
+    clf = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "logreg",
+                LogisticRegression(
+                    C=float(c),
+                    max_iter=1000,
+                    solver="lbfgs",
+                ),
+            ),
+        ]
+    )
+    clf.fit(X, y)
+
+    p_t = np.asarray(clf.predict_proba(X_source), dtype=np.float64)[:, 1]
+    p_t = np.clip(p_t, 1e-6, 1.0 - 1e-6)
+    w = p_t / (1.0 - p_t)
+    w = np.clip(w, 0.0, float(clip_max))
+    return np.asarray(w, dtype=np.float64)
+
+
+def select_by_iwcv_nll(
+    records: Iterable[dict],
+    *,
+    model: TrainedModel,
+    z_source: np.ndarray,
+    y_source: np.ndarray,
+    z_target: np.ndarray,
+    class_order: Sequence[str],
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    min_improvement: float = 0.0,
+    seed: int = 0,
+) -> dict:
+    """Select candidate by importance-weighted (covariate-shift) NLL on labeled source.
+
+    For each candidate A, we:
+    - compute CSP feature distributions on (A·z_source) and (A·z_target),
+    - estimate density ratio w(x)=p_T(x)/p_S(x) via a domain classifier in feature space,
+    - score the candidate by weighted NLL on source labels under the frozen CSP+LDA model.
+
+    Smaller is better. Falls back to identity if no improvement.
+    """
+
+    class_order = [str(c) for c in class_order]
+    class_to_idx = {c: i for i, c in enumerate(class_order)}
+    y_source = np.asarray(y_source)
+    try:
+        y_idx = np.fromiter((class_to_idx[str(c)] for c in y_source), dtype=int, count=len(y_source))
+    except KeyError as e:
+        raise ValueError(f"y_source contains unknown class '{e.args[0]}'.") from e
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec_i, rec in enumerate(records):
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        Q = rec.get("Q", None)
+        if Q is None:
+            continue
+        Q = np.asarray(Q, dtype=np.float64)
+        if Q.ndim != 2:
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        Xs = apply_spatial_transform(Q, z_source)
+        Xt = apply_spatial_transform(Q, z_target)
+        fs = _csp_logvar_features(model=model, X=Xs)
+        ft = _csp_logvar_features(model=model, X=Xt)
+
+        w = _fit_domain_logreg_ratio(X_source=fs, X_target=ft, seed=int(seed) + 9973 * int(rec_i))
+        w_sum = float(np.sum(w))
+        w_sq_sum = float(np.sum(w * w))
+        eff_n = (w_sum * w_sum / w_sq_sum) if w_sq_sum > 1e-12 else 0.0
+
+        proba_s = np.asarray(model.predict_proba(Xs), dtype=np.float64)
+        proba_s = _reorder_proba_columns(proba_s, model.classes_, class_order)
+        p = np.clip(proba_s, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+        nll = -np.log(p[np.arange(p.shape[0]), y_idx])
+        score = float(np.sum(w * nll) / max(1e-12, w_sum))
+
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        # Store for diagnostics / calibrated models.
+        rec["iwcv_nll"] = float(score)
+        rec["iwcv_eff_n"] = float(eff_n)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if identity is None:
+        return best if best is not None else next(iter(records))
+
+    try:
+        s_id = float(identity.get("iwcv_nll", float("nan")))
+    except Exception:
+        s_id = float("nan")
+    if not np.isfinite(s_id):
+        # Ensure identity has a score if we computed none for it.
+        if best is not None:
+            return best
+        return identity
+
+    if best is None:
+        return identity
+
+    if float(min_improvement) > 0.0 and (float(s_id) - float(best_score)) < float(min_improvement):
+        return identity
+
+    if float(best_score) >= float(s_id):
+        return identity
+
+    return best
 
 
 def train_ridge_certificate(
