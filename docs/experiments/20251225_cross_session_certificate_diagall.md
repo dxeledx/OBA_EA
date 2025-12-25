@@ -143,6 +143,37 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 - Selected mean acc (iwcv_ucb, kappa=1): `0.681713`（本次与 iwcv 选择几乎一致）
 - `rho_iwcv_ucb_mean ≈ 0.037`（相比 iwcv 略增，但仍很弱）
 
+### Run（dev selector, diag-all）
+
+动机：实现 DEV（ICML 2019）的 control variate 重要性加权证书：
+\( \widehat R_{\text{DEV}}=\overline{w\ell} + \eta(\overline w - 1) \)，其中 \(\eta=-\mathrm{Cov}(w\ell,w)/\mathrm{Var}(w)\)。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector dev \
+  --run-name 4c_fir6_dev_sel_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_dev_sel_rot_scale_diagall_v1 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- Selected mean acc (dev selector): `0.681713`（本次与 iwcv 选择几乎一致）
+- Oracle gap mean: `0.009645`
+- Negative transfer rate: `0.000000`
+- `rho_dev_mean ≈ 0.039`（略高于 iwcv，但仍很弱）
+
 ### Run（calibrated_ridge selector, diag-all）
 
 动机：把“候选选择”显式当作无标签模型选择问题，在其他被试上用 **label-only** 的 improvement 数据把证书校准成一个回归器：
@@ -224,6 +255,7 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 |---|---:|---:|---:|---:|
 | `objective` | 0.676697 | 0.014661 | 0.555556 | `rho_score_mean=0.299418` |
 | `evidence` | 0.680556 | 0.010802 | 0.000000 | `rho_ev_mean=-0.075179` |
+| `dev` | 0.681713 | 0.009645 | 0.000000 | `rho_dev_mean=0.038799` |
 | `iwcv` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_mean=0.033065` |
 | `iwcv_ucb (k=1.0)` | 0.681713 | 0.009645 | 0.000000 | `rho_iwcv_ucb_mean=0.037097` |
 | `calibrated_ridge` | 0.684414 | 0.006944 | 0.111111 | `rho_ridge_mean=0.319355` |
@@ -315,6 +347,36 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 - Selected mean acc: `0.807099`（略低于 iwcv `0.808642`）
 - `rho_iwcv_ucb_mean ≈ 0.033`（比 iwcv 的 `0.007` 大，但仍不强）
 
+### Run（dev selector, diag-all）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector dev \
+  --run-name 2c_fir6_dev_sel_rot_scale_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+Candidate 证书有效性分析（label-only）：
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/2class/cross_session/2c_fir6_dev_sel_rot_scale_diagall_v1 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+- EA mean acc: `0.803241`
+- Selected mean acc (dev selector): `0.808642`（本次与 iwcv 选择几乎一致）
+- Oracle mean acc: `0.814815`
+- Oracle gap mean: `0.006173`
+- Negative transfer rate: `0.111111`
+- `rho_dev_mean ≈ 0.013`（仍接近 0）
+
 ### Run（calibrated_ridge selector, diag-all）
 
 ```bash
@@ -368,6 +430,7 @@ conda run -n eeg python run_csp_lda_cross_session.py \
 | Selector | Selected mean acc | Oracle gap mean | Neg transfer rate | Certificate Spearman mean |
 |---|---:|---:|---:|---:|
 | `evidence` | 0.801698 | 0.013117 | 0.333333 | `rho_ev_mean=-0.542966` |
+| `dev` | 0.808642 | 0.006173 | 0.111111 | `rho_dev_mean=0.013306` |
 | `iwcv` | 0.808642 | 0.006173 | 0.111111 | `rho_iwcv_mean=0.007034` |
 | `iwcv_ucb (k=1.0)` | 0.807099 | 0.007716 | 0.111111 | `rho_iwcv_ucb_mean=0.033423` |
 | `calibrated_ridge` | 0.799383 | 0.015432 | 0.222222 | `rho_ridge_mean=0.023163` |

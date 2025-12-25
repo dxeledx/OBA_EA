@@ -113,6 +113,13 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if iw_u_mask.any():
                 best_iwcv_ucb_acc = float(df.loc[iw_u[iw_u_mask].idxmin(), "accuracy"])
 
+        best_dev_acc = float("nan")
+        if "dev_nll" in df.columns:
+            dev = df["dev_nll"].astype(float)
+            dev_mask = np.isfinite(dev.to_numpy())
+            if dev_mask.any():
+                best_dev_acc = float(df.loc[dev[dev_mask].idxmin(), "accuracy"])
+
         best_ridge_acc = float("nan")
         if "ridge_pred_improve" in df.columns:
             rp = df["ridge_pred_improve"].astype(float)
@@ -155,6 +162,11 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             iw_u = df["iwcv_ucb"].astype(float).to_numpy()
             rho_iwcv_ucb = _spearman_pos(-iw_u, acc)
 
+        rho_dev = float("nan")
+        if "dev_nll" in df.columns:
+            dev = df["dev_nll"].astype(float).to_numpy()
+            rho_dev = _spearman_pos(-dev, acc)
+
         rho_ridge = float("nan")
         if "ridge_pred_improve" in df.columns:
             rp = df["ridge_pred_improve"].astype(float).to_numpy()
@@ -187,6 +199,8 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_iwcv": oracle_acc - best_iwcv_acc,
                 "best_iwcv_ucb_acc": best_iwcv_ucb_acc,
                 "gap_iwcv_ucb": oracle_acc - best_iwcv_ucb_acc,
+                "best_dev_acc": best_dev_acc,
+                "gap_dev": oracle_acc - best_dev_acc,
                 "best_ridge_acc": best_ridge_acc,
                 "gap_ridge": oracle_acc - best_ridge_acc,
                 "best_guard_acc": best_guard_acc,
@@ -197,6 +211,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "rho_probe_hard": rho_pmh,
                 "rho_iwcv": rho_iwcv,
                 "rho_iwcv_ucb": rho_iwcv_ucb,
+                "rho_dev": rho_dev,
                 "rho_ridge": rho_ridge,
                 "rho_guard": rho_guard,
                 "neg_transfer": float((sel_acc + tol) < id_acc),
@@ -220,6 +235,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_iwcv_ucb_mean": float(table["rho_iwcv_ucb"].mean())
         if "rho_iwcv_ucb" in table.columns
         else float("nan"),
+        "rho_dev_mean": float(table["rho_dev"].mean()) if "rho_dev" in table.columns else float("nan"),
         "rho_ridge_mean": float(table["rho_ridge"].mean()) if "rho_ridge" in table.columns else float("nan"),
         "rho_guard_mean": float(table["rho_guard"].mean()) if "rho_guard" in table.columns else float("nan"),
         "best_score_mean": float(table["best_score_acc"].mean()),
@@ -230,6 +246,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "best_iwcv_ucb_mean": float(table["best_iwcv_ucb_acc"].mean())
         if "best_iwcv_ucb_acc" in table.columns
         else float("nan"),
+        "best_dev_mean": float(table["best_dev_acc"].mean()) if "best_dev_acc" in table.columns else float("nan"),
         "best_ridge_mean": float(table["best_ridge_acc"].mean()) if "best_ridge_acc" in table.columns else float("nan"),
         "best_guard_mean": float(table["best_guard_acc"].mean()) if "best_guard_acc" in table.columns else float("nan"),
     }
@@ -261,6 +278,7 @@ def main() -> None:
         "rho_probe_hard_mean",
         "rho_iwcv_mean",
         "rho_iwcv_ucb_mean",
+        "rho_dev_mean",
         "rho_ridge_mean",
         "rho_guard_mean",
         "best_score_mean",
@@ -269,6 +287,7 @@ def main() -> None:
         "best_probe_hard_mean",
         "best_iwcv_mean",
         "best_iwcv_ucb_mean",
+        "best_dev_mean",
         "best_ridge_mean",
         "best_guard_mean",
     ]:

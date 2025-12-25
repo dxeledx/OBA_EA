@@ -276,6 +276,7 @@ def parse_args() -> argparse.Namespace:
         "--oea-zo-selector",
         choices=[
             "objective",
+            "dev",
             "evidence",
             "probe_mixup",
             "probe_mixup_hard",
@@ -292,6 +293,7 @@ def parse_args() -> argparse.Namespace:
             "evidence selects by LDA evidence (-log p(z)) under the frozen CSP+LDA model; "
             "probe_mixup selects by a MixUp-style probe score in CSP feature space; "
             "probe_mixup_hard selects by a MixUp-style probe with hard-major pseudo labels (MixVal-style λ>0.5); "
+            "dev selects by a DEV-style control-variate IW certificate on labeled source; "
             "iwcv selects by importance-weighted NLL on labeled source (covariate-shift certificate); "
             "iwcv_ucb selects by IWCV-UCB (IWCV-NLL plus kappa*SE via n_eff); "
             "calibrated_ridge learns a regressor on source subjects to predict improvement; "

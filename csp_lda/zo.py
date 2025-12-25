@@ -61,6 +61,10 @@ def _write_zo_diagnostics(
             "iwcv_ucb": float(rec.get("iwcv_ucb", np.nan)),
             "iwcv_var": float(rec.get("iwcv_var", np.nan)),
             "iwcv_se": float(rec.get("iwcv_se", np.nan)),
+            "dev_nll": float(rec.get("dev_nll", np.nan)),
+            "dev_eta": float(rec.get("dev_eta", np.nan)),
+            "dev_mean_w": float(rec.get("dev_mean_w", np.nan)),
+            "dev_eff_n": float(rec.get("dev_eff_n", np.nan)),
             "probe_mixup_best": float(rec.get("probe_mixup_best", np.nan)),
             "probe_mixup_full": float(rec.get("probe_mixup_full", np.nan)),
             "probe_mixup_pairs_best": int(rec.get("probe_mixup_pairs_best", -1)),
@@ -124,6 +128,14 @@ def _write_zo_diagnostics(
         iw_r = iw.argsort().argsort().astype(np.float64)
         spearman_iw = float(np.corrcoef(iw_r, acc_r)[0, 1])
 
+    dev = df["dev_nll"].to_numpy(dtype=np.float64)
+    pearson_dev = float("nan")
+    spearman_dev = float("nan")
+    if dev.size >= 2 and np.isfinite(dev).any():
+        pearson_dev = float(np.corrcoef(dev, acc)[0, 1])
+        dev_r = dev.argsort().argsort().astype(np.float64)
+        spearman_dev = float(np.corrcoef(dev_r, acc_r)[0, 1])
+
     pm = df["probe_mixup_best"].to_numpy(dtype=np.float64)
     pearson_pm = float("nan")
     spearman_pm = float("nan")
@@ -176,6 +188,13 @@ def _write_zo_diagnostics(
             acc,
             output_path=diag_dir / "iwcv_nll_vs_accuracy.png",
             title=f"Subject {subject} — IWCV-NLL vs acc (pearson={pearson_iw:.3f}, spearman={spearman_iw:.3f})",
+        )
+    if np.isfinite(dev).any():
+        plot_objective_vs_accuracy_scatter(
+            dev,
+            acc,
+            output_path=diag_dir / "dev_nll_vs_accuracy.png",
+            title=f"Subject {subject} — DEV-NLL vs acc (pearson={pearson_dev:.3f}, spearman={spearman_dev:.3f})",
         )
 
     iw_ucb = df["iwcv_ucb"].to_numpy(dtype=np.float64)
@@ -264,6 +283,12 @@ def _write_zo_diagnostics(
             best_by_iwcv_ucb = int(df.loc[df["iwcv_ucb"].idxmin(), "idx"])
         except Exception:
             best_by_iwcv_ucb = -1
+    best_by_dev = -1
+    if np.isfinite(dev).any():
+        try:
+            best_by_dev = int(df.loc[df["dev_nll"].idxmin(), "idx"])
+        except Exception:
+            best_by_dev = -1
     best_by_probe = -1
     if np.isfinite(pm).any():
         try:
@@ -300,6 +325,8 @@ def _write_zo_diagnostics(
         f"spearman(iwcv_nll, accuracy): {spearman_iw:.6f}",
         f"pearson(iwcv_ucb, accuracy): {pearson_iw_ucb:.6f}",
         f"spearman(iwcv_ucb, accuracy): {spearman_iw_ucb:.6f}",
+        f"pearson(dev_nll, accuracy): {pearson_dev:.6f}",
+        f"spearman(dev_nll, accuracy): {spearman_dev:.6f}",
         f"pearson(probe_mixup, accuracy): {pearson_pm:.6f}",
         f"spearman(probe_mixup, accuracy): {spearman_pm:.6f}",
         f"pearson(probe_mixup_hard, accuracy): {pearson_pmh:.6f}",
@@ -312,6 +339,7 @@ def _write_zo_diagnostics(
         f"best_by_evidence: idx={best_by_evidence}",
         f"best_by_iwcv_nll: idx={best_by_iwcv}",
         f"best_by_iwcv_ucb: idx={best_by_iwcv_ucb}",
+        f"best_by_dev_nll: idx={best_by_dev}",
         f"best_by_probe_mixup: idx={best_by_probe}",
         f"best_by_probe_mixup_hard: idx={best_by_probe_hard}",
         f"best_by_ridge_pred_improve: idx={best_by_ridge}",

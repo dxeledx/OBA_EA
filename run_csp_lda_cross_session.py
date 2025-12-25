@@ -125,6 +125,7 @@ def parse_args() -> argparse.Namespace:
         "--oea-zo-selector",
         choices=[
             "objective",
+            "dev",
             "evidence",
             "probe_mixup",
             "probe_mixup_hard",

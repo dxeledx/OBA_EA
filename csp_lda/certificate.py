@@ -441,6 +441,129 @@ def select_by_iwcv_ucb(
     return best
 
 
+def select_by_dev_nll(
+    records: Iterable[dict],
+    *,
+    model: TrainedModel,
+    z_source: np.ndarray,
+    y_source: np.ndarray,
+    z_target: np.ndarray,
+    class_order: Sequence[str],
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    min_improvement: float = 0.0,
+    seed: int = 0,
+) -> dict:
+    """Select candidate by a DEV-style control-variate IW certificate.
+
+    Reference: Deep Embedded Validation (DEV), ICML 2019.
+
+    Given density ratios w(x) = p_T(x)/p_S(x) estimated in feature space, DEV forms an
+    importance-weighted risk estimate with a control variate:
+
+      score(Q) = mean_s[w * nll] + eta * (mean_s[w] - 1),
+      eta = -Cov_s(w*nll, w) / Var_s(w).
+
+    Smaller is better. Falls back to identity if no improvement.
+    """
+
+    class_order = [str(c) for c in class_order]
+    class_to_idx = {c: i for i, c in enumerate(class_order)}
+    y_source = np.asarray(y_source)
+    try:
+        y_idx = np.fromiter((class_to_idx[str(c)] for c in y_source), dtype=int, count=len(y_source))
+    except KeyError as e:
+        raise ValueError(f"y_source contains unknown class '{e.args[0]}'.") from e
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec_i, rec in enumerate(records):
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        Q = rec.get("Q", None)
+        if Q is None:
+            continue
+        Q = np.asarray(Q, dtype=np.float64)
+        if Q.ndim != 2:
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        Xs = apply_spatial_transform(Q, z_source)
+        Xt = apply_spatial_transform(Q, z_target)
+        fs = _csp_logvar_features(model=model, X=Xs)
+        ft = _csp_logvar_features(model=model, X=Xt)
+
+        w = _fit_domain_logreg_ratio(X_source=fs, X_target=ft, seed=int(seed) + 9973 * int(rec_i))
+        w = np.asarray(w, dtype=np.float64).reshape(-1)
+        w_sum = float(np.sum(w))
+        w_sq_sum = float(np.sum(w * w))
+        eff_n = (w_sum * w_sum / w_sq_sum) if w_sq_sum > 1e-12 else 0.0
+
+        proba_s = np.asarray(model.predict_proba(Xs), dtype=np.float64)
+        proba_s = _reorder_proba_columns(proba_s, model.classes_, class_order)
+        p = np.clip(proba_s, 1e-12, 1.0)
+        p = p / np.sum(p, axis=1, keepdims=True)
+        nll = -np.log(p[np.arange(p.shape[0]), y_idx])
+
+        # DEV control variate.
+        L = w * nll
+        mean_L = float(np.mean(L))
+        mean_W = float(np.mean(w))
+        Wc = w - mean_W
+        var_W = float(np.mean(Wc * Wc))
+        if var_W > 1e-12:
+            cov_LW = float(np.mean((L - mean_L) * Wc))
+            eta = -float(cov_LW) / float(var_W)
+        else:
+            cov_LW = float("nan")
+            eta = 0.0
+        score = float(mean_L) + float(eta) * float(mean_W - 1.0)
+
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        rec["dev_nll"] = float(score)
+        rec["dev_eta"] = float(eta)
+        rec["dev_mean_w"] = float(mean_W)
+        rec["dev_var_w"] = float(var_W) if np.isfinite(var_W) else float("nan")
+        rec["dev_cov_LW"] = float(cov_LW) if np.isfinite(cov_LW) else float("nan")
+        rec["dev_eff_n"] = float(eff_n)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if identity is None:
+        return best if best is not None else next(iter(records))
+
+    try:
+        s_id = float(identity.get("dev_nll", float("nan")))
+    except Exception:
+        s_id = float("nan")
+    if not np.isfinite(s_id):
+        if best is not None:
+            return best
+        return identity
+
+    if best is None:
+        return identity
+
+    if float(min_improvement) > 0.0 and (float(s_id) - float(best_score)) < float(min_improvement):
+        return identity
+
+    if float(best_score) >= float(s_id):
+        return identity
+
+    return best
+
+
 def train_ridge_certificate(
     X: np.ndarray,
     y: np.ndarray,

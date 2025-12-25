@@ -20,6 +20,7 @@ from .alignment import (
 from .model import TrainedModel, fit_csp_lda
 from .certificate import (
     candidate_features_from_record,
+    select_by_dev_nll,
     select_by_evidence_nll,
     select_by_guarded_objective,
     select_by_iwcv_nll,
@@ -278,6 +279,7 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_drift_delta must be >= 0.")
     if oea_zo_selector not in {
         "objective",
+        "dev",
         "evidence",
         "probe_mixup",
         "probe_mixup_hard",
@@ -289,7 +291,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -399,6 +401,7 @@ def loso_cross_subject_evaluation(
             use_probe_mixup_hard = selector == "probe_mixup_hard"
             use_iwcv = selector == "iwcv"
             use_iwcv_ucb = selector == "iwcv_ucb"
+            use_dev = selector == "dev"
             use_oracle = selector == "oracle"
             cert = None
             guard = None
@@ -735,6 +738,20 @@ def loso_cross_subject_evaluation(
                         min_improvement=float(oea_zo_min_improvement),
                         seed=int(oea_zo_seed) + int(test_subject) * 997,
                     )
+                elif use_dev:
+                    selected = select_by_dev_nll(
+                        zo_diag.get("records", []),
+                        model=model,
+                        z_source=X_train,
+                        y_source=y_train,
+                        z_target=z_t,
+                        class_order=class_labels,
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
                 elif use_ridge and cert is not None:
                     selected = select_by_predicted_improvement(
                         zo_diag.get("records", []),
@@ -897,6 +914,7 @@ def loso_cross_subject_evaluation(
                 use_probe_mixup_hard = selector == "probe_mixup_hard"
                 use_iwcv = selector == "iwcv"
                 use_iwcv_ucb = selector == "iwcv_ucb"
+                use_dev = selector == "dev"
                 use_oracle = selector == "oracle"
                 want_diag = (
                     bool(do_diag)
@@ -905,6 +923,7 @@ def loso_cross_subject_evaluation(
                     or use_probe_mixup_hard
                     or use_iwcv
                     or use_iwcv_ucb
+                    or use_dev
                     or use_oracle
                 )
                 lda_ev = None
@@ -1031,6 +1050,22 @@ def loso_cross_subject_evaluation(
                             z_target=z_t,
                             class_order=class_labels,
                             kappa=float(oea_zo_iwcv_kappa),
+                            drift_mode=str(oea_zo_drift_mode),
+                            drift_gamma=float(oea_zo_drift_gamma),
+                            drift_delta=float(oea_zo_drift_delta),
+                            min_improvement=float(oea_zo_min_improvement),
+                            seed=int(oea_zo_seed) + int(test_subject) * 997,
+                        )
+                        if sel is not None:
+                            q_t = np.asarray(sel.get("Q"), dtype=np.float64)
+                    elif use_dev:
+                        sel = select_by_dev_nll(
+                            zo_diag.get("records", []),
+                            model=model,
+                            z_source=X_train,
+                            y_source=y_train,
+                            z_target=z_t,
+                            class_order=class_labels,
                             drift_mode=str(oea_zo_drift_mode),
                             drift_gamma=float(oea_zo_drift_gamma),
                             drift_delta=float(oea_zo_drift_delta),
@@ -1318,6 +1353,7 @@ def cross_session_within_subject_evaluation(
                     use_probe_mixup_hard = selector == "probe_mixup_hard"
                     use_iwcv = selector == "iwcv"
                     use_iwcv_ucb = selector == "iwcv_ucb"
+                    use_dev = selector == "dev"
                     use_oracle = selector == "oracle"
                     cert = None
                     guard = None
@@ -1511,6 +1547,7 @@ def cross_session_within_subject_evaluation(
                         or use_probe_mixup_hard
                         or use_iwcv
                         or use_iwcv_ucb
+                        or use_dev
                         or use_oracle
                     )
                     if use_oracle:
@@ -1634,6 +1671,20 @@ def cross_session_within_subject_evaluation(
                                 z_target=z_test,
                                 class_order=class_labels,
                                 kappa=float(oea_zo_iwcv_kappa),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                                seed=int(oea_zo_seed) + int(subject) * 997,
+                            )
+                        elif use_dev:
+                            selected = select_by_dev_nll(
+                                zo_diag.get("records", []),
+                                model=model,
+                                z_source=z_train,
+                                y_source=y_train,
+                                z_target=z_test,
+                                class_order=class_labels,
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
                                 drift_delta=float(oea_zo_drift_delta),
