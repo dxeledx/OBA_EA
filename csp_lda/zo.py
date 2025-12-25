@@ -64,6 +64,14 @@ def _write_zo_diagnostics(
             "probe_mixup_keep_full": int(rec.get("probe_mixup_keep_full", -1)),
             "probe_mixup_frac_intra_best": float(rec.get("probe_mixup_frac_intra_best", np.nan)),
             "probe_mixup_frac_intra_full": float(rec.get("probe_mixup_frac_intra_full", np.nan)),
+            "probe_mixup_hard_best": float(rec.get("probe_mixup_hard_best", np.nan)),
+            "probe_mixup_hard_full": float(rec.get("probe_mixup_hard_full", np.nan)),
+            "probe_mixup_hard_pairs_best": int(rec.get("probe_mixup_hard_pairs_best", -1)),
+            "probe_mixup_hard_pairs_full": int(rec.get("probe_mixup_hard_pairs_full", -1)),
+            "probe_mixup_hard_keep_best": int(rec.get("probe_mixup_hard_keep_best", -1)),
+            "probe_mixup_hard_keep_full": int(rec.get("probe_mixup_hard_keep_full", -1)),
+            "probe_mixup_hard_frac_intra_best": float(rec.get("probe_mixup_hard_frac_intra_best", np.nan)),
+            "probe_mixup_hard_frac_intra_full": float(rec.get("probe_mixup_hard_frac_intra_full", np.nan)),
             "pen_marginal": float(rec.get("pen_marginal", np.nan)),
             "pen_trust": float(rec.get("pen_trust", np.nan)),
             "pen_l2": float(rec.get("pen_l2", np.nan)),
@@ -109,6 +117,14 @@ def _write_zo_diagnostics(
         pm_r = pm.argsort().argsort().astype(np.float64)
         spearman_pm = float(np.corrcoef(pm_r, acc_r)[0, 1])
 
+    pm_h = df["probe_mixup_hard_best"].to_numpy(dtype=np.float64)
+    pearson_pmh = float("nan")
+    spearman_pmh = float("nan")
+    if pm_h.size >= 2 and np.isfinite(pm_h).any():
+        pearson_pmh = float(np.corrcoef(pm_h, acc)[0, 1])
+        pmh_r = pm_h.argsort().argsort().astype(np.float64)
+        spearman_pmh = float(np.corrcoef(pmh_r, acc_r)[0, 1])
+
     prior = zo_diag.get("marginal_prior")
     prior_arr = None if prior is None else np.asarray(prior, dtype=np.float64).reshape(-1)
 
@@ -146,6 +162,13 @@ def _write_zo_diagnostics(
             output_path=diag_dir / "probe_mixup_vs_accuracy.png",
             title=f"Subject {subject} — probe_mixup vs acc (pearson={pearson_pm:.3f}, spearman={spearman_pm:.3f})",
         )
+    if np.isfinite(pm_h).any():
+        plot_objective_vs_accuracy_scatter(
+            pm_h,
+            acc,
+            output_path=diag_dir / "probe_mixup_hard_vs_accuracy.png",
+            title=f"Subject {subject} — probe_mixup_hard vs acc (pearson={pearson_pmh:.3f}, spearman={spearman_pmh:.3f})",
+        )
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
         score = df["score"].to_numpy(dtype=np.float64)
         pearson_s = float(np.corrcoef(score, acc)[0, 1]) if score.size >= 2 else float("nan")
@@ -171,6 +194,12 @@ def _write_zo_diagnostics(
             best_by_probe = int(df.loc[df["probe_mixup_best"].idxmin(), "idx"])
         except Exception:
             best_by_probe = -1
+    best_by_probe_hard = -1
+    if np.isfinite(pm_h).any():
+        try:
+            best_by_probe_hard = int(df.loc[df["probe_mixup_hard_best"].idxmin(), "idx"])
+        except Exception:
+            best_by_probe_hard = -1
     lines = [
         f"tag: {tag}",
         f"subject: {subject}",
@@ -181,9 +210,12 @@ def _write_zo_diagnostics(
         f"spearman(evidence, accuracy): {spearman_ev:.6f}",
         f"pearson(probe_mixup, accuracy): {pearson_pm:.6f}",
         f"spearman(probe_mixup, accuracy): {spearman_pm:.6f}",
+        f"pearson(probe_mixup_hard, accuracy): {pearson_pmh:.6f}",
+        f"spearman(probe_mixup_hard, accuracy): {spearman_pmh:.6f}",
         f"best_by_objective: idx={int(df.loc[df['objective'].idxmin(), 'idx'])}",
         f"best_by_evidence: idx={best_by_evidence}",
         f"best_by_probe_mixup: idx={best_by_probe}",
+        f"best_by_probe_mixup_hard: idx={best_by_probe_hard}",
         f"best_by_accuracy: idx={int(df.loc[df['accuracy'].idxmax(), 'idx'])}",
     ]
     if "score" in df.columns and np.isfinite(df["score"].to_numpy()).any():
@@ -1152,6 +1184,8 @@ def _optimize_qt_oea_zo(
         seed_local: int,
         n_pairs: int = 200,
         lam: float = 0.5,
+        mode: str = "soft",
+        beta_alpha: float = 0.0,
     ) -> tuple[float, dict]:
         """MixUp-style probe score on CSP feature space (label-free).
 
@@ -1183,6 +1217,13 @@ def _optimize_qt_oea_zo(
             return float("nan"), {"n_keep": int(keep.size), "n_pairs": 0}
         n_pairs = min(n_pairs, 10_000)
 
+        mode = str(mode)
+        if mode not in {"soft", "hard_major"}:
+            raise ValueError("probe_mixup mode must be 'soft' or 'hard_major'.")
+        beta_alpha = float(beta_alpha)
+        if beta_alpha < 0.0:
+            raise ValueError("beta_alpha must be >= 0.")
+
         i_list: list[int] = []
         j_list: list[int] = []
         ki_list: list[int] = []
@@ -1197,11 +1238,15 @@ def _optimize_qt_oea_zo(
                 c = int(rng_probe.choice(classes_intra))
                 idxs = idx_by_class[c]
                 a, b = rng_probe.choice(idxs, size=2, replace=False).tolist()
+                lam_val = float(lam)
+                if beta_alpha > 0.0:
+                    lam_val = float(rng_probe.beta(beta_alpha, beta_alpha))
+                    lam_val = float(np.clip(lam_val, 1e-6, 1.0 - 1e-6))
                 i_list.append(int(a))
                 j_list.append(int(b))
                 ki_list.append(int(c))
                 kj_list.append(int(c))
-                lam_list.append(float(lam))
+                lam_list.append(float(lam_val))
                 same_list.append(True)
             else:
                 # Inter-class: sample two different classes.
@@ -1210,11 +1255,21 @@ def _optimize_qt_oea_zo(
                 c1, c2 = rng_probe.choice(classes, size=2, replace=False).tolist()
                 a = int(rng_probe.choice(idx_by_class[int(c1)]))
                 b = int(rng_probe.choice(idx_by_class[int(c2)]))
+                lam_val = float(lam)
+                if beta_alpha > 0.0:
+                    lam_val = float(rng_probe.beta(beta_alpha, beta_alpha))
+                    lam_val = float(np.clip(lam_val, 1e-6, 1.0 - 1e-6))
+                # MixVal-style: when λ>0.5 use the hard pseudo label of the dominant sample.
+                # We implement this by folding λ to [0.5,1] and swapping (i,j) when needed.
+                if mode == "hard_major" and lam_val < 0.5:
+                    a, b = b, a
+                    c1, c2 = c2, c1
+                    lam_val = 1.0 - lam_val
                 i_list.append(int(a))
                 j_list.append(int(b))
                 ki_list.append(int(c1))
                 kj_list.append(int(c2))
-                lam_list.append(float(lam))
+                lam_list.append(float(lam_val))
                 same_list.append(False)
 
         if not i_list:
@@ -1236,7 +1291,11 @@ def _optimize_qt_oea_zo(
 
         lp_i = logp[np.arange(logp.shape[0]), ki_arr]
         lp_j = logp[np.arange(logp.shape[0]), kj_arr]
-        ce = np.where(same_arr, -lp_i, -(lam_arr * lp_i + (1.0 - lam_arr) * lp_j))
+        if mode == "hard_major":
+            # After folding λ>=0.5 and (i,j) swap, class ki is always the dominant pseudo label.
+            ce = -lp_i
+        else:
+            ce = np.where(same_arr, -lp_i, -(lam_arr * lp_i + (1.0 - lam_arr) * lp_j))
         score = float(np.mean(ce))
         stats = {
             "n_keep": int(keep.size),
@@ -1264,10 +1323,24 @@ def _optimize_qt_oea_zo(
             feats=feats_best,
             seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1),
         )
+        probe_mixup_hard_best, probe_stats_hard_best = _probe_mixup_from_outputs(
+            proba=proba_best,
+            feats=feats_best,
+            seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1),
+            mode="hard_major",
+            beta_alpha=0.4,
+        )
         probe_mixup_full, probe_stats_full = _probe_mixup_from_outputs(
             proba=proba_full,
             feats=feats_full,
             seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1) + 13,
+        )
+        probe_mixup_hard_full, probe_stats_hard_full = _probe_mixup_from_outputs(
+            proba=proba_full,
+            feats=feats_full,
+            seed_local=int(seed) + 10007 * (int(len(diag_records)) + 1) + 13,
+            mode="hard_major",
+            beta_alpha=0.4,
         )
         rec = {
             "kind": str(kind),
@@ -1296,6 +1369,14 @@ def _optimize_qt_oea_zo(
             "probe_mixup_keep_full": int(probe_stats_full.get("n_keep", 0)),
             "probe_mixup_frac_intra_best": float(probe_stats_best.get("frac_intra", np.nan)),
             "probe_mixup_frac_intra_full": float(probe_stats_full.get("frac_intra", np.nan)),
+            "probe_mixup_hard_best": float(probe_mixup_hard_best),
+            "probe_mixup_hard_full": float(probe_mixup_hard_full),
+            "probe_mixup_hard_pairs_best": int(probe_stats_hard_best.get("n_pairs", 0)),
+            "probe_mixup_hard_pairs_full": int(probe_stats_hard_full.get("n_pairs", 0)),
+            "probe_mixup_hard_keep_best": int(probe_stats_hard_best.get("n_keep", 0)),
+            "probe_mixup_hard_keep_full": int(probe_stats_hard_full.get("n_keep", 0)),
+            "probe_mixup_hard_frac_intra_best": float(probe_stats_hard_best.get("frac_intra", np.nan)),
+            "probe_mixup_hard_frac_intra_full": float(probe_stats_hard_full.get("frac_intra", np.nan)),
             "drift_best": float(drift_best),
             "drift_best_std": float(np.std(drift_best_vec)),
             "drift_best_q50": float(np.quantile(drift_best_vec, 0.50)),

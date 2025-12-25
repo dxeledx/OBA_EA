@@ -123,7 +123,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--oea-zo-drift-delta", type=float, default=0.0)
     p.add_argument(
         "--oea-zo-selector",
-        choices=["objective", "evidence", "probe_mixup", "calibrated_ridge", "calibrated_guard", "oracle"],
+        choices=[
+            "objective",
+            "evidence",
+            "probe_mixup",
+            "probe_mixup_hard",
+            "calibrated_ridge",
+            "calibrated_guard",
+            "oracle",
+        ],
         default="objective",
     )
     p.add_argument("--oea-zo-calib-ridge-alpha", type=float, default=1.0)

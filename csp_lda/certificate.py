@@ -433,3 +433,69 @@ def select_by_probe_mixup(
         return identity
 
     return best
+
+
+def select_by_probe_mixup_hard(
+    records: Iterable[dict],
+    *,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    min_improvement: float = 0.0,
+) -> dict:
+    """Select the best candidate using a hard-major MixUp probe score.
+
+    This corresponds to a MixVal-style heuristic: when λ>0.5, assign the (hard)
+    pseudo label of the dominant sample (implemented in the probe score).
+
+    Candidates must have `probe_mixup_hard_best` recorded (smaller is better).
+    If no candidate improves over the identity anchor, return identity.
+    """
+
+    identity: dict | None = None
+    best: dict | None = None
+    best_score = float("inf")
+
+    for rec in records:
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        try:
+            s = float(rec.get("probe_mixup_hard_best", float("nan")))
+        except Exception:
+            s = float("nan")
+        if not np.isfinite(s):
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+
+        score = float(s)
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) + float(drift_gamma) * float(drift)
+
+        if score < best_score:
+            best_score = float(score)
+            best = rec
+
+    if identity is None:
+        return best if best is not None else next(iter(records))
+
+    try:
+        s_id = float(identity.get("probe_mixup_hard_best", float("nan")))
+    except Exception:
+        s_id = float("nan")
+    if not np.isfinite(s_id):
+        return best if best is not None else identity
+
+    if best is None:
+        return identity
+
+    if float(min_improvement) > 0.0 and (float(s_id) - float(best_score)) < float(min_improvement):
+        return identity
+
+    if float(best_score) >= float(s_id):
+        return identity
+
+    return best

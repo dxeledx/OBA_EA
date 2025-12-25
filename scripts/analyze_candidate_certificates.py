@@ -92,6 +92,13 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if pm_mask.any():
                 best_pm_acc = float(df.loc[pm[pm_mask].idxmin(), "accuracy"])
 
+        best_pmh_acc = float("nan")
+        if "probe_mixup_hard_best" in df.columns:
+            pmh = df["probe_mixup_hard_best"].astype(float)
+            pmh_mask = np.isfinite(pmh.to_numpy())
+            if pmh_mask.any():
+                best_pmh_acc = float(df.loc[pmh[pmh_mask].idxmin(), "accuracy"])
+
         acc = df["accuracy"].astype(float).to_numpy()
         rho_score = _spearman_pos(-score.to_numpy(), acc)
 
@@ -104,6 +111,11 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         if "probe_mixup_best" in df.columns:
             pm = df["probe_mixup_best"].astype(float).to_numpy()
             rho_pm = _spearman_pos(-pm, acc)
+
+        rho_pmh = float("nan")
+        if "probe_mixup_hard_best" in df.columns:
+            pmh = df["probe_mixup_hard_best"].astype(float).to_numpy()
+            rho_pmh = _spearman_pos(-pmh, acc)
 
         sel_acc = float(method_acc.get(subj, float("nan")))
         rows.append(
@@ -119,9 +131,12 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_ev": oracle_acc - best_ev_acc,
                 "best_probe_acc": best_pm_acc,
                 "gap_probe": oracle_acc - best_pm_acc,
+                "best_probe_hard_acc": best_pmh_acc,
+                "gap_probe_hard": oracle_acc - best_pmh_acc,
                 "rho_score": rho_score,
                 "rho_ev": rho_ev,
                 "rho_probe": rho_pm,
+                "rho_probe_hard": rho_pmh,
                 "neg_transfer": float(sel_acc < id_acc),
             }
         )
@@ -138,9 +153,11 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_score_mean": float(table["rho_score"].mean()),
         "rho_ev_mean": float(table["rho_ev"].mean()),
         "rho_probe_mean": float(table["rho_probe"].mean()),
+        "rho_probe_hard_mean": float(table["rho_probe_hard"].mean()),
         "best_score_mean": float(table["best_score_acc"].mean()),
         "best_ev_mean": float(table["best_ev_acc"].mean()),
         "best_probe_mean": float(table["best_probe_acc"].mean()),
+        "best_probe_hard_mean": float(table["best_probe_hard_acc"].mean()),
     }
     return table, summary
 
@@ -167,9 +184,11 @@ def main() -> None:
         "rho_score_mean",
         "rho_ev_mean",
         "rho_probe_mean",
+        "rho_probe_hard_mean",
         "best_score_mean",
         "best_ev_mean",
         "best_probe_mean",
+        "best_probe_hard_mean",
     ]:
         v = summary.get(k, float("nan"))
         print(f"{k}: {v:.6f}")
@@ -180,4 +199,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

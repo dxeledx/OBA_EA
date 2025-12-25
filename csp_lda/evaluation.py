@@ -24,6 +24,7 @@ from .certificate import (
     select_by_guarded_objective,
     select_by_predicted_improvement,
     select_by_probe_mixup,
+    select_by_probe_mixup_hard,
     train_logistic_guard,
     train_ridge_certificate,
 )
@@ -272,10 +273,18 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_drift_gamma must be >= 0.")
     if float(oea_zo_drift_delta) < 0.0:
         raise ValueError("oea_zo_drift_delta must be >= 0.")
-    if oea_zo_selector not in {"objective", "evidence", "probe_mixup", "calibrated_ridge", "calibrated_guard", "oracle"}:
+    if oea_zo_selector not in {
+        "objective",
+        "evidence",
+        "probe_mixup",
+        "probe_mixup_hard",
+        "calibrated_ridge",
+        "calibrated_guard",
+        "oracle",
+    }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'evidence', 'probe_mixup', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
+            "'objective', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'calibrated_ridge', 'calibrated_guard', 'oracle'."
         )
     if float(oea_zo_calib_ridge_alpha) <= 0.0:
         raise ValueError("oea_zo_calib_ridge_alpha must be > 0.")
@@ -380,6 +389,7 @@ def loso_cross_subject_evaluation(
             use_guard = selector == "calibrated_guard"
             use_evidence = selector == "evidence"
             use_probe_mixup = selector == "probe_mixup"
+            use_probe_mixup_hard = selector == "probe_mixup_hard"
             use_oracle = selector == "oracle"
             cert = None
             guard = None
@@ -586,6 +596,7 @@ def loso_cross_subject_evaluation(
                 or (use_guard and guard is not None)
                 or use_evidence
                 or use_probe_mixup
+                or use_probe_mixup_hard
                 or use_oracle
             )
             lda_ev = None
@@ -670,6 +681,14 @@ def loso_cross_subject_evaluation(
                     )
                 elif use_probe_mixup:
                     selected = select_by_probe_mixup(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
+                elif use_probe_mixup_hard:
+                    selected = select_by_probe_mixup_hard(
                         zo_diag.get("records", []),
                         drift_mode=str(oea_zo_drift_mode),
                         drift_gamma=float(oea_zo_drift_gamma),
@@ -835,8 +854,9 @@ def loso_cross_subject_evaluation(
                 selector = str(oea_zo_selector)
                 use_evidence = selector == "evidence"
                 use_probe_mixup = selector == "probe_mixup"
+                use_probe_mixup_hard = selector == "probe_mixup_hard"
                 use_oracle = selector == "oracle"
-                want_diag = bool(do_diag) or use_evidence or use_probe_mixup or use_oracle
+                want_diag = bool(do_diag) or use_evidence or use_probe_mixup or use_probe_mixup_hard or use_oracle
                 lda_ev = None
                 if str(oea_zo_objective) == "lda_nll" or use_evidence:
                     lda_ev = _compute_lda_evidence_params(
@@ -918,6 +938,16 @@ def loso_cross_subject_evaluation(
                             q_t = np.asarray(sel.get("Q"), dtype=np.float64)
                     elif use_probe_mixup:
                         sel = select_by_probe_mixup(
+                            zo_diag.get("records", []),
+                            drift_mode=str(oea_zo_drift_mode),
+                            drift_gamma=float(oea_zo_drift_gamma),
+                            drift_delta=float(oea_zo_drift_delta),
+                            min_improvement=float(oea_zo_min_improvement),
+                        )
+                        if sel is not None:
+                            q_t = np.asarray(sel.get("Q"), dtype=np.float64)
+                    elif use_probe_mixup_hard:
+                        sel = select_by_probe_mixup_hard(
                             zo_diag.get("records", []),
                             drift_mode=str(oea_zo_drift_mode),
                             drift_gamma=float(oea_zo_drift_gamma),
@@ -1201,6 +1231,7 @@ def cross_session_within_subject_evaluation(
                     use_guard = selector == "calibrated_guard"
                     use_evidence = selector == "evidence"
                     use_probe_mixup = selector == "probe_mixup"
+                    use_probe_mixup_hard = selector == "probe_mixup_hard"
                     use_oracle = selector == "oracle"
                     cert = None
                     guard = None
@@ -1391,6 +1422,7 @@ def cross_session_within_subject_evaluation(
                         or (use_guard and guard is not None)
                         or use_evidence
                         or use_probe_mixup
+                        or use_probe_mixup_hard
                         or use_oracle
                     )
                     if use_oracle:
@@ -1477,6 +1509,14 @@ def cross_session_within_subject_evaluation(
                             )
                         elif use_probe_mixup:
                             selected = select_by_probe_mixup(
+                                zo_diag.get("records", []),
+                                drift_mode=str(oea_zo_drift_mode),
+                                drift_gamma=float(oea_zo_drift_gamma),
+                                drift_delta=float(oea_zo_drift_delta),
+                                min_improvement=float(oea_zo_min_improvement),
+                            )
+                        elif use_probe_mixup_hard:
+                            selected = select_by_probe_mixup_hard(
                                 zo_diag.get("records", []),
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),

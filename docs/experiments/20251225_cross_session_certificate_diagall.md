@@ -54,6 +54,26 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
 
 解释：rot+scale 的 candidate-set 里确实存在提升空间（oracle>EA），但当前无标签证书仍难以可靠选到这些 oracle candidates；提升更多来自“更保守地选回 identity”的安全化，而非真正学会选到更优变换。
 
+### Run（probe_mixup_hard selector, diag-all）
+
+动机：借鉴 MixVal 的一个常见做法——当 mix 系数 λ>0.5 时，用 dominant 样本的 **hard pseudo label** 来构造 probe（我们在 probe 内部做了 λ folding，并固定 Beta(0.4,0.4) 采样）。
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale \
+  --oea-zo-selector probe_mixup_hard \
+  --run-name 4c_fir6_probe_mixup_hard_sel_rot_scale_diagall \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_probe_mixup_hard_sel_rot_scale_diagall/20251225_results.txt`
+
+结论（本次实现下）：`probe_mixup_hard` 效果更差（selected mean acc `0.676698` < EA `0.680170`），且 `rho_probe_hard_mean≈0.023`（几乎无相关性）。在当前 CSP 特征空间的 mix probe 设定里，“hard-major”并没有改善证书失效，反而更容易被伪标签噪声牵引。
+
 ## 2-class（left vs right）
 
 ### Run（evidence selector, diag-all）
@@ -90,4 +110,3 @@ conda run -n eeg python scripts/analyze_candidate_certificates.py \
   - `rho_probe_mean ≈ -0.037`（接近 0）
 
 解释：2 类下 objective(score) 与真实 acc 的相关性更强，但 evidence 反而显著失效；rot+scale 的 headroom 存在，关键仍是“如何选到好 candidate”。
-
