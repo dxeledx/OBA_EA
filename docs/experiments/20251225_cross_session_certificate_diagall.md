@@ -335,6 +335,122 @@ Across seeds（0–4）：`mean=0.685494`, `std=0.001170`（对应 Δ vs EA：`m
 
 注意：平均提升相对稳定，但仍存在少数 seed 下个别 subject 负迁移（总计 4/45 的 subject×seed 为负迁移），说明证书仍未“完全可靠”。
 
+### 下层切换：RPA-center / TSA（4-class）
+
+动机：把“下层对齐”从 EA（Euclidean mean whitening）切到更几何的强基线：
+
+- `rpa-*`：log-Euclidean mean whitening（RPA-center）
+- `tsa-*`：RPA-center + pseudo-label Procrustes rotation（TSA 风格闭式旋转）
+
+然后把现有的证书 stacking（`calibrated_stack_ridge`）原样移植到该下层上，观察：
+
+1) headroom（oracle mean - identity mean）是否变大  
+2) 证书有效性（certificate-acc Spearman、oracle gap、负迁移率）是否改善
+
+#### Baselines（无 ZO）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,rpa-csp-lda,tsa-csp-lda \
+  --run-name 4c_fir6_rpa_tsa_baselines_v1
+```
+
+- Results: `outputs/20251225/4class/cross_session/4c_fir6_rpa_tsa_baselines_v1/20251225_results.txt`
+- Mean acc：EA `0.680170`，RPA `0.682870`（+0.27% abs），TSA `0.681713`（+0.15% abs）
+
+#### EA-ZO（stacking，作为对照）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_ea_zo_stack_diagall_v2 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_ea_zo_stack_diagall_v2 \
+  --method ea-zo-imr-csp-lda
+```
+
+关键汇总：
+
+- Selected mean acc: `0.687114`
+- Identity mean acc: `0.680170`
+- Oracle mean acc: `0.691358`
+- Oracle gap mean: `0.004244`
+- Negative transfer rate: `0.000000`
+- `rho_ridge_mean ≈ 0.293459`
+
+#### RPA-ZO（stacking）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods rpa-csp-lda,rpa-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_rpa_zo_stack_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_rpa_zo_stack_diagall_v1 \
+  --method rpa-zo-imr-csp-lda
+```
+
+关键汇总：
+
+- Selected mean acc: `0.681327`（< identity `0.682870`）
+- Oracle mean acc: `0.689043`
+- Oracle gap mean: `0.007716`
+- Negative transfer rate: `0.222222`
+- `rho_ridge_mean ≈ 0.201658`
+
+结论：RPA-center 作为 baseline 有小幅提升，但在当前候选集/证书设定下，stacking 更容易选错（证书有效性反而变差）。
+
+#### TSA-ZO（stacking）
+
+```bash
+conda run -n eeg python run_csp_lda_cross_session.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue \
+  --train-sessions 0train --test-sessions 1test \
+  --methods tsa-csp-lda,tsa-zo-imr-csp-lda \
+  --oea-zo-transform rot_scale --oea-zo-selector calibrated_stack_ridge \
+  --oea-zo-calib-ridge-alpha 1.0 --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --run-name 4c_fir6_tsa_zo_stack_diagall_v1 \
+  --diagnose-subjects 1,2,3,4,5,6,7,8,9
+```
+
+```bash
+conda run -n eeg python scripts/analyze_candidate_certificates.py \
+  --run-dir outputs/20251225/4class/cross_session/4c_fir6_tsa_zo_stack_diagall_v1 \
+  --method tsa-zo-imr-csp-lda
+```
+
+关键汇总：
+
+- Selected mean acc: `0.683256`
+- Identity mean acc: `0.681713`
+- Oracle mean acc: `0.686343`
+- Oracle gap mean: `0.003086`（gap 变小）
+- Negative transfer rate: `0.111111`
+- `rho_ridge_mean ≈ 0.329794`（Spearman 变好）
+
+结论：TSA-base 在当前实现下更像“把 headroom 吃掉了”（oracle-headroom 变小），证书相关性略改善，但最终平均准确率仍低于 EA-ZO 的最佳结果。
+
 ### Run（calibrated_guard selector, diag-all）
 
 动机：学习一个二分类守门员 `P(improve ≥ margin | features)`，先拒绝更可能负迁移的 candidates，再在保留集合里按 objective/score 选最优（identity 总是允许）。

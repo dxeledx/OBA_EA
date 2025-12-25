@@ -67,11 +67,17 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="ea-csp-lda,ea-zo-imr-csp-lda",
         help=(
-            "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
+            "Comma-separated methods to run: "
+            "csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+            "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
             "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
-            "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
+            "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
+            "rpa-zo-csp-lda, rpa-zo-ent-csp-lda, rpa-zo-im-csp-lda, rpa-zo-imr-csp-lda, "
+            "rpa-zo-pce-csp-lda, rpa-zo-conf-csp-lda, "
+            "tsa-zo-csp-lda, tsa-zo-ent-csp-lda, tsa-zo-im-csp-lda, tsa-zo-imr-csp-lda, "
+            "tsa-zo-pce-csp-lda, tsa-zo-conf-csp-lda"
         ),
     )
     p.add_argument("--oea-eps", type=float, default=1e-10)
@@ -232,6 +238,12 @@ def main() -> None:
         elif method == "ea-csp-lda":
             alignment = "ea"
             method_details[method] = "EA: session-wise whitening (train/test sessions aligned independently)."
+        elif method == "rpa-csp-lda":
+            alignment = "rpa"
+            method_details[method] = "RPA-center: log-Euclidean session-wise whitening (SPD mean)."
+        elif method == "tsa-csp-lda":
+            alignment = "tsa"
+            method_details[method] = "TSA: RPA-center + pseudo-label Procrustes rotation (closed-form)."
         elif method == "oea-cov-csp-lda":
             alignment = "oea_cov"
             method_details[method] = "OEA (cov-eig): align test eigen-basis to train eigen-basis (within subject)."
@@ -281,6 +293,46 @@ def main() -> None:
             elif method == "ea-zo-conf-csp-lda":
                 zo_objective_override = "confidence"
             method_details[method] = f"EA-ZO: objective={zo_objective_override or args.oea_zo_objective}."
+        elif method in {
+            "rpa-zo-ent-csp-lda",
+            "rpa-zo-im-csp-lda",
+            "rpa-zo-imr-csp-lda",
+            "rpa-zo-pce-csp-lda",
+            "rpa-zo-conf-csp-lda",
+            "rpa-zo-csp-lda",
+        }:
+            alignment = "rpa_zo"
+            if method == "rpa-zo-ent-csp-lda":
+                zo_objective_override = "entropy"
+            elif method == "rpa-zo-im-csp-lda":
+                zo_objective_override = "infomax"
+            elif method == "rpa-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
+            elif method == "rpa-zo-pce-csp-lda":
+                zo_objective_override = "pseudo_ce"
+            elif method == "rpa-zo-conf-csp-lda":
+                zo_objective_override = "confidence"
+            method_details[method] = f"RPA-ZO: objective={zo_objective_override or args.oea_zo_objective}."
+        elif method in {
+            "tsa-zo-ent-csp-lda",
+            "tsa-zo-im-csp-lda",
+            "tsa-zo-imr-csp-lda",
+            "tsa-zo-pce-csp-lda",
+            "tsa-zo-conf-csp-lda",
+            "tsa-zo-csp-lda",
+        }:
+            alignment = "tsa_zo"
+            if method == "tsa-zo-ent-csp-lda":
+                zo_objective_override = "entropy"
+            elif method == "tsa-zo-im-csp-lda":
+                zo_objective_override = "infomax"
+            elif method == "tsa-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
+            elif method == "tsa-zo-pce-csp-lda":
+                zo_objective_override = "pseudo_ce"
+            elif method == "tsa-zo-conf-csp-lda":
+                zo_objective_override = "confidence"
+            method_details[method] = f"TSA-ZO: objective={zo_objective_override or args.oea_zo_objective}."
         else:
             raise ValueError(f"Unknown method '{method}'.")
 

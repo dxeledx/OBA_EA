@@ -130,6 +130,120 @@ class EuclideanAligner(BaseAligner):
         return self._state.eigvecs
 
 
+class LogEuclideanAligner(BaseAligner):
+    """Log-Euclidean alignment (LEA): whiten using the log-Euclidean mean covariance.
+
+    This is a Riemannian-flavored alternative to Euclidean Alignment (EA).
+
+    Given SPD trial covariances R_i = X_i X_i^T, compute the log-Euclidean mean:
+
+        R_LE = exp( (1/n) * Σ_i log(R_i) )
+
+    and whiten:
+
+        X_i_tilde = R_LE^{-1/2} X_i
+
+    Notes
+    -----
+    - We use an eigen-decomposition for log/exp/inv-sqrt (all matrices are symmetric).
+    - This is typically more expensive than EA but still cheap for ~22 channels.
+    """
+
+    def __init__(self, eps: float = 1e-10, shrinkage: float = 0.0) -> None:
+        self.eps = float(eps)
+        self.shrinkage = float(shrinkage)
+        self._state: _EAState | None = None
+
+    @staticmethod
+    def _sym_logm(A: np.ndarray, *, eps: float) -> np.ndarray:
+        A = 0.5 * (A + A.T)
+        eigvals, eigvecs = np.linalg.eigh(A)
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+        eigvecs = _fix_eigvec_signs(eigvecs)
+        floor = float(eps) * float(np.max(eigvals)) if np.max(eigvals) > 0 else float(eps)
+        eigvals = np.maximum(eigvals, floor)
+        return eigvecs @ np.diag(np.log(eigvals)) @ eigvecs.T
+
+    @staticmethod
+    def _sym_expm(A: np.ndarray) -> np.ndarray:
+        A = 0.5 * (A + A.T)
+        eigvals, eigvecs = np.linalg.eigh(A)
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+        eigvecs = _fix_eigvec_signs(eigvecs)
+        return eigvecs @ np.diag(np.exp(eigvals)) @ eigvecs.T
+
+    def fit(self, X, y=None):  # noqa: N803  (match sklearn signature)
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 3:
+            raise ValueError(f"LEA expects X with shape (n_trials,n_channels,n_times), got {X.shape}.")
+        n_trials, n_channels, _n_times = X.shape
+        if n_trials < 1:
+            raise ValueError("LEA requires at least 1 trial.")
+
+        # Compute log-covariances and average them.
+        mean_log = np.zeros((n_channels, n_channels), dtype=np.float64)
+        for i in range(int(n_trials)):
+            xi = X[i]
+            cov = xi @ xi.T
+            cov = 0.5 * (cov + cov.T)
+
+            if self.shrinkage > 0.0:
+                if not (0.0 <= self.shrinkage < 1.0):
+                    raise ValueError("shrinkage must be in [0, 1).")
+                alpha = float(self.shrinkage)
+                cov = (1.0 - alpha) * cov + alpha * (np.trace(cov) / float(n_channels)) * np.eye(
+                    n_channels, dtype=np.float64
+                )
+
+            mean_log += self._sym_logm(cov, eps=float(self.eps))
+        mean_log /= float(n_trials)
+        r_le = self._sym_expm(mean_log)
+        r_le = 0.5 * (r_le + r_le.T)
+
+        # Whitening matrix: r_le^{-1/2}.
+        eigvals, eigvecs = np.linalg.eigh(r_le)
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+        eigvecs = _fix_eigvec_signs(eigvecs)
+
+        floor = self.eps * float(np.max(eigvals)) if np.max(eigvals) > 0 else self.eps
+        eigvals = np.maximum(eigvals, floor)
+        whitening = eigvecs @ np.diag(1.0 / np.sqrt(eigvals)) @ eigvecs.T
+
+        self._state = _EAState(cov=r_le, eigvals=eigvals, eigvecs=eigvecs, whitening=whitening)
+        return self
+
+    def transform(self, X):  # noqa: N803  (match sklearn signature)
+        if self._state is None:
+            raise RuntimeError("LogEuclideanAligner must be fit before transform.")
+        X = np.asarray(X, dtype=np.float64)
+        whitening = self._state.whitening
+        return np.einsum("ij,njt->nit", whitening, X, optimize=True)
+
+    @property
+    def whitening_(self) -> np.ndarray:
+        if self._state is None:
+            raise AttributeError("whitening_ is not available before fit().")
+        return self._state.whitening
+
+    @property
+    def cov_(self) -> np.ndarray:
+        if self._state is None:
+            raise AttributeError("cov_ is not available before fit().")
+        return self._state.cov
+
+    @property
+    def eigvecs_(self) -> np.ndarray:
+        if self._state is None:
+            raise AttributeError("eigvecs_ is not available before fit().")
+        return self._state.eigvecs
+
+
 def _fix_eigvec_signs(eigvecs: np.ndarray) -> np.ndarray:
     """Make eigenvector signs deterministic (per-column).
 
@@ -299,6 +413,159 @@ def sorted_eigh(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     evals = evals[order]
     evecs = _fix_eigvec_signs(evecs[:, order])
     return evals, evecs
+
+
+def _sym_logm_spd(A: np.ndarray, *, eps: float = 1e-10) -> np.ndarray:
+    """Symmetric matrix logarithm for SPD A via eigen-decomposition."""
+
+    A = np.asarray(A, dtype=np.float64)
+    A = 0.5 * (A + A.T)
+    eigvals, eigvecs = np.linalg.eigh(A)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+    eigvecs = _fix_eigvec_signs(eigvecs)
+    floor = float(eps) * float(np.max(eigvals)) if np.max(eigvals) > 0 else float(eps)
+    eigvals = np.maximum(eigvals, floor)
+    return eigvecs @ np.diag(np.log(eigvals)) @ eigvecs.T
+
+
+def _mean_cov_from_trials(
+    X: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+    eps: float = 1e-10,
+    shrinkage: float = 0.0,
+) -> np.ndarray:
+    X = np.asarray(X, dtype=np.float64)
+    if X.ndim != 3:
+        raise ValueError(f"Expected X with shape (n_trials,n_channels,n_times); got {X.shape}.")
+    n_trials, n_channels, _n_times = X.shape
+    if int(n_trials) < 1:
+        raise ValueError("Need at least 1 trial to compute mean covariance.")
+
+    if weights is None:
+        w = None
+        w_sum = float(n_trials)
+    else:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if w.shape[0] != int(n_trials):
+            raise ValueError(f"weights length mismatch: expected {n_trials}, got {w.shape[0]}.")
+        w = np.maximum(w, 0.0)
+        w_sum = float(np.sum(w))
+        if not np.isfinite(w_sum) or w_sum <= 0.0:
+            raise ValueError("weights must have positive finite sum.")
+
+    cov = np.zeros((n_channels, n_channels), dtype=np.float64)
+    if w is None:
+        for i in range(int(n_trials)):
+            xi = X[i]
+            cov += xi @ xi.T
+        cov /= float(n_trials)
+    else:
+        for i in range(int(n_trials)):
+            wi = float(w[i])
+            if wi <= 0.0:
+                continue
+            xi = X[i]
+            cov += wi * (xi @ xi.T)
+        cov /= w_sum
+    cov = 0.5 * (cov + cov.T)
+
+    if shrinkage > 0.0:
+        if not (0.0 <= float(shrinkage) < 1.0):
+            raise ValueError("shrinkage must be in [0, 1).")
+        alpha = float(shrinkage)
+        cov = (1.0 - alpha) * cov + alpha * (np.trace(cov) / float(n_channels)) * np.eye(n_channels, dtype=np.float64)
+
+    # Light diagonal jitter for SPD-ness (keeps symmetry); magnitude tied to trace.
+    jitter = float(eps) * (float(np.trace(cov)) / float(n_channels) + 1.0)
+    cov = cov + jitter * np.eye(n_channels, dtype=np.float64)
+    return cov
+
+
+def orthogonal_align_tsa_procrustes(
+    X_source: np.ndarray,
+    y_source: np.ndarray,
+    X_target: np.ndarray,
+    *,
+    pseudo_mode: str,
+    proba_target: np.ndarray | None,
+    y_pseudo_target: np.ndarray | None,
+    class_order: Sequence[str],
+    eps: float = 1e-10,
+    shrinkage: float = 0.0,
+) -> np.ndarray:
+    """TSA-style orthogonal alignment via Procrustes on class-mean tangent matrices.
+
+    We build class anchor matrices using the symmetric matrix log of class-mean covariances.
+    Given anchors {S_c} from labeled source and {T_c} from (pseudo-)labeled target, compute:
+
+        A = Σ_c S_c T_c^T,  [U,_,V^T] = svd(A),  Γ = U V^T,
+
+    and return Q = Γ^T (so that log-covariances transform as Q log(C) Q^T).
+    """
+
+    class_order = [str(c) for c in class_order]
+    if len(class_order) < 2:
+        raise ValueError("class_order must contain at least 2 classes.")
+    if pseudo_mode not in {"hard", "soft"}:
+        raise ValueError("pseudo_mode must be one of: 'hard', 'soft'")
+
+    X_source = np.asarray(X_source, dtype=np.float64)
+    X_target = np.asarray(X_target, dtype=np.float64)
+    y_source = np.asarray(y_source)
+
+    if pseudo_mode == "soft":
+        if proba_target is None:
+            raise ValueError("proba_target must be provided when pseudo_mode='soft'.")
+        proba = np.asarray(proba_target, dtype=np.float64)
+        if proba.ndim != 2 or proba.shape[0] != X_target.shape[0]:
+            raise ValueError("proba_target must have shape (n_trials, n_classes).")
+        if proba.shape[1] != len(class_order):
+            raise ValueError(
+                f"proba_target class dim mismatch: expected {len(class_order)}, got {proba.shape[1]}."
+            )
+        proba = np.clip(proba, 0.0, 1.0)
+    else:
+        if y_pseudo_target is None:
+            raise ValueError("y_pseudo_target must be provided when pseudo_mode='hard'.")
+        y_pseudo = np.asarray(y_pseudo_target)
+        if y_pseudo.shape[0] != X_target.shape[0]:
+            raise ValueError("y_pseudo_target length mismatch.")
+
+    n_channels = int(X_source.shape[1])
+    A = np.zeros((n_channels, n_channels), dtype=np.float64)
+    used = 0
+    for k, c in enumerate(class_order):
+        src_mask = y_source == c
+        if not np.any(src_mask):
+            continue
+        cov_s = _mean_cov_from_trials(X_source[src_mask], eps=eps, shrinkage=shrinkage)
+        S = _sym_logm_spd(cov_s, eps=eps)
+
+        if pseudo_mode == "soft":
+            wk = proba[:, k]
+            if float(np.sum(wk)) <= 1e-12:
+                continue
+            cov_t = _mean_cov_from_trials(X_target, weights=wk, eps=eps, shrinkage=shrinkage)
+        else:
+            tgt_mask = y_pseudo == c
+            if not np.any(tgt_mask):
+                continue
+            cov_t = _mean_cov_from_trials(X_target[tgt_mask], eps=eps, shrinkage=shrinkage)
+        T = _sym_logm_spd(cov_t, eps=eps)
+
+        A += S @ T.T
+        used += 1
+
+    if used < 2 or float(np.linalg.norm(A, ord="fro")) <= 0.0:
+        return np.eye(n_channels, dtype=np.float64)
+
+    U, _s, Vt = np.linalg.svd(A)
+    Gamma = U @ Vt
+    # Return Q (applied to signals) corresponding to t_al = Gamma^T t Gamma.
+    return Gamma.T.astype(np.float64)
 
 
 def blend_with_identity(Q: np.ndarray, alpha: float) -> np.ndarray:

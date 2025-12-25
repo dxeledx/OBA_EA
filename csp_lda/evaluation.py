@@ -11,9 +11,11 @@ from sklearn.metrics import accuracy_score
 from .data import SubjectData
 from .alignment import (
     EuclideanAligner,
+    LogEuclideanAligner,
     apply_spatial_transform,
     blend_with_identity,
     class_cov_diff,
+    orthogonal_align_tsa_procrustes,
     orthogonal_align_symmetric,
     sorted_eigh,
 )
@@ -41,6 +43,80 @@ from .zo import (
     _soft_class_cov_diff,
     _write_zo_diagnostics,
 )
+
+
+def _compute_tsa_target_rotation(
+    *,
+    z_train: np.ndarray,
+    y_train: np.ndarray,
+    z_target: np.ndarray,
+    model: TrainedModel,
+    class_order: Sequence[str],
+    pseudo_mode: str,
+    pseudo_iters: int,
+    q_blend: float,
+    pseudo_confidence: float,
+    pseudo_topk_per_class: int,
+    pseudo_balance: bool,
+    eps: float,
+    shrinkage: float,
+) -> np.ndarray:
+    """Compute a TSA-style closed-form target rotation using (pseudo-)class anchors."""
+
+    class_order = [str(c) for c in class_order]
+    if pseudo_mode not in {"hard", "soft"}:
+        raise ValueError("pseudo_mode must be one of: 'hard', 'soft'")
+    if int(pseudo_iters) <= 0:
+        return np.eye(int(z_target.shape[1]), dtype=np.float64)
+
+    q_t = np.eye(int(z_target.shape[1]), dtype=np.float64)
+    for _ in range(int(pseudo_iters)):
+        X_cur = apply_spatial_transform(q_t, z_target)
+        proba = model.predict_proba(X_cur)
+        proba = _reorder_proba_columns(proba, model.classes_, list(class_order))
+
+        try:
+            if pseudo_mode == "soft":
+                q_new = orthogonal_align_tsa_procrustes(
+                    z_train,
+                    y_train,
+                    z_target,
+                    pseudo_mode="soft",
+                    proba_target=proba,
+                    y_pseudo_target=None,
+                    class_order=class_order,
+                    eps=float(eps),
+                    shrinkage=float(shrinkage),
+                )
+            else:
+                y_pseudo = np.asarray(model.predict(X_cur))
+                keep = _select_pseudo_indices(
+                    y_pseudo=y_pseudo,
+                    proba=proba,
+                    class_order=class_order,
+                    confidence=float(pseudo_confidence),
+                    topk_per_class=int(pseudo_topk_per_class),
+                    balance=bool(pseudo_balance),
+                )
+                if keep.size == 0:
+                    break
+                q_new = orthogonal_align_tsa_procrustes(
+                    z_train,
+                    y_train,
+                    z_target[keep],
+                    pseudo_mode="hard",
+                    proba_target=None,
+                    y_pseudo_target=y_pseudo[keep],
+                    class_order=class_order,
+                    eps=float(eps),
+                    shrinkage=float(shrinkage),
+                )
+        except ValueError:
+            break
+
+        q_t = blend_with_identity(q_new, float(q_blend))
+
+    return q_t
 
 def _csp_features_from_filters(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
     """Compute CSP log-power features (same convention as ZO evaluation)."""
@@ -234,8 +310,11 @@ def loso_cross_subject_evaluation(
     subj_all: List[np.ndarray] = []
     trial_all: List[np.ndarray] = []
 
-    if alignment not in {"none", "ea", "ea_zo", "oea_cov", "oea", "oea_zo"}:
-        raise ValueError("alignment must be one of: 'none', 'ea', 'ea_zo', 'oea_cov', 'oea', 'oea_zo'")
+    if alignment not in {"none", "ea", "rpa", "ea_zo", "rpa_zo", "tsa", "tsa_zo", "oea_cov", "oea", "oea_zo"}:
+        raise ValueError(
+            "alignment must be one of: "
+            "'none', 'ea', 'rpa', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+        )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
@@ -1250,8 +1329,11 @@ def cross_session_within_subject_evaluation(
     train_sessions = [str(s) for s in train_sessions]
     test_sessions = [str(s) for s in test_sessions]
     class_order = [str(c) for c in class_order]
-    if alignment not in {"none", "ea", "ea_zo", "oea_cov", "oea", "oea_zo"}:
-        raise ValueError("alignment must be one of: 'none', 'ea', 'ea_zo', 'oea_cov', 'oea', 'oea_zo'")
+    if alignment not in {"none", "ea", "rpa", "ea_zo", "rpa_zo", "tsa", "tsa_zo", "oea_cov", "oea", "oea_zo"}:
+        raise ValueError(
+            "alignment must be one of: "
+            "'none', 'ea', 'rpa', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+        )
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
 
@@ -1298,22 +1380,45 @@ def cross_session_within_subject_evaluation(
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
             X_test = X_test_raw
         else:
-            ea_train = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_train)
-            ea_test = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_test_raw)
-            z_train = ea_train.transform(X_train)
-            z_test = ea_test.transform(X_test_raw)
+            base_aligner_cls = (
+                LogEuclideanAligner
+                if alignment in {"rpa", "rpa_zo", "tsa", "tsa_zo"}
+                else EuclideanAligner
+            )
+            base_train = base_aligner_cls(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_train)
+            base_test = base_aligner_cls(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_test_raw)
+            z_train = base_train.transform(X_train)
+            z_test = base_test.transform(X_test_raw)
             z_test_base = z_test
 
-            if alignment == "ea":
+            if alignment in {"ea", "rpa"}:
                 model = fit_csp_lda(z_train, y_train, n_components=n_components)
                 X_test = z_test
             elif alignment == "oea_cov":
                 # Session-wise cov-eig alignment: align test eigen-basis to train eigen-basis.
-                _evals_ref, u_ref = sorted_eigh(ea_train.cov_)
-                q_t = u_ref @ ea_test.eigvecs_.T
+                _evals_ref, u_ref = sorted_eigh(base_train.cov_)
+                q_t = u_ref @ base_test.eigvecs_.T
                 q_t = blend_with_identity(q_t, oea_q_blend)
                 model = fit_csp_lda(z_train, y_train, n_components=n_components)
                 X_test = apply_spatial_transform(q_t, z_test)
+            elif alignment == "tsa":
+                model = fit_csp_lda(z_train, y_train, n_components=n_components)
+                q_tsa = _compute_tsa_target_rotation(
+                    z_train=z_train,
+                    y_train=y_train,
+                    z_target=z_test,
+                    model=model,
+                    class_order=class_labels,
+                    pseudo_mode=str(oea_pseudo_mode),
+                    pseudo_iters=int(max(0, oea_pseudo_iters)),
+                    q_blend=float(oea_q_blend),
+                    pseudo_confidence=float(oea_pseudo_confidence),
+                    pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                    pseudo_balance=bool(oea_pseudo_balance),
+                    eps=float(oea_eps),
+                    shrinkage=float(oea_shrinkage),
+                )
+                X_test = apply_spatial_transform(q_tsa, z_test)
             else:
                 # Discriminative signature reference from labeled train session(s).
                 d_ref = class_cov_diff(
@@ -1365,6 +1470,25 @@ def cross_session_within_subject_evaluation(
                 else:
                     # alignment == "ea_zo" or "oea_zo": freeze classifier, optimize Q_t on unlabeled target.
                     model = fit_csp_lda(z_train, y_train, n_components=n_components)
+                    if alignment == "tsa_zo":
+                        q_base = _compute_tsa_target_rotation(
+                            z_train=z_train,
+                            y_train=y_train,
+                            z_target=z_test,
+                            model=model,
+                            class_order=class_labels,
+                            pseudo_mode=str(oea_pseudo_mode),
+                            pseudo_iters=int(max(0, oea_pseudo_iters)),
+                            q_blend=float(oea_q_blend),
+                            pseudo_confidence=float(oea_pseudo_confidence),
+                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                            pseudo_balance=bool(oea_pseudo_balance),
+                            eps=float(oea_eps),
+                            shrinkage=float(oea_shrinkage),
+                        )
+                        z_test_base = apply_spatial_transform(q_base, z_test)
+                    else:
+                        z_test_base = z_test
 
                     selector = str(oea_zo_selector)
                     use_stack = selector == "calibrated_stack_ridge"
@@ -1402,10 +1526,10 @@ def cross_session_within_subject_evaluation(
                             X_te_p = np.concatenate([pseudo_map[s].X for s in test_sessions], axis=0)
                             y_te_p = np.concatenate([pseudo_map[s].y for s in test_sessions], axis=0)
 
-                            ea_tr_p = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_tr_p)
-                            ea_te_p = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_te_p)
-                            z_tr_p = ea_tr_p.transform(X_tr_p)
-                            z_te_p = ea_te_p.transform(X_te_p)
+                            base_tr_p = base_aligner_cls(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_tr_p)
+                            base_te_p = base_aligner_cls(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_te_p)
+                            z_tr_p = base_tr_p.transform(X_tr_p)
+                            z_te_p = base_te_p.transform(X_te_p)
 
                             model_p = fit_csp_lda(z_tr_p, y_tr_p, n_components=n_components)
                             d_ref_p = class_cov_diff(
@@ -1415,6 +1539,25 @@ def cross_session_within_subject_evaluation(
                                 eps=oea_eps,
                                 shrinkage=oea_shrinkage,
                             )
+
+                            z_te_p_base = z_te_p
+                            if alignment == "tsa_zo":
+                                q_base_p = _compute_tsa_target_rotation(
+                                    z_train=z_tr_p,
+                                    y_train=y_tr_p,
+                                    z_target=z_te_p,
+                                    model=model_p,
+                                    class_order=class_labels,
+                                    pseudo_mode=str(oea_pseudo_mode),
+                                    pseudo_iters=int(max(0, oea_pseudo_iters)),
+                                    q_blend=float(oea_q_blend),
+                                    pseudo_confidence=float(oea_pseudo_confidence),
+                                    pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                                    pseudo_balance=bool(oea_pseudo_balance),
+                                    eps=float(oea_eps),
+                                    shrinkage=float(oea_shrinkage),
+                                )
+                                z_te_p_base = apply_spatial_transform(q_base_p, z_te_p)
 
                             marginal_prior_p: np.ndarray | None = None
                             if oea_zo_marginal_mode == "kl_prior":
@@ -1426,7 +1569,7 @@ def cross_session_within_subject_evaluation(
                                     counts = np.array([(y_tr_p == c).sum() for c in class_labels], dtype=np.float64)
                                     marginal_prior_p = (counts + 1e-3) / float(np.sum(counts + 1e-3))
                                 else:
-                                    proba_id = model_p.predict_proba(z_te_p)
+                                    proba_id = model_p.predict_proba(z_te_p_base)
                                     proba_id = _reorder_proba_columns(
                                         proba_id, model_p.classes_, list(class_labels)
                                     )
@@ -1446,8 +1589,9 @@ def cross_session_within_subject_evaluation(
                                     y_train=y_tr_p,
                                     class_order=class_labels,
                                 )
+
                             _q_sel, diag_p = _optimize_qt_oea_zo(
-                                z_t=z_te_p,
+                                z_t=z_te_p_base,
                                 model=model_p,
                                 class_order=class_labels,
                                 d_ref=d_ref_p,
@@ -1509,7 +1653,7 @@ def cross_session_within_subject_evaluation(
                                 if feat_names is None:
                                     feat_names = names
                                 Q = np.asarray(rec.get("Q"), dtype=np.float64)
-                                yp = model_p.predict(apply_spatial_transform(Q, z_te_p))
+                                yp = model_p.predict(apply_spatial_transform(Q, z_te_p_base))
                                 acc = float(accuracy_score(y_te_p, yp))
                                 if str(rec.get("kind", "")) == "identity":
                                     acc_id = acc
@@ -1589,7 +1733,7 @@ def cross_session_within_subject_evaluation(
                             class_order=class_labels,
                         )
                     opt_res = _optimize_qt_oea_zo(
-                        z_t=z_test,
+                        z_t=z_test_base if z_test_base is not None else z_test,
                         model=model,
                         class_order=class_labels,
                         d_ref=d_ref,
@@ -1646,7 +1790,9 @@ def cross_session_within_subject_evaluation(
                             best_acc = -1.0
                             for rec in zo_diag.get("records", []):
                                 Q = np.asarray(rec.get("Q"), dtype=np.float64)
-                                yp = model.predict(apply_spatial_transform(Q, z_test))
+                                yp = model.predict(
+                                    apply_spatial_transform(Q, z_test_base if z_test_base is not None else z_test)
+                                )
                                 acc = float(accuracy_score(y_test, yp))
                                 if acc > best_acc:
                                     best_acc = acc
@@ -1682,7 +1828,7 @@ def cross_session_within_subject_evaluation(
                                 model=model,
                                 z_source=z_train,
                                 y_source=y_train,
-                                z_target=z_test,
+                                z_target=z_test_base if z_test_base is not None else z_test,
                                 class_order=class_labels,
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
@@ -1696,7 +1842,7 @@ def cross_session_within_subject_evaluation(
                                 model=model,
                                 z_source=z_train,
                                 y_source=y_train,
-                                z_target=z_test,
+                                z_target=z_test_base if z_test_base is not None else z_test,
                                 class_order=class_labels,
                                 kappa=float(oea_zo_iwcv_kappa),
                                 drift_mode=str(oea_zo_drift_mode),
@@ -1711,7 +1857,7 @@ def cross_session_within_subject_evaluation(
                                 model=model,
                                 z_source=z_train,
                                 y_source=y_train,
-                                z_target=z_test,
+                                z_target=z_test_base if z_test_base is not None else z_test,
                                 class_order=class_labels,
                                 drift_mode=str(oea_zo_drift_mode),
                                 drift_gamma=float(oea_zo_drift_gamma),
@@ -1753,7 +1899,7 @@ def cross_session_within_subject_evaluation(
                         if selected is not None:
                             q_t = np.asarray(selected.get("Q"), dtype=np.float64)
 
-                    X_test = apply_spatial_transform(q_t, z_test)
+                    X_test = apply_spatial_transform(q_t, z_test_base if z_test_base is not None else z_test)
 
         y_pred = np.asarray(model.predict(X_test))
         y_proba = np.asarray(model.predict_proba(X_test))
