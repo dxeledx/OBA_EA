@@ -650,12 +650,23 @@ def _optimize_qt_oea_zo(
 
     csp = model.csp
     lda = model.pipeline.named_steps["lda"]
+    projector = model.pipeline.named_steps.get("proj", None)
     F = np.asarray(csp.filters_[: int(csp.n_components)], dtype=np.float64)
 
     # Determine whether CSP uses log(power).
     use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
 
     max_abs_log_scale = 2.0  # exp(±2) ~= [0.135, 7.39]
+
+    def _maybe_project(feats: np.ndarray) -> np.ndarray:
+        """Apply an optional feature-space projector between CSP and LDA.
+
+        This supports pipelines like: align -> CSP -> proj -> LDA.
+        """
+
+        if projector is None:
+            return feats
+        return np.asarray(projector.transform(feats), dtype=np.float64)
 
     def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
         theta_vec = np.asarray(theta_vec, dtype=np.float64)
@@ -676,6 +687,7 @@ def _optimize_qt_oea_zo(
         power = np.mean(Y * Y, axis=2)
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
+        feats = _maybe_project(feats)
         proba = lda.predict_proba(feats)
         return _reorder_proba_columns(proba, lda.classes_, list(class_order)), A, feats
 
@@ -688,6 +700,7 @@ def _optimize_qt_oea_zo(
         power = np.mean(Y * Y, axis=2)
         power = np.maximum(power, 1e-20)
         feats = np.log(power) if use_log else power
+        feats = _maybe_project(feats)
         proba = lda.predict_proba(feats)
         return _reorder_proba_columns(proba, lda.classes_, list(class_order)), feats
 

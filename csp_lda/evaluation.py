@@ -20,6 +20,8 @@ from .alignment import (
     sorted_eigh,
 )
 from .model import TrainedModel, fit_csp_lda
+from .model import fit_csp_projected_lda
+from .subject_invariant import HSICProjectorParams, CenteredLinearProjector, learn_hsic_subject_invariant_projector
 from .certificate import (
     candidate_features_from_record,
     stacked_candidate_features_from_record,
@@ -274,6 +276,9 @@ def loso_cross_subject_evaluation(
     oea_zo_k: int = 50,
     oea_zo_seed: int = 0,
     oea_zo_l2: float = 0.0,
+    si_subject_lambda: float = 1.0,
+    si_ridge: float = 1e-6,
+    si_proj_dim: int = 0,
     diagnostics_dir: Path | None = None,
     diagnostics_subjects: Sequence[int] = (),
     diagnostics_tag: str = "",
@@ -310,10 +315,23 @@ def loso_cross_subject_evaluation(
     subj_all: List[np.ndarray] = []
     trial_all: List[np.ndarray] = []
 
-    if alignment not in {"none", "ea", "rpa", "ea_zo", "rpa_zo", "tsa", "tsa_zo", "oea_cov", "oea", "oea_zo"}:
+    if alignment not in {
+        "none",
+        "ea",
+        "rpa",
+        "ea_si",
+        "ea_si_zo",
+        "ea_zo",
+        "rpa_zo",
+        "tsa",
+        "tsa_zo",
+        "oea_cov",
+        "oea",
+        "oea_zo",
+    }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
@@ -438,11 +456,17 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_k must be >= 1.")
     if float(oea_zo_l2) < 0.0:
         raise ValueError("oea_zo_l2 must be >= 0.")
+    if float(si_subject_lambda) < 0.0:
+        raise ValueError("si_subject_lambda must be >= 0.")
+    if float(si_ridge) <= 0.0:
+        raise ValueError("si_ridge must be > 0.")
+    if int(si_proj_dim) < 0:
+        raise ValueError("si_proj_dim must be >= 0 (0 means keep full dim).")
 
     diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
 
     # Fast path: subject-wise EA can be precomputed once.
-    if alignment in {"ea", "ea_zo"}:
+    if alignment in {"ea", "ea_si", "ea_zo", "ea_si_zo"}:
         aligned: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_aligned = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
@@ -464,6 +488,497 @@ def loso_cross_subject_evaluation(
             y_train_parts = [subject_data[s].y for s in train_subjects]
             X_train = np.concatenate(X_train_parts, axis=0)
             y_train = np.concatenate(y_train_parts, axis=0)
+        elif alignment == "ea_si":
+            # Train on EA-whitened data with a subject-invariant feature projector (Route B),
+            # then evaluate directly (no test-time Q_t optimization).
+            X_test = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            subj_train = np.concatenate(
+                [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in train_subjects],
+                axis=0,
+            )
+            # Fit CSP once to define feature space, learn projection, then train LDA on projected features.
+            from mne.decoding import CSP  # local import to keep module import cost low
+
+            csp = CSP(n_components=int(n_components))
+            csp.fit(X_train, y_train)
+            feats = np.asarray(csp.transform(X_train), dtype=np.float64)
+            proj_params = HSICProjectorParams(
+                subject_lambda=float(si_subject_lambda),
+                ridge=float(si_ridge),
+                n_components=(int(si_proj_dim) if int(si_proj_dim) > 0 else None),
+            )
+            mean_f, W = learn_hsic_subject_invariant_projector(
+                X=feats,
+                y=y_train,
+                subjects=subj_train,
+                class_order=tuple([str(c) for c in class_order]),
+                params=proj_params,
+            )
+            projector = CenteredLinearProjector(mean=mean_f, W=W)
+            model = fit_csp_projected_lda(
+                X_train=X_train,
+                y_train=y_train,
+                projector=projector,
+                csp=csp,
+                n_components=n_components,
+            )
+        elif alignment == "ea_si_zo":
+            # Train on EA-whitened source data with subject-invariant projection, then
+            # adapt only Q_t at test time via ZO (upper-level).
+            class_labels = tuple([str(c) for c in class_order])
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            subj_train = np.concatenate(
+                [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in train_subjects],
+                axis=0,
+            )
+
+            from mne.decoding import CSP  # local import to keep module import cost low
+
+            csp = CSP(n_components=int(n_components))
+            csp.fit(X_train, y_train)
+            feats = np.asarray(csp.transform(X_train), dtype=np.float64)
+            proj_params = HSICProjectorParams(
+                subject_lambda=float(si_subject_lambda),
+                ridge=float(si_ridge),
+                n_components=(int(si_proj_dim) if int(si_proj_dim) > 0 else None),
+            )
+            mean_f, W = learn_hsic_subject_invariant_projector(
+                X=feats,
+                y=y_train,
+                subjects=subj_train,
+                class_order=class_labels,
+                params=proj_params,
+            )
+            projector = CenteredLinearProjector(mean=mean_f, W=W)
+            model = fit_csp_projected_lda(
+                X_train=X_train,
+                y_train=y_train,
+                projector=projector,
+                csp=csp,
+                n_components=n_components,
+            )
+
+            y_test = subject_data[int(test_subject)].y
+
+            # Optional: offline calibrated certificate / guard (trained only on source subjects in this fold).
+            selector = str(oea_zo_selector)
+            use_stack = selector == "calibrated_stack_ridge"
+            use_ridge_guard = selector == "calibrated_ridge_guard"
+            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard", "calibrated_stack_ridge"}
+            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
+            use_evidence = selector == "evidence"
+            use_probe_mixup = selector == "probe_mixup"
+            use_probe_mixup_hard = selector == "probe_mixup_hard"
+            use_iwcv = selector == "iwcv"
+            use_iwcv_ucb = selector == "iwcv_ucb"
+            use_dev = selector == "dev"
+            use_oracle = selector == "oracle"
+            cert = None
+            guard = None
+            if use_ridge or use_guard:
+                rng = np.random.RandomState(int(oea_zo_calib_seed) + int(test_subject) * 997)
+                calib_subjects = list(train_subjects)
+                if int(oea_zo_calib_max_subjects) > 0 and int(oea_zo_calib_max_subjects) < len(calib_subjects):
+                    rng.shuffle(calib_subjects)
+                    calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
+
+                X_calib_rows: List[np.ndarray] = []
+                y_calib_rows: List[float] = []
+                y_guard_rows: List[int] = []
+                feat_names: tuple[str, ...] | None = None
+
+                for pseudo_t in calib_subjects:
+                    inner_train = [s for s in train_subjects if s != pseudo_t]
+                    if len(inner_train) < 2:
+                        continue
+                    X_inner = np.concatenate([subject_data[s].X for s in inner_train], axis=0)
+                    y_inner = np.concatenate([subject_data[s].y for s in inner_train], axis=0)
+
+                    subj_inner = np.concatenate(
+                        [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in inner_train],
+                        axis=0,
+                    )
+                    csp_inner = CSP(n_components=int(n_components))
+                    csp_inner.fit(X_inner, y_inner)
+                    feats_inner = np.asarray(csp_inner.transform(X_inner), dtype=np.float64)
+                    mean_i, W_i = learn_hsic_subject_invariant_projector(
+                        X=feats_inner,
+                        y=y_inner,
+                        subjects=subj_inner,
+                        class_order=class_labels,
+                        params=proj_params,
+                    )
+                    projector_i = CenteredLinearProjector(mean=mean_i, W=W_i)
+                    model_inner = fit_csp_projected_lda(
+                        X_train=X_inner,
+                        y_train=y_inner,
+                        projector=projector_i,
+                        csp=csp_inner,
+                        n_components=n_components,
+                    )
+
+                    diffs_inner = []
+                    for s in inner_train:
+                        diffs_inner.append(
+                            class_cov_diff(
+                                subject_data[int(s)].X,
+                                subject_data[int(s)].y,
+                                class_order=class_labels,
+                                eps=oea_eps,
+                                shrinkage=oea_shrinkage,
+                            )
+                        )
+                    d_ref_inner = np.mean(np.stack(diffs_inner, axis=0), axis=0)
+
+                    z_pseudo = subject_data[int(pseudo_t)].X
+                    y_pseudo = subject_data[int(pseudo_t)].y
+
+                    marginal_prior_inner: np.ndarray | None = None
+                    if oea_zo_marginal_mode == "kl_prior":
+                        if oea_zo_marginal_prior == "uniform":
+                            marginal_prior_inner = np.ones(len(class_labels), dtype=np.float64) / float(
+                                len(class_labels)
+                            )
+                        elif oea_zo_marginal_prior == "source":
+                            counts = np.array([(y_inner == c).sum() for c in class_labels], dtype=np.float64)
+                            marginal_prior_inner = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                        else:
+                            proba_id = model_inner.predict_proba(z_pseudo)
+                            proba_id = _reorder_proba_columns(proba_id, model_inner.classes_, list(class_order))
+                            marginal_prior_inner = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                            marginal_prior_inner = marginal_prior_inner / float(np.sum(marginal_prior_inner))
+                        mix = float(oea_zo_marginal_prior_mix)
+                        if mix > 0.0 and marginal_prior_inner is not None:
+                            u = np.ones_like(marginal_prior_inner) / float(marginal_prior_inner.shape[0])
+                            marginal_prior_inner = (1.0 - mix) * marginal_prior_inner + mix * u
+                            marginal_prior_inner = marginal_prior_inner / float(np.sum(marginal_prior_inner))
+
+                    lda_ev_inner = None
+                    if str(oea_zo_objective) == "lda_nll" or use_stack:
+                        lda_ev_inner = _compute_lda_evidence_params(
+                            model=model_inner,
+                            X_train=X_inner,
+                            y_train=y_inner,
+                            class_order=class_labels,
+                        )
+
+                    _q_sel, diag_inner = _optimize_qt_oea_zo(
+                        z_t=z_pseudo,
+                        model=model_inner,
+                        class_order=class_labels,
+                        d_ref=d_ref_inner,
+                        lda_evidence=lda_ev_inner,
+                        eps=float(oea_eps),
+                        shrinkage=float(oea_shrinkage),
+                        pseudo_mode=str(oea_pseudo_mode),
+                        warm_start=str(oea_zo_warm_start),
+                        warm_iters=int(oea_zo_warm_iters),
+                        q_blend=float(oea_q_blend),
+                        objective=str(oea_zo_objective),
+                        transform=str(oea_zo_transform),
+                        infomax_lambda=float(oea_zo_infomax_lambda),
+                        reliable_metric=str(oea_zo_reliable_metric),
+                        reliable_threshold=float(oea_zo_reliable_threshold),
+                        reliable_alpha=float(oea_zo_reliable_alpha),
+                        trust_lambda=float(oea_zo_trust_lambda),
+                        trust_q0=str(oea_zo_trust_q0),
+                        marginal_mode=str(oea_zo_marginal_mode),
+                        marginal_beta=float(oea_zo_marginal_beta),
+                        marginal_tau=float(oea_zo_marginal_tau),
+                        marginal_prior=marginal_prior_inner,
+                        bilevel_iters=int(oea_zo_bilevel_iters),
+                        bilevel_temp=float(oea_zo_bilevel_temp),
+                        bilevel_step=float(oea_zo_bilevel_step),
+                        bilevel_coverage_target=float(oea_zo_bilevel_coverage_target),
+                        bilevel_coverage_power=float(oea_zo_bilevel_coverage_power),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        holdout_fraction=float(oea_zo_holdout_fraction),
+                        fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
+                        iters=int(oea_zo_iters),
+                        lr=float(oea_zo_lr),
+                        mu=float(oea_zo_mu),
+                        n_rotations=int(oea_zo_k),
+                        seed=int(oea_zo_seed) + int(pseudo_t) * 997,
+                        l2=float(oea_zo_l2),
+                        pseudo_confidence=float(oea_pseudo_confidence),
+                        pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                        pseudo_balance=bool(oea_pseudo_balance),
+                        return_diagnostics=True,
+                    )
+
+                    recs = list(diag_inner.get("records", []))
+                    if not recs:
+                        continue
+                    feats_list: List[np.ndarray] = []
+                    acc_list: List[float] = []
+                    acc_id: float | None = None
+                    for rec in recs:
+                        if use_stack:
+                            feats_vec, names = stacked_candidate_features_from_record(
+                                rec, n_classes=len(class_labels)
+                            )
+                        else:
+                            feats_vec, names = candidate_features_from_record(rec, n_classes=len(class_labels))
+                        if feat_names is None:
+                            feat_names = names
+                        Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                        yp = model_inner.predict(apply_spatial_transform(Q, z_pseudo))
+                        acc = float(accuracy_score(y_pseudo, yp))
+                        if str(rec.get("kind", "")) == "identity":
+                            acc_id = acc
+                        feats_list.append(feats_vec)
+                        acc_list.append(acc)
+                    if acc_id is None:
+                        continue
+                    for feats_vec, acc in zip(feats_list, acc_list):
+                        improve = float(acc - float(acc_id))
+                        y_calib_rows.append(float(improve))
+                        y_guard_rows.append(1 if float(improve) >= float(oea_zo_calib_guard_margin) else 0)
+                        X_calib_rows.append(feats_vec)
+
+                if X_calib_rows and feat_names is not None:
+                    X_calib = np.vstack(X_calib_rows)
+                    y_calib = np.asarray(y_calib_rows, dtype=np.float64)
+                    y_guard = np.asarray(y_guard_rows, dtype=int)
+                    if use_ridge:
+                        cert = train_ridge_certificate(
+                            X=X_calib,
+                            y=y_calib,
+                            feature_names=feat_names,
+                            alpha=float(oea_zo_calib_ridge_alpha),
+                        )
+                    if use_guard:
+                        guard = train_logistic_guard(
+                            X=X_calib,
+                            y=y_guard,
+                            feature_names=feat_names,
+                            C=float(oea_zo_calib_guard_c),
+                        )
+
+            z_t = subject_data[int(test_subject)].X
+            d_ref = np.mean(
+                np.stack(
+                    [
+                        class_cov_diff(
+                            subject_data[int(s)].X,
+                            subject_data[int(s)].y,
+                            class_order=class_labels,
+                            eps=oea_eps,
+                            shrinkage=oea_shrinkage,
+                        )
+                        for s in train_subjects
+                    ],
+                    axis=0,
+                ),
+                axis=0,
+            )
+
+            want_diag = (
+                bool(do_diag)
+                or (use_ridge and cert is not None)
+                or (use_guard and guard is not None)
+                or use_evidence
+                or use_probe_mixup
+                or use_probe_mixup_hard
+                or use_iwcv
+                or use_iwcv_ucb
+                or use_dev
+                or use_oracle
+            )
+            if use_oracle:
+                want_diag = True
+
+            lda_ev = None
+            if str(oea_zo_objective) == "lda_nll" or use_evidence or use_stack or bool(do_diag):
+                lda_ev = _compute_lda_evidence_params(
+                    model=model,
+                    X_train=X_train,
+                    y_train=y_train,
+                    class_order=class_labels,
+                )
+
+            opt_res = _optimize_qt_oea_zo(
+                z_t=z_t,
+                model=model,
+                class_order=class_labels,
+                d_ref=d_ref,
+                lda_evidence=lda_ev,
+                eps=float(oea_eps),
+                shrinkage=float(oea_shrinkage),
+                pseudo_mode=str(oea_pseudo_mode),
+                warm_start=str(oea_zo_warm_start),
+                warm_iters=int(oea_zo_warm_iters),
+                q_blend=float(oea_q_blend),
+                objective=str(oea_zo_objective),
+                transform=str(oea_zo_transform),
+                infomax_lambda=float(oea_zo_infomax_lambda),
+                reliable_metric=str(oea_zo_reliable_metric),
+                reliable_threshold=float(oea_zo_reliable_threshold),
+                reliable_alpha=float(oea_zo_reliable_alpha),
+                trust_lambda=float(oea_zo_trust_lambda),
+                trust_q0=str(oea_zo_trust_q0),
+                marginal_mode=str(oea_zo_marginal_mode),
+                marginal_beta=float(oea_zo_marginal_beta),
+                marginal_tau=float(oea_zo_marginal_tau),
+                marginal_prior=None,
+                bilevel_iters=int(oea_zo_bilevel_iters),
+                bilevel_temp=float(oea_zo_bilevel_temp),
+                bilevel_step=float(oea_zo_bilevel_step),
+                bilevel_coverage_target=float(oea_zo_bilevel_coverage_target),
+                bilevel_coverage_power=float(oea_zo_bilevel_coverage_power),
+                drift_mode=str(oea_zo_drift_mode),
+                drift_gamma=float(oea_zo_drift_gamma),
+                drift_delta=float(oea_zo_drift_delta),
+                min_improvement=float(oea_zo_min_improvement),
+                holdout_fraction=float(oea_zo_holdout_fraction),
+                fallback_min_marginal_entropy=float(oea_zo_fallback_min_marginal_entropy),
+                iters=int(oea_zo_iters),
+                lr=float(oea_zo_lr),
+                mu=float(oea_zo_mu),
+                n_rotations=int(oea_zo_k),
+                seed=int(oea_zo_seed) + int(test_subject) * 997,
+                l2=float(oea_zo_l2),
+                pseudo_confidence=float(oea_pseudo_confidence),
+                pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                pseudo_balance=bool(oea_pseudo_balance),
+                return_diagnostics=bool(want_diag),
+            )
+            if want_diag:
+                q_t, zo_diag = opt_res
+            else:
+                q_t = opt_res
+
+            if zo_diag is not None:
+                selected: dict | None = None
+                if use_oracle:
+                    best_rec = None
+                    best_acc = -1.0
+                    for rec in zo_diag.get("records", []):
+                        Q = np.asarray(rec.get("Q"), dtype=np.float64)
+                        yp = model.predict(apply_spatial_transform(Q, z_t))
+                        acc = float(accuracy_score(y_test, yp))
+                        if acc > best_acc:
+                            best_acc = acc
+                            best_rec = rec
+                    selected = best_rec
+                elif use_evidence:
+                    selected = select_by_evidence_nll(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
+                elif use_probe_mixup:
+                    selected = select_by_probe_mixup(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
+                elif use_probe_mixup_hard:
+                    selected = select_by_probe_mixup_hard(
+                        zo_diag.get("records", []),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                    )
+                elif use_iwcv:
+                    selected = select_by_iwcv_nll(
+                        zo_diag.get("records", []),
+                        model=model,
+                        z_source=X_train,
+                        y_source=y_train,
+                        z_target=z_t,
+                        class_order=class_labels,
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
+                elif use_iwcv_ucb:
+                    selected = select_by_iwcv_ucb(
+                        zo_diag.get("records", []),
+                        model=model,
+                        z_source=X_train,
+                        y_source=y_train,
+                        z_target=z_t,
+                        class_order=class_labels,
+                        kappa=float(oea_zo_iwcv_kappa),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
+                elif use_dev:
+                    selected = select_by_dev_nll(
+                        zo_diag.get("records", []),
+                        model=model,
+                        z_source=X_train,
+                        y_source=y_train,
+                        z_target=z_t,
+                        class_order=class_labels,
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        min_improvement=float(oea_zo_min_improvement),
+                        seed=int(oea_zo_seed) + int(test_subject) * 997,
+                    )
+                elif use_ridge_guard and cert is not None and guard is not None:
+                    selected = select_by_guarded_predicted_improvement(
+                        zo_diag.get("records", []),
+                        cert=cert,
+                        guard=guard,
+                        n_classes=len(class_labels),
+                        threshold=float(oea_zo_calib_guard_threshold),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        feature_set="stacked" if use_stack else "base",
+                    )
+                elif use_ridge and cert is not None:
+                    selected = select_by_predicted_improvement(
+                        zo_diag.get("records", []),
+                        cert=cert,
+                        n_classes=len(class_labels),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                        feature_set="stacked" if use_stack else "base",
+                    )
+                elif use_guard and guard is not None:
+                    selected = select_by_guarded_objective(
+                        zo_diag.get("records", []),
+                        guard=guard,
+                        n_classes=len(class_labels),
+                        threshold=float(oea_zo_calib_guard_threshold),
+                        drift_mode=str(oea_zo_drift_mode),
+                        drift_gamma=float(oea_zo_drift_gamma),
+                        drift_delta=float(oea_zo_drift_delta),
+                    )
+                if selected is not None:
+                    q_t = np.asarray(selected.get("Q"), dtype=np.float64)
+
+            X_test = apply_spatial_transform(q_t, z_t)
         elif alignment == "ea_zo":
             # Train on EA-whitened source data (no Q_s selection), then adapt only Q_t at test time.
             class_labels = tuple([str(c) for c in class_order])

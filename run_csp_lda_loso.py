@@ -69,6 +69,8 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
             "oea-zo-imr-csp-lda, "
+            "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
+            "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
         ),
@@ -84,6 +86,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Optional covariance shrinkage in EA/OEA (0 means disabled).",
+    )
+    p.add_argument(
+        "--si-subject-lambda",
+        type=float,
+        default=1.0,
+        help=(
+            "For ea-si-* methods: subject invariance strength λ (>=0) in the HSIC-style projector "
+            "(larger enforces more subject invariance)."
+        ),
+    )
+    p.add_argument(
+        "--si-ridge",
+        type=float,
+        default=1e-6,
+        help="For ea-si-* methods: ridge (>0) used in the generalized eigen-problem for the projector.",
+    )
+    p.add_argument(
+        "--si-proj-dim",
+        type=int,
+        default=0,
+        help="For ea-si-* methods: projector output dimension r (0 keeps full CSP feature dimension).",
     )
     p.add_argument(
         "--oea-pseudo-iters",
@@ -579,6 +602,67 @@ def main() -> None:
                     f"thr={args.oea_zo_calib_guard_threshold}, margin={args.oea_zo_calib_guard_margin}, "
                     f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
                 )
+            method_details[method] = (
+                "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
+                "(binary Δ; multiclass scatter); "
+                "target optimizes Q_t by zero-order SPSA on unlabeled data "
+                f"(objective={zo_obj}, transform={args.oea_zo_transform}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; "
+                f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
+                f"{drift_str}{selector_str} "
+                f"holdout={args.oea_zo_holdout_fraction}; "
+                f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
+                f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
+                f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
+                f"min_improve={args.oea_zo_min_improvement}; "
+                f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
+            )
+        elif method == "ea-si-csp-lda":
+            alignment = "ea_si"
+            method_details[method] = (
+                "EA-SI: source trains on EA-whitened data with a subject-invariant linear projector (HSIC-style), "
+                f"(si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}, si_proj_dim={args.si_proj_dim})."
+            )
+        elif method in {
+            "ea-si-zo-csp-lda",
+            "ea-si-zo-ent-csp-lda",
+            "ea-si-zo-im-csp-lda",
+            "ea-si-zo-imr-csp-lda",
+            "ea-si-zo-pce-csp-lda",
+            "ea-si-zo-conf-csp-lda",
+        }:
+            alignment = "ea_si_zo"
+            if method == "ea-si-zo-ent-csp-lda":
+                zo_objective_override = "entropy"
+            elif method == "ea-si-zo-im-csp-lda":
+                zo_objective_override = "infomax"
+            elif method == "ea-si-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
+            elif method == "ea-si-zo-pce-csp-lda":
+                zo_objective_override = "pseudo_ce"
+            elif method == "ea-si-zo-conf-csp-lda":
+                zo_objective_override = "confidence"
+
+            zo_obj = zo_objective_override or str(args.oea_zo_objective)
+            marginal_prior_str = ""
+            if str(args.oea_zo_marginal_mode) == "kl_prior":
+                marginal_prior_str = (
+                    f", prior={args.oea_zo_marginal_prior}, mix={args.oea_zo_marginal_prior_mix}"
+                )
+            drift_str = ""
+            if str(args.oea_zo_drift_mode) != "none":
+                drift_str = (
+                    f"; drift={args.oea_zo_drift_mode} "
+                    f"(gamma={args.oea_zo_drift_gamma}, delta={args.oea_zo_drift_delta})"
+                )
+            selector_str = f"; selector={args.oea_zo_selector}"
+            if str(args.oea_zo_selector) == "calibrated_ridge":
+                selector_str += (
+                    f"(alpha={args.oea_zo_calib_ridge_alpha}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
             elif str(args.oea_zo_selector) == "calibrated_guard":
                 selector_str += (
                     f"(C={args.oea_zo_calib_guard_c}, "
@@ -586,8 +670,8 @@ def main() -> None:
                     f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
                 )
             method_details[method] = (
-                "OEA-ZO (target optimistic selection): source uses covariance-signature alignment for Q_s "
-                "(binary Δ; multiclass scatter); "
+                "EA-SI-ZO: source trains on EA-whitened data with a subject-invariant linear projector (HSIC-style), "
+                f"(si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}, si_proj_dim={args.si_proj_dim}); "
                 "target optimizes Q_t by zero-order SPSA on unlabeled data "
                 f"(objective={zo_obj}, transform={args.oea_zo_transform}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
                 f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
@@ -662,6 +746,8 @@ def main() -> None:
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
+                "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
+                "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
@@ -729,6 +815,9 @@ def main() -> None:
                 oea_zo_k=int(args.oea_zo_k),
                 oea_zo_seed=int(args.oea_zo_seed),
                 oea_zo_l2=float(args.oea_zo_l2),
+                si_subject_lambda=float(args.si_subject_lambda),
+                si_ridge=float(args.si_ridge),
+                si_proj_dim=int(args.si_proj_dim),
                 diagnostics_dir=out_dir if diagnose_subjects else None,
                 diagnostics_subjects=diagnose_subjects,
                 diagnostics_tag=method,

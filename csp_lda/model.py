@@ -10,6 +10,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.pipeline import Pipeline
 
 from .alignment import BaseAligner, NoAligner
+from .subject_invariant import CenteredLinearProjector
 
 
 class EnsureFloat64(BaseEstimator, TransformerMixin):
@@ -75,4 +76,48 @@ def fit_csp_lda(
 ) -> TrainedModel:
     pipeline = build_csp_lda_pipeline(n_components=n_components, aligner=aligner)
     pipeline.fit(X_train, y_train)
+    return TrainedModel(pipeline=pipeline)
+
+
+def fit_csp_projected_lda(
+    *,
+    X_train,
+    y_train,
+    projector: CenteredLinearProjector,
+    csp: CSP | None = None,
+    n_components: int = 4,
+    aligner: Optional[BaseAligner] = None,
+) -> TrainedModel:
+    """Fit CSP then train LDA on projected CSP features.
+
+    This is used for subject-invariant feature learning where the projector is
+    learned externally (may depend on subject IDs), but we still want a standard
+    sklearn Pipeline for inference and for ZO utilities that access pipeline steps.
+    """
+
+    if aligner is None:
+        aligner = NoAligner()
+
+    X_train = np.asarray(X_train, dtype=np.float64)
+    y_train = np.asarray(y_train)
+
+    if csp is None:
+        csp = CSP(n_components=int(n_components))
+        csp.fit(X_train, y_train)
+
+    feats = np.asarray(csp.transform(X_train), dtype=np.float64)
+    feats_proj = np.asarray(projector.transform(feats), dtype=np.float64)
+
+    lda = LinearDiscriminantAnalysis()
+    lda.fit(feats_proj, y_train)
+
+    pipeline = Pipeline(
+        steps=[
+            ("to_float64", EnsureFloat64()),
+            ("align", aligner),
+            ("csp", csp),
+            ("proj", projector),
+            ("lda", lda),
+        ]
+    )
     return TrainedModel(pipeline=pipeline)
