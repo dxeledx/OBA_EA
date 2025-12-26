@@ -21,7 +21,13 @@ from .alignment import (
 )
 from .model import TrainedModel, fit_csp_lda
 from .model import fit_csp_projected_lda
-from .subject_invariant import HSICProjectorParams, CenteredLinearProjector, learn_hsic_subject_invariant_projector
+from .subject_invariant import (
+    HSICProjectorParams,
+    CenteredLinearProjector,
+    learn_hsic_subject_invariant_projector,
+    ChannelProjectorParams,
+    learn_subject_invariant_channel_projector,
+)
 from .certificate import (
     candidate_features_from_record,
     stacked_candidate_features_from_record,
@@ -320,6 +326,7 @@ def loso_cross_subject_evaluation(
         "ea",
         "rpa",
         "ea_si",
+        "ea_si_chan",
         "ea_si_zo",
         "ea_zo",
         "rpa_zo",
@@ -331,7 +338,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
@@ -466,7 +473,7 @@ def loso_cross_subject_evaluation(
     diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
 
     # Fast path: subject-wise EA can be precomputed once.
-    if alignment in {"ea", "ea_si", "ea_zo", "ea_si_zo"}:
+    if alignment in {"ea", "ea_si", "ea_si_chan", "ea_zo", "ea_si_zo"}:
         aligned: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_aligned = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
@@ -529,6 +536,39 @@ def loso_cross_subject_evaluation(
                 csp=csp,
                 n_components=n_components,
             )
+        elif alignment == "ea_si_chan":
+            # Channel-space subject-invariant projection (pre-CSP): learn a low-rank projector A (C×C),
+            # apply it to both train/test, then train a standard CSP+LDA model.
+            X_test = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            subj_train = np.concatenate(
+                [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in train_subjects],
+                axis=0,
+            )
+
+            chan_params = ChannelProjectorParams(
+                subject_lambda=float(si_subject_lambda),
+                ridge=float(si_ridge),
+                n_components=(int(si_proj_dim) if int(si_proj_dim) > 0 else None),
+            )
+            A = learn_subject_invariant_channel_projector(
+                X=X_train,
+                y=y_train,
+                subjects=subj_train,
+                class_order=tuple([str(c) for c in class_order]),
+                eps=float(oea_eps),
+                shrinkage=float(oea_shrinkage),
+                params=chan_params,
+            )
+            X_train = apply_spatial_transform(A, X_train)
+            X_test = apply_spatial_transform(A, X_test)
+            model = fit_csp_lda(X_train, y_train, n_components=n_components)
         elif alignment == "ea_si_zo":
             # Train on EA-whitened source data with subject-invariant projection, then
             # adapt only Q_t at test time via ZO (upper-level).

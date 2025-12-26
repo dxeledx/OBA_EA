@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
             "oea-zo-imr-csp-lda, "
             "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
             "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
+            "ea-si-chan-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
         ),
@@ -625,6 +626,13 @@ def main() -> None:
                 "EA-SI: source trains on EA-whitened data with a subject-invariant linear projector (HSIC-style), "
                 f"(si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}, si_proj_dim={args.si_proj_dim})."
             )
+        elif method == "ea-si-chan-csp-lda":
+            alignment = "ea_si_chan"
+            method_details[method] = (
+                "EA-SI-CHAN: learn a low-rank channel projector (rank=si_proj_dim) to reduce inter-subject shift "
+                "before CSP, then train CSP+LDA on projected signals "
+                f"(si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}, si_proj_dim={args.si_proj_dim})."
+            )
         elif method in {
             "ea-si-zo-csp-lda",
             "ea-si-zo-ent-csp-lda",
@@ -748,6 +756,7 @@ def main() -> None:
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
                 "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
+                "ea-si-chan-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
@@ -885,6 +894,43 @@ def main() -> None:
                 y_parts.append(sd.y)
             X_fit = np.concatenate(X_parts, axis=0)
             y_fit = np.concatenate(y_parts, axis=0)
+        elif method == "ea-si-chan-csp-lda":
+            # Visualization-only: learn the channel projector on EA-whitened full data (using true labels),
+            # then fit CSP+LDA on the projected signals.
+            from csp_lda.subject_invariant import ChannelProjectorParams, learn_subject_invariant_channel_projector
+
+            class_labels = tuple([str(c) for c in class_order])
+            X_parts = []
+            y_parts = []
+            subj_parts = []
+            for s, sd in subject_data.items():
+                z = EuclideanAligner(eps=float(args.oea_eps), shrinkage=float(args.oea_shrinkage)).fit_transform(
+                    sd.X
+                )
+                X_parts.append(z)
+                y_parts.append(sd.y)
+                subj_parts.append(np.full(sd.y.shape[0], int(s), dtype=int))
+
+            X_all = np.concatenate(X_parts, axis=0)
+            y_all = np.concatenate(y_parts, axis=0)
+            subj_all = np.concatenate(subj_parts, axis=0)
+
+            chan_params = ChannelProjectorParams(
+                subject_lambda=float(args.si_subject_lambda),
+                ridge=float(args.si_ridge),
+                n_components=(int(args.si_proj_dim) if int(args.si_proj_dim) > 0 else None),
+            )
+            A = learn_subject_invariant_channel_projector(
+                X=X_all,
+                y=y_all,
+                subjects=subj_all,
+                class_order=class_labels,
+                eps=float(args.oea_eps),
+                shrinkage=float(args.oea_shrinkage),
+                params=chan_params,
+            )
+            X_fit = apply_spatial_transform(A, X_all)
+            y_fit = y_all
         elif method == "oea-cov-csp-lda":
             # Visualization-only: build U_ref from all subjects.
             covs = []
