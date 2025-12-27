@@ -22,3 +22,7 @@ File naming convention: `YYYYMMDD_<topic>.md`
 - `20251223_bilevel_imr_guard_4class.md`: Continuous bilevel (w,q) + calibrated guard implementation notes and 4-class runs.
 - `20251223_2c_4c_safe_runs.md`: Summary of the latest 2-class and 4-class “safe” runs after adding predictions CSV output.
 - `20251224_within_subject_cross_session.md`: Within-subject cross-session (0train→1test) comparison: EA vs EA/OEA-ZO.
+- `20251225_cross_session_certificate_diagall.md`: Cross-session (0train→1test) diagnostics: candidate certificates vs accuracy.
+- `20251226_loso_4class_routeB_ea_si.md`: Route B (EA-SI / EA-SI-ZO) notes for LOSO 4-class.
+- `20251226_loso_4class_ea_si_chan.md`: EA-SI-CHAN (channel projector before CSP) LOSO 4-class notes.
+- `20251227_loso_4class_ea_si_chan_safe.md`: EA-SI-CHAN wrapped by binary calibrated guard + fallback (LOSO 4-class).

@@ -327,6 +327,7 @@ def loso_cross_subject_evaluation(
         "rpa",
         "ea_si",
         "ea_si_chan",
+        "ea_si_chan_safe",
         "ea_si_zo",
         "ea_zo",
         "rpa_zo",
@@ -338,7 +339,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
@@ -473,7 +474,7 @@ def loso_cross_subject_evaluation(
     diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
 
     # Fast path: subject-wise EA can be precomputed once.
-    if alignment in {"ea", "ea_si", "ea_si_chan", "ea_zo", "ea_si_zo"}:
+    if alignment in {"ea", "ea_si", "ea_si_chan", "ea_si_chan_safe", "ea_zo", "ea_si_zo"}:
         aligned: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_aligned = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
@@ -481,6 +482,7 @@ def loso_cross_subject_evaluation(
         subject_data = aligned
 
     for test_subject in subjects:
+        model: TrainedModel | None = None
         train_subjects = [s for s in subjects if s != test_subject]
         do_diag = diagnostics_dir is not None and int(test_subject) in diag_subjects_set
         zo_diag: dict | None = None
@@ -569,6 +571,188 @@ def loso_cross_subject_evaluation(
             X_train = apply_spatial_transform(A, X_train)
             X_test = apply_spatial_transform(A, X_test)
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
+        elif alignment == "ea_si_chan_safe":
+            # EA anchor vs. channel projector candidate (binary choice). Use a fold-local calibrated guard
+            # trained on pseudo-target subjects; otherwise fallback to EA (identity).
+            X_test = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            subj_train = np.concatenate(
+                [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in train_subjects],
+                axis=0,
+            )
+
+            chan_params = ChannelProjectorParams(
+                subject_lambda=float(si_subject_lambda),
+                ridge=float(si_ridge),
+                n_components=(int(si_proj_dim) if int(si_proj_dim) > 0 else None),
+            )
+            A = learn_subject_invariant_channel_projector(
+                X=X_train,
+                y=y_train,
+                subjects=subj_train,
+                class_order=tuple([str(c) for c in class_order]),
+                eps=float(oea_eps),
+                shrinkage=float(oea_shrinkage),
+                params=chan_params,
+            )
+
+            # Train both models on the same source fold (EA anchor vs projected).
+            model_id = fit_csp_lda(X_train, y_train, n_components=n_components)
+            X_train_A = apply_spatial_transform(A, X_train)
+            model_A = fit_csp_lda(X_train_A, y_train, n_components=n_components)
+
+            # Calibrate a per-fold guard using pseudo-targets from the source subjects.
+            rng = np.random.RandomState(int(oea_zo_calib_seed) + int(test_subject) * 997)
+            calib_subjects = list(train_subjects)
+            if int(oea_zo_calib_max_subjects) > 0 and int(oea_zo_calib_max_subjects) < len(calib_subjects):
+                rng.shuffle(calib_subjects)
+                calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
+
+            X_guard_rows: List[np.ndarray] = []
+            y_guard_rows: List[int] = []
+            feat_names: tuple[str, ...] | None = None
+
+            def _row_entropy(p: np.ndarray) -> np.ndarray:
+                p = np.asarray(p, dtype=np.float64)
+                p = np.clip(p, 1e-12, 1.0)
+                p = p / np.sum(p, axis=1, keepdims=True)
+                return -np.sum(p * np.log(p), axis=1)
+
+            def _drift_vec(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
+                p0 = np.asarray(p0, dtype=np.float64)
+                p1 = np.asarray(p1, dtype=np.float64)
+                p0 = np.clip(p0, 1e-12, 1.0)
+                p1 = np.clip(p1, 1e-12, 1.0)
+                p0 = p0 / np.sum(p0, axis=1, keepdims=True)
+                p1 = p1 / np.sum(p1, axis=1, keepdims=True)
+                return np.sum(p0 * (np.log(p0) - np.log(p1)), axis=1)
+
+            def _record_for_candidate(*, p_id: np.ndarray, p_c: np.ndarray) -> dict:
+                p_c = np.asarray(p_c, dtype=np.float64)
+                p_bar = np.mean(np.clip(p_c, 1e-12, 1.0), axis=0)
+                p_bar = p_bar / float(np.sum(p_bar))
+                ent = _row_entropy(p_c)
+                ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
+
+                d = _drift_vec(p_id, p_c)
+                rec = {
+                    "kind": "candidate",
+                    "objective_base": float(np.mean(ent)),
+                    "pen_marginal": 0.0,
+                    "mean_entropy": float(np.mean(ent)),
+                    "entropy_bar": float(ent_bar),
+                    "drift_best": float(np.mean(d)),
+                    "drift_best_std": float(np.std(d)),
+                    "drift_best_q90": float(np.quantile(d, 0.90)),
+                    "drift_best_q95": float(np.quantile(d, 0.95)),
+                    "drift_best_max": float(np.max(d)),
+                    "drift_best_tail_frac": float(np.mean(d > float(oea_zo_drift_delta)))
+                    if float(oea_zo_drift_delta) > 0.0
+                    else 0.0,
+                    "p_bar_full": p_bar.astype(np.float64),
+                    "q_bar": np.zeros_like(p_bar),
+                }
+                return rec
+
+            for pseudo_t in calib_subjects:
+                inner_train = [s for s in train_subjects if s != pseudo_t]
+                if len(inner_train) < 2:
+                    continue
+
+                X_inner = np.concatenate([subject_data[s].X for s in inner_train], axis=0)
+                y_inner = np.concatenate([subject_data[s].y for s in inner_train], axis=0)
+                subj_inner = np.concatenate(
+                    [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in inner_train],
+                    axis=0,
+                )
+
+                A_inner = learn_subject_invariant_channel_projector(
+                    X=X_inner,
+                    y=y_inner,
+                    subjects=subj_inner,
+                    class_order=tuple([str(c) for c in class_order]),
+                    eps=float(oea_eps),
+                    shrinkage=float(oea_shrinkage),
+                    params=chan_params,
+                )
+                m_id = fit_csp_lda(X_inner, y_inner, n_components=n_components)
+                X_inner_A = apply_spatial_transform(A_inner, X_inner)
+                m_A = fit_csp_lda(X_inner_A, y_inner, n_components=n_components)
+
+                z_p = subject_data[int(pseudo_t)].X
+                y_p = subject_data[int(pseudo_t)].y
+                p_id = _reorder_proba_columns(m_id.predict_proba(z_p), m_id.classes_, list(class_order))
+                p_A = _reorder_proba_columns(
+                    m_A.predict_proba(apply_spatial_transform(A_inner, z_p)),
+                    m_A.classes_,
+                    list(class_order),
+                )
+
+                yp_id = np.asarray(m_id.predict(z_p))
+                yp_A = np.asarray(m_A.predict(apply_spatial_transform(A_inner, z_p)))
+                acc_id = float(accuracy_score(y_p, yp_id))
+                acc_A = float(accuracy_score(y_p, yp_A))
+                improve = float(acc_A - acc_id)
+
+                rec = _record_for_candidate(p_id=p_id, p_c=p_A)
+                feats_vec, names = candidate_features_from_record(rec, n_classes=len(class_order), include_pbar=True)
+                if feat_names is None:
+                    feat_names = names
+                X_guard_rows.append(feats_vec)
+                y_guard_rows.append(1 if improve >= float(oea_zo_calib_guard_margin) else 0)
+
+            guard = None
+            if X_guard_rows and feat_names is not None:
+                X_guard = np.vstack(X_guard_rows)
+                y_guard = np.asarray(y_guard_rows, dtype=int)
+                # Need both classes to train.
+                if len(np.unique(y_guard)) >= 2:
+                    guard = train_logistic_guard(
+                        X_guard,
+                        y_guard,
+                        feature_names=feat_names,
+                        c=float(oea_zo_calib_guard_c),
+                    )
+
+            # Decide whether to accept the projected candidate on the target subject.
+            p_id_t = _reorder_proba_columns(model_id.predict_proba(X_test), model_id.classes_, list(class_order))
+            X_test_A = apply_spatial_transform(A, X_test)
+            p_A_t = _reorder_proba_columns(model_A.predict_proba(X_test_A), model_A.classes_, list(class_order))
+
+            accept = False
+            if guard is not None:
+                rec_t = _record_for_candidate(p_id=p_id_t, p_c=p_A_t)
+                feats_t, _names = candidate_features_from_record(rec_t, n_classes=len(class_order), include_pbar=True)
+                pos = float(guard.predict_pos_proba(feats_t)[0])
+                accept = pos >= float(oea_zo_calib_guard_threshold)
+
+                # Optional hard drift guard.
+                if str(oea_zo_drift_mode) == "hard" and float(oea_zo_drift_delta) > 0.0:
+                    drift_mean = float(np.mean(_drift_vec(p_id_t, p_A_t)))
+                    if drift_mean > float(oea_zo_drift_delta):
+                        accept = False
+
+                # Optional marginal-entropy fallback.
+                if float(oea_zo_fallback_min_marginal_entropy) > 0.0 and accept:
+                    p_bar = np.mean(np.clip(p_A_t, 1e-12, 1.0), axis=0)
+                    p_bar = p_bar / float(np.sum(p_bar))
+                    ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
+                    if ent_bar < float(oea_zo_fallback_min_marginal_entropy):
+                        accept = False
+
+            # Fallback to EA unless confidently accepted.
+            if accept:
+                model = model_A
+                X_test = X_test_A
+            else:
+                model = model_id
+                X_test = X_test
         elif alignment == "ea_si_zo":
             # Train on EA-whitened source data with subject-invariant projection, then
             # adapt only Q_t at test time via ZO (upper-level).
@@ -1736,7 +1920,7 @@ def loso_cross_subject_evaluation(
             X_test = apply_spatial_transform(q_t, z_t)
             y_test = subject_data[test_subject].y
 
-        if alignment not in {"oea", "oea_zo", "ea_zo"}:
+        if model is None:
             model = fit_csp_lda(X_train, y_train, n_components=n_components)
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test)

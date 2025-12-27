@@ -72,9 +72,15 @@ def parse_args() -> argparse.Namespace:
             "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
             "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
             "ea-si-chan-csp-lda, "
+            "ea-si-chan-safe-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
         ),
+    )
+    p.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip saving plots (confusion matrices / CSP patterns / comparison bar).",
     )
     p.add_argument(
         "--oea-eps",
@@ -633,6 +639,18 @@ def main() -> None:
                 "before CSP, then train CSP+LDA on projected signals "
                 f"(si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}, si_proj_dim={args.si_proj_dim})."
             )
+        elif method == "ea-si-chan-safe-csp-lda":
+            alignment = "ea_si_chan_safe"
+            method_details[method] = (
+                "EA-SI-CHAN-SAFE: binary selection between EA anchor (A=I) and the channel projector candidate "
+                "(A=QQᵀ) using a fold-local calibrated guard trained on pseudo-target subjects; fallback to EA when "
+                "not accepted. "
+                f"(rank={args.si_proj_dim}, si_lambda={args.si_subject_lambda}, si_ridge={args.si_ridge}; "
+                f"guard_C={args.oea_zo_calib_guard_c}, guard_thr={args.oea_zo_calib_guard_threshold}, "
+                f"guard_margin={args.oea_zo_calib_guard_margin}, max_subjects={args.oea_zo_calib_max_subjects}, "
+                f"seed={args.oea_zo_calib_seed}; drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+            )
         elif method in {
             "ea-si-zo-csp-lda",
             "ea-si-zo-ent-csp-lda",
@@ -756,7 +774,7 @@ def main() -> None:
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
                 "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
-                "ea-si-chan-csp-lda, "
+                "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
@@ -855,6 +873,33 @@ def main() -> None:
         protocol_name="LOSO",
     )
 
+    # Small, reproducible method-comparison table (mean / worst-subject / negative-transfer vs EA).
+    base_method = "ea-csp-lda"
+    base_df = results_by_method.get(base_method)
+    base_acc = base_df.set_index("subject")["accuracy"].astype(float) if base_df is not None else None
+    rows = []
+    for method, df in sorted(results_by_method.items()):
+        acc = df["accuracy"].astype(float)
+        row = {
+            "method": method,
+            "n_subjects": int(df.shape[0]),
+            "mean_accuracy": float(acc.mean()),
+            "worst_accuracy": float(acc.min()),
+        }
+        if base_acc is not None and method != base_method:
+            m_acc = df.set_index("subject")["accuracy"].astype(float)
+            common = m_acc.index.intersection(base_acc.index)
+            if len(common) > 0:
+                delta = m_acc.loc[common] - base_acc.loc[common]
+                row["mean_delta_vs_ea"] = float(delta.mean())
+                row["neg_transfer_rate_vs_ea"] = float(np.mean(delta < -1e-12))
+            else:
+                row["mean_delta_vs_ea"] = float("nan")
+                row["neg_transfer_rate_vs_ea"] = float("nan")
+        rows.append(row)
+    comparison_df = pd.DataFrame(rows)
+    comparison_df.to_csv(out_dir / f"{date_prefix}_method_comparison.csv", index=False)
+
     # Detailed per-trial predictions (for per-subject analysis).
     all_pred_parts: list[pd.DataFrame] = []
     for method, pred_df in trial_predictions_by_method.items():
@@ -869,6 +914,10 @@ def main() -> None:
         )
 
     # Plots
+    if args.no_plots:
+        print("Skipping plots (--no-plots).")
+        return
+
     # 1) CSP patterns (fit on full data) + confusion matrices for each method
     from csp_lda.model import fit_csp_lda
     from csp_lda.alignment import (
