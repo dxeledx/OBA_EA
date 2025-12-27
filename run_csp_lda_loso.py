@@ -878,6 +878,14 @@ def main() -> None:
     base_df = results_by_method.get(base_method)
     base_acc = base_df.set_index("subject")["accuracy"].astype(float) if base_df is not None else None
     rows = []
+
+    def _rankdata(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        order = np.argsort(x)
+        ranks = np.empty_like(order, dtype=np.float64)
+        ranks[order] = np.arange(x.size, dtype=np.float64)
+        return ranks
+
     for method, df in sorted(results_by_method.items()):
         acc = df["accuracy"].astype(float)
         row = {
@@ -886,6 +894,25 @@ def main() -> None:
             "mean_accuracy": float(acc.mean()),
             "worst_accuracy": float(acc.min()),
         }
+        # Optional: certificate/guard diagnostics (present for some safe selectors).
+        if "chan_safe_guard_pos" in df.columns and "chan_safe_improve" in df.columns:
+            p = df["chan_safe_guard_pos"].astype(float).to_numpy()
+            imp = df["chan_safe_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["guard_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["guard_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["guard_improve_pearson"] = float("nan")
+                row["guard_improve_spearman"] = float("nan")
+        if "chan_safe_accept" in df.columns:
+            row["accept_rate"] = float(np.mean(df["chan_safe_accept"].astype(float)))
+        if "chan_safe_guard_train_auc" in df.columns:
+            row["guard_train_auc_mean"] = float(np.nanmean(df["chan_safe_guard_train_auc"].astype(float)))
+        if "chan_safe_guard_train_spearman" in df.columns:
+            row["guard_train_spearman_mean"] = float(np.nanmean(df["chan_safe_guard_train_spearman"].astype(float)))
         if base_acc is not None and method != base_method:
             m_acc = df.set_index("subject")["accuracy"].astype(float)
             common = m_acc.index.intersection(base_acc.index)

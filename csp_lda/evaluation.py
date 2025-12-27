@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, roc_auc_score
 
 from .data import SubjectData
 from .alignment import (
@@ -473,6 +473,16 @@ def loso_cross_subject_evaluation(
 
     diag_subjects_set = {int(s) for s in diagnostics_subjects} if diagnostics_subjects else set()
 
+    # Optional: extra per-subject diagnostics for specific alignments.
+    extra_rows: list[dict] | None = [] if alignment == "ea_si_chan_safe" else None
+
+    def _rankdata(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        order = np.argsort(x)
+        ranks = np.empty_like(order, dtype=np.float64)
+        ranks[order] = np.arange(x.size, dtype=np.float64)
+        return ranks
+
     # Fast path: subject-wise EA can be precomputed once.
     if alignment in {"ea", "ea_si", "ea_si_chan", "ea_si_chan_safe", "ea_zo", "ea_si_zo"}:
         aligned: Dict[int, SubjectData] = {}
@@ -616,6 +626,7 @@ def loso_cross_subject_evaluation(
 
             X_guard_rows: List[np.ndarray] = []
             y_guard_rows: List[int] = []
+            improve_rows: List[float] = []
             feat_names: tuple[str, ...] | None = None
 
             def _row_entropy(p: np.ndarray) -> np.ndarray:
@@ -706,8 +717,12 @@ def loso_cross_subject_evaluation(
                     feat_names = names
                 X_guard_rows.append(feats_vec)
                 y_guard_rows.append(1 if improve >= float(oea_zo_calib_guard_margin) else 0)
+                improve_rows.append(float(improve))
 
             guard = None
+            guard_train_auc = float("nan")
+            guard_train_spearman = float("nan")
+            guard_train_pearson = float("nan")
             if X_guard_rows and feat_names is not None:
                 X_guard = np.vstack(X_guard_rows)
                 y_guard = np.asarray(y_guard_rows, dtype=int)
@@ -719,6 +734,17 @@ def loso_cross_subject_evaluation(
                         feature_names=feat_names,
                         c=float(oea_zo_calib_guard_c),
                     )
+                    try:
+                        p_train = np.asarray(guard.predict_pos_proba(X_guard), dtype=np.float64).reshape(-1)
+                        improve_train = np.asarray(improve_rows, dtype=np.float64).reshape(-1)
+                        guard_train_auc = float(roc_auc_score(y_guard, p_train))
+                        if improve_train.size >= 2:
+                            guard_train_pearson = float(np.corrcoef(p_train, improve_train)[0, 1])
+                            guard_train_spearman = float(
+                                np.corrcoef(_rankdata(p_train), _rankdata(improve_train))[0, 1]
+                            )
+                    except Exception:
+                        pass
 
             # Decide whether to accept the projected candidate on the target subject.
             p_id_t = _reorder_proba_columns(model_id.predict_proba(X_test), model_id.classes_, list(class_order))
@@ -726,6 +752,10 @@ def loso_cross_subject_evaluation(
             p_A_t = _reorder_proba_columns(model_A.predict_proba(X_test_A), model_A.classes_, list(class_order))
 
             accept = False
+            pos = float("nan")
+            acc_id_t = float("nan")
+            acc_A_t = float("nan")
+            improve_t = float("nan")
             if guard is not None:
                 rec_t = _record_for_candidate(p_id=p_id_t, p_c=p_A_t)
                 feats_t, _names = candidate_features_from_record(rec_t, n_classes=len(class_order), include_pbar=True)
@@ -745,6 +775,31 @@ def loso_cross_subject_evaluation(
                     ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
                     if ent_bar < float(oea_zo_fallback_min_marginal_entropy):
                         accept = False
+
+            # Analysis-only: compute true improvement on the target subject (not used in selection).
+            try:
+                yp_id_t = np.asarray(model_id.predict(X_test))
+                yp_A_t = np.asarray(model_A.predict(X_test_A))
+                acc_id_t = float(accuracy_score(y_test, yp_id_t))
+                acc_A_t = float(accuracy_score(y_test, yp_A_t))
+                improve_t = float(acc_A_t - acc_id_t)
+            except Exception:
+                pass
+
+            if extra_rows is not None:
+                extra_rows.append(
+                    {
+                        "subject": int(test_subject),
+                        "chan_safe_accept": int(bool(accept)),
+                        "chan_safe_guard_pos": float(pos),
+                        "chan_safe_acc_anchor": float(acc_id_t),
+                        "chan_safe_acc_candidate": float(acc_A_t),
+                        "chan_safe_improve": float(improve_t),
+                        "chan_safe_guard_train_auc": float(guard_train_auc),
+                        "chan_safe_guard_train_spearman": float(guard_train_spearman),
+                        "chan_safe_guard_train_pearson": float(guard_train_pearson),
+                    }
+                )
 
             # Fallback to EA unless confidently accepted.
             if accept:
@@ -1962,6 +2017,9 @@ def loso_cross_subject_evaluation(
         trial_all.append(np.arange(int(len(y_test)), dtype=int))
 
     results_df = pd.DataFrame([asdict(r) for r in fold_rows]).sort_values("subject")
+    if extra_rows is not None and extra_rows:
+        extra_df = pd.DataFrame(extra_rows).sort_values("subject")
+        results_df = results_df.merge(extra_df, on="subject", how="left")
     y_true_cat = np.concatenate(y_true_all, axis=0)
     y_pred_cat = np.concatenate(y_pred_all, axis=0)
     y_proba_cat = np.concatenate(y_proba_all, axis=0)

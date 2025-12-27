@@ -60,6 +60,36 @@ Key numbers (accuracy):
 | EA-SI-CHAN | 0.5394 | 0.2708 | 0.1111 |
 | EA-SI-CHAN-SAFE | 0.5436 | 0.2708 | 0.0000 |
 
+## Calibrated guard diagnostics (uses all pseudo-target subjects; logs correlation)
+This uses `--oea-zo-calib-max-subjects 0` so the fold-local guard is trained on all available pseudo-target subjects.
+
+```bash
+conda run -n eeg python run_csp_lda_loso.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue --sessions 0train \
+  --methods ea-csp-lda,ea-si-chan-csp-lda,ea-si-chan-safe-csp-lda \
+  --si-proj-dim 21 --si-subject-lambda 1 --si-ridge 1e-6 \
+  --oea-zo-calib-max-subjects 0 --oea-zo-calib-seed 0 \
+  --oea-zo-calib-guard-threshold 0.5 \
+  --no-plots \
+  --run-name loso4_easichan_safe_r21_thr05_calAll_corr
+```
+
+Outputs:
+- `outputs/20251227/4class/loso4_easichan_safe_r21_thr05_calAll_corr/20251227_method_comparison.csv`
+
+Key numbers (accuracy):
+| method | mean | worst-subject | neg-transfer vs EA |
+|---|---:|---:|---:|
+| EA | 0.5320 | 0.2569 | — |
+| EA-SI-CHAN | 0.5394 | 0.2708 | 0.1111 |
+| EA-SI-CHAN-SAFE | 0.5424 | 0.2708 | 0.0000 |
+
+Certificate effectiveness (logged in `method_comparison.csv` for the SAFE method):
+- `guard_improve_spearman` (guard score vs true improvement across subjects): **0.3833**
+- `guard_train_auc_mean`: **1.0** (in-sample on pseudo-target training rows)
+- `accept_rate`: **0.4444**
+
 ## Observation
 With `rank=21`, **EA-SI-CHAN** has small mean gains but still shows negative transfer on some subjects.
 The **EA-SI-CHAN-SAFE** wrapper (binary calibrated guard + fallback to EA) removes negative transfer in these two runs and slightly improves mean accuracy.
