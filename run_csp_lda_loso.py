@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
             "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
             "ea-si-chan-csp-lda, "
             "ea-si-chan-safe-csp-lda, "
+            "ea-si-chan-multi-safe-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
         ),
@@ -114,6 +115,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="For ea-si-* methods: projector output dimension r (0 keeps full CSP feature dimension).",
+    )
+    p.add_argument(
+        "--si-chan-ranks",
+        type=str,
+        default="",
+        help=(
+            "For ea-si-chan-multi-safe-csp-lda: comma-separated candidate ranks for the channel projector "
+            "A=QQᵀ (e.g. '18,19,20,21'). Empty falls back to --si-proj-dim."
+        ),
+    )
+    p.add_argument(
+        "--si-chan-lambdas",
+        type=str,
+        default="",
+        help=(
+            "For ea-si-chan-multi-safe-csp-lda: comma-separated candidate subject invariance strengths λ "
+            "(e.g. '0.5,1,2'). Empty falls back to --si-subject-lambda."
+        ),
     )
     p.add_argument(
         "--oea-pseudo-iters",
@@ -494,6 +513,34 @@ def main() -> None:
         [s.strip() for s in sessions_raw.split(",") if s.strip()]
     )
     methods = [m.strip() for m in str(args.methods).split(",") if m.strip()]
+
+    def _parse_csv_ints(raw: str) -> list[int]:
+        raw = str(raw).strip()
+        if not raw:
+            return []
+        out: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            out.append(int(part))
+        return out
+
+    def _parse_csv_floats(raw: str) -> list[float]:
+        raw = str(raw).strip()
+        if not raw:
+            return []
+        out: list[float] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            out.append(float(part))
+        return out
+
+    si_chan_candidate_ranks = _parse_csv_ints(str(args.si_chan_ranks))
+    si_chan_candidate_lambdas = _parse_csv_floats(str(args.si_chan_lambdas))
+
     diagnose_subjects: tuple[int, ...] = ()
     if str(args.diagnose_subjects).strip():
         diagnose_subjects = tuple(
@@ -651,6 +698,21 @@ def main() -> None:
                 f"seed={args.oea_zo_calib_seed}; drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
             )
+        elif method == "ea-si-chan-multi-safe-csp-lda":
+            alignment = "ea_si_chan_multi_safe"
+            ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
+            lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
+            method_details[method] = (
+                "EA-SI-CHAN-MULTI-SAFE: multi-candidate selection among EA anchor (A=I) and multiple "
+                "channel projectors A=QQᵀ learned with different (rank,λ), using a fold-local calibrated selector "
+                f"(selector={args.oea_zo_selector}); fallback to EA when selection is not confident/positive. "
+                f"(ranks={ranks_str}, lambdas={lambdas_str}, si_ridge={args.si_ridge}; "
+                f"ridge_alpha={args.oea_zo_calib_ridge_alpha}; "
+                f"guard_C={args.oea_zo_calib_guard_c}, guard_thr={args.oea_zo_calib_guard_threshold}, "
+                f"guard_margin={args.oea_zo_calib_guard_margin}, max_subjects={args.oea_zo_calib_max_subjects}, "
+                f"seed={args.oea_zo_calib_seed}; drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+            )
         elif method in {
             "ea-si-zo-csp-lda",
             "ea-si-zo-ent-csp-lda",
@@ -774,7 +836,7 @@ def main() -> None:
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
                 "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
-                "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, "
+                "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, ea-si-chan-multi-safe-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
@@ -845,6 +907,8 @@ def main() -> None:
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),
+                si_chan_candidate_ranks=si_chan_candidate_ranks,
+                si_chan_candidate_lambdas=si_chan_candidate_lambdas,
                 diagnostics_dir=out_dir if diagnose_subjects else None,
                 diagnostics_subjects=diagnose_subjects,
                 diagnostics_tag=method,
@@ -907,12 +971,44 @@ def main() -> None:
             else:
                 row["guard_improve_pearson"] = float("nan")
                 row["guard_improve_spearman"] = float("nan")
+        if "chan_multi_guard_pos" in df.columns and "chan_multi_improve" in df.columns:
+            p = df["chan_multi_guard_pos"].astype(float).to_numpy()
+            imp = df["chan_multi_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["guard_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["guard_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["guard_improve_pearson"] = float("nan")
+                row["guard_improve_spearman"] = float("nan")
+        if "chan_multi_ridge_pred_improve" in df.columns and "chan_multi_improve" in df.columns:
+            p = df["chan_multi_ridge_pred_improve"].astype(float).to_numpy()
+            imp = df["chan_multi_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["cert_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["cert_improve_pearson"] = float("nan")
+                row["cert_improve_spearman"] = float("nan")
         if "chan_safe_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["chan_safe_accept"].astype(float)))
+        if "chan_multi_accept" in df.columns:
+            row["accept_rate"] = float(np.mean(df["chan_multi_accept"].astype(float)))
         if "chan_safe_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_safe_guard_train_auc"].astype(float)))
+        if "chan_multi_guard_train_auc" in df.columns:
+            row["guard_train_auc_mean"] = float(np.nanmean(df["chan_multi_guard_train_auc"].astype(float)))
         if "chan_safe_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(np.nanmean(df["chan_safe_guard_train_spearman"].astype(float)))
+        if "chan_multi_guard_train_spearman" in df.columns:
+            row["guard_train_spearman_mean"] = float(
+                np.nanmean(df["chan_multi_guard_train_spearman"].astype(float))
+            )
         if base_acc is not None and method != base_method:
             m_acc = df.set_index("subject")["accuracy"].astype(float)
             common = m_acc.index.intersection(base_acc.index)
@@ -970,9 +1066,10 @@ def main() -> None:
                 y_parts.append(sd.y)
             X_fit = np.concatenate(X_parts, axis=0)
             y_fit = np.concatenate(y_parts, axis=0)
-        elif method == "ea-si-chan-csp-lda":
-            # Visualization-only: learn the channel projector on EA-whitened full data (using true labels),
+        elif method in {"ea-si-chan-csp-lda", "ea-si-chan-safe-csp-lda", "ea-si-chan-multi-safe-csp-lda"}:
+            # Visualization-only: learn a single channel projector on EA-whitened full data (using true labels),
             # then fit CSP+LDA on the projected signals.
+            # Note: SAFE variants perform per-fold selection; this is only a representative visualization.
             from csp_lda.subject_invariant import ChannelProjectorParams, learn_subject_invariant_channel_projector
 
             class_labels = tuple([str(c) for c in class_order])
