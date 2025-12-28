@@ -150,6 +150,16 @@ def candidate_features_from_record(
         "qbar_entropy",
     ]
 
+    # Candidate meta info (optional; useful when mixing candidate families in a single selector).
+    cand_family = str(rec.get("cand_family", "")).strip().lower()
+    for fam in ("ea", "rpa", "tsa", "chan"):
+        feats.append(1.0 if cand_family == fam else 0.0)
+        names.append(f"cand_family_{fam}")
+    feats.append(_safe_float(rec.get("cand_rank", 0.0)))
+    names.append("cand_rank")
+    feats.append(_safe_float(rec.get("cand_lambda", 0.0)))
+    names.append("cand_lambda")
+
     if include_pbar:
         feats.extend([_safe_float(x) for x in p_bar.tolist()])
         names.extend([f"pbar_{k}" for k in range(n_classes)])
