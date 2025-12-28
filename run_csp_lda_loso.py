@@ -66,7 +66,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="csp-lda,ea-csp-lda",
         help=(
-            "Comma-separated methods to run: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
+            "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+            "ea-stack-multi-safe-csp-lda, "
+            "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
             "oea-zo-imr-csp-lda, "
             "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
@@ -596,6 +598,35 @@ def main() -> None:
         elif method == "ea-csp-lda":
             alignment = "ea"
             method_details[method] = f"EA: per-subject whitening (eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+        elif method == "rpa-csp-lda":
+            alignment = "rpa"
+            method_details[method] = (
+                "RPA (LEA whitening baseline): per-subject log-Euclidean whitening "
+                f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "tsa-csp-lda":
+            alignment = "tsa"
+            method_details[method] = (
+                "TSA (closed-form target rotation on top of LEA whitening): "
+                f"pseudo_mode={args.oea_pseudo_mode}, pseudo_iters={args.oea_pseudo_iters}, q_blend={args.oea_q_blend}, "
+                f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)} "
+                f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "ea-stack-multi-safe-csp-lda":
+            alignment = "ea_stack_multi_safe"
+            ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
+            lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
+            method_details[method] = (
+                "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
+                "Candidates include EA(anchor), RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
+                f"(ranks={ranks_str}, lambdas={lambdas_str}, si_ridge={args.si_ridge}); "
+                f"selector={args.oea_zo_selector} "
+                f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "
+                f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
+                f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
+                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+            )
         elif method == "oea-cov-csp-lda":
             alignment = "oea_cov"
             method_details[method] = (
@@ -983,9 +1014,33 @@ def main() -> None:
             else:
                 row["guard_improve_pearson"] = float("nan")
                 row["guard_improve_spearman"] = float("nan")
+        if "stack_multi_guard_pos" in df.columns and "stack_multi_improve" in df.columns:
+            p = df["stack_multi_guard_pos"].astype(float).to_numpy()
+            imp = df["stack_multi_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["guard_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["guard_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["guard_improve_pearson"] = float("nan")
+                row["guard_improve_spearman"] = float("nan")
         if "chan_multi_ridge_pred_improve" in df.columns and "chan_multi_improve" in df.columns:
             p = df["chan_multi_ridge_pred_improve"].astype(float).to_numpy()
             imp = df["chan_multi_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["cert_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["cert_improve_pearson"] = float("nan")
+                row["cert_improve_spearman"] = float("nan")
+        if "stack_multi_ridge_pred_improve" in df.columns and "stack_multi_improve" in df.columns:
+            p = df["stack_multi_ridge_pred_improve"].astype(float).to_numpy()
+            imp = df["stack_multi_improve"].astype(float).to_numpy()
             mask = np.isfinite(p) & np.isfinite(imp)
             if int(np.sum(mask)) >= 2:
                 row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
@@ -999,15 +1054,23 @@ def main() -> None:
             row["accept_rate"] = float(np.mean(df["chan_safe_accept"].astype(float)))
         if "chan_multi_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["chan_multi_accept"].astype(float)))
+        if "stack_multi_accept" in df.columns:
+            row["accept_rate"] = float(np.mean(df["stack_multi_accept"].astype(float)))
         if "chan_safe_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_safe_guard_train_auc"].astype(float)))
         if "chan_multi_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_multi_guard_train_auc"].astype(float)))
+        if "stack_multi_guard_train_auc" in df.columns:
+            row["guard_train_auc_mean"] = float(np.nanmean(df["stack_multi_guard_train_auc"].astype(float)))
         if "chan_safe_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(np.nanmean(df["chan_safe_guard_train_spearman"].astype(float)))
         if "chan_multi_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(
                 np.nanmean(df["chan_multi_guard_train_spearman"].astype(float))
+            )
+        if "stack_multi_guard_train_spearman" in df.columns:
+            row["guard_train_spearman_mean"] = float(
+                np.nanmean(df["stack_multi_guard_train_spearman"].astype(float))
             )
         if base_acc is not None and method != base_method:
             m_acc = df.set_index("subject")["accuracy"].astype(float)

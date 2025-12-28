@@ -27,3 +27,4 @@ File naming convention: `YYYYMMDD_<topic>.md`
 - `20251226_loso_4class_ea_si_chan.md`: EA-SI-CHAN (channel projector before CSP) LOSO 4-class notes.
 - `20251227_loso_4class_ea_si_chan_safe.md`: EA-SI-CHAN wrapped by binary calibrated guard + fallback (LOSO 4-class).
 - `20251227_loso_4class_ea_si_chan_multi_safe.md`: EA-SI-CHAN multi-candidate calibrated selection + fallback (LOSO 4-class).
+- `20251228_loso_4class_ea_stack_multi_safe.md`: Stacked multi-family candidates (EA/RPA/TSA/EA-SI-CHAN) under calibrated ridge+guard + fallback (LOSO 4-class).
