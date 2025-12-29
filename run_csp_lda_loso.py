@@ -183,12 +183,28 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-transform",
-        choices=["orthogonal", "rot_scale"],
+        choices=["orthogonal", "rot_scale", "local_mix"],
         default="orthogonal",
         help=(
             "For oea-zo-* methods: channel-space transform family. "
             "'orthogonal' uses Q∈O(C) (pure rotation); "
-            "'rot_scale' uses A=diag(exp(s))·Q (rotation + per-channel scaling)."
+            "'rot_scale' uses A=diag(exp(s))·Q (rotation + per-channel scaling); "
+            "'local_mix' uses a row-stochastic local mixing A (each channel mixes only itself + neighbors)."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-localmix-neighbors",
+        type=int,
+        default=4,
+        help="For oea-zo-* methods with transform=local_mix: k nearest neighbors per channel (k>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-localmix-self-bias",
+        type=float,
+        default=3.0,
+        help=(
+            "For oea-zo-* methods with transform=local_mix: non-negative logit bias for the self-weight "
+            "(larger keeps A closer to identity)."
         ),
     )
     p.add_argument(
@@ -906,6 +922,7 @@ def main() -> None:
             loso_cross_subject_evaluation(
                 subject_data,
                 class_order=class_order,
+                channel_names=list(info["ch_names"]),
                 n_components=config.model.csp_n_components,
                 average=config.metrics_average,
                 alignment=alignment,
@@ -919,6 +936,8 @@ def main() -> None:
                 oea_pseudo_balance=bool(args.oea_pseudo_balance),
                 oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
                 oea_zo_transform=str(args.oea_zo_transform),
+                oea_zo_localmix_neighbors=int(args.oea_zo_localmix_neighbors),
+                oea_zo_localmix_self_bias=float(args.oea_zo_localmix_self_bias),
                 oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
                 oea_zo_marginal_mode=str(args.oea_zo_marginal_mode),
                 oea_zo_marginal_beta=float(args.oea_zo_marginal_beta),

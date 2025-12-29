@@ -15,6 +15,7 @@ from .alignment import (
     sorted_eigh,
 )
 from .model import TrainedModel
+from .localmix import knn_channel_neighbors_from_names
 from .proba import reorder_proba_columns as _reorder_proba_columns
 
 def _write_zo_diagnostics(
@@ -504,6 +505,7 @@ def _optimize_qt_oea_zo(
     class_order: Sequence[str],
     d_ref: np.ndarray,
     lda_evidence: dict | None,
+    channel_names: Sequence[str] | None = None,
     eps: float,
     shrinkage: float,
     pseudo_mode: str,
@@ -512,6 +514,8 @@ def _optimize_qt_oea_zo(
     q_blend: float,
     objective: str,
     transform: str = "orthogonal",
+    localmix_neighbors: int = 4,
+    localmix_self_bias: float = 3.0,
     infomax_lambda: float,
     reliable_metric: str,
     reliable_threshold: float,
@@ -607,8 +611,8 @@ def _optimize_qt_oea_zo(
         raise ValueError("bilevel_coverage_power must be >= 0.")
 
     transform = str(transform)
-    if transform not in {"orthogonal", "rot_scale"}:
-        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale'")
+    if transform not in {"orthogonal", "rot_scale", "local_mix"}:
+        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale', 'local_mix'")
 
     # Optional KL(π || p̄) prior (π fixed during optimization).
     marginal_prior_vec: np.ndarray | None = None
@@ -640,14 +644,6 @@ def _optimize_qt_oea_zo(
         z_opt = z_t
         z_best = z_t
 
-    # Random set of (i,j) planes; fixed per fold for reproducibility.
-    pairs = _sample_givens_pairs(n_channels=n_channels, n_rotations=int(n_rotations), rng=rng)
-    rot_dim = int(len(pairs))
-    scale_dim = int(n_channels) if transform == "rot_scale" else 0
-    theta = np.zeros(rot_dim + scale_dim, dtype=np.float64)
-    best_theta = theta.copy()
-    best_obj = float("inf")
-
     csp = model.csp
     lda = model.pipeline.named_steps["lda"]
     projector = model.pipeline.named_steps.get("proj", None)
@@ -656,7 +652,87 @@ def _optimize_qt_oea_zo(
     # Determine whether CSP uses log(power).
     use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
 
+    pairs: List[tuple[int, int]] = []
+    rot_dim = 0
     max_abs_log_scale = 2.0  # exp(±2) ~= [0.135, 7.39]
+
+    if transform == "local_mix":
+        if warm_start != "none":
+            raise ValueError("warm_start must be 'none' when transform='local_mix'.")
+        if trust_q0 != "identity":
+            raise ValueError("trust_q0 must be 'identity' when transform='local_mix'.")
+        if float(localmix_self_bias) < 0.0:
+            raise ValueError("localmix_self_bias must be >= 0.")
+
+        k = int(localmix_neighbors)
+        if k < 0:
+            raise ValueError("localmix_neighbors must be >= 0.")
+        k = min(k, int(n_channels) - 1)
+
+        if channel_names is not None and len(list(channel_names)) == int(n_channels):
+            neighbors = knn_channel_neighbors_from_names(list(channel_names), k=int(k))
+        else:
+            neighbors = [[j for j in range(int(n_channels)) if j != int(i)][: int(k)] for i in range(int(n_channels))]
+
+        allowed: list[list[int]] = []
+        for i in range(int(n_channels)):
+            idx = [int(i)] + [int(j) for j in neighbors[int(i)] if int(j) != int(i)]
+            seen: set[int] = set()
+            uniq: list[int] = []
+            for j in idx:
+                if int(j) in seen:
+                    continue
+                seen.add(int(j))
+                uniq.append(int(j))
+            allowed.append(uniq)
+
+        dims = np.asarray([len(a) for a in allowed], dtype=int)
+        if np.any(dims < 1):
+            raise RuntimeError("Invalid local_mix neighborhood: empty support.")
+        offsets = np.concatenate(([0], np.cumsum(dims))).astype(int)
+
+        theta = np.zeros(int(offsets[-1]), dtype=np.float64)
+        best_theta = theta.copy()
+        best_obj = float("inf")
+
+        base_logits = []
+        for a in allowed:
+            b = np.full(len(a), -float(localmix_self_bias), dtype=np.float64)
+            b[0] = float(localmix_self_bias)
+            base_logits.append(b)
+
+        def _softmax(v: np.ndarray) -> np.ndarray:
+            v = np.asarray(v, dtype=np.float64)
+            v = v - float(np.max(v))
+            v = np.clip(v, -50.0, 50.0)
+            e = np.exp(v)
+            return e / float(np.sum(e))
+
+        def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
+            theta_vec = np.asarray(theta_vec, dtype=np.float64)
+            if theta_vec.shape[0] != int(theta.shape[0]):
+                raise ValueError("theta_vec length mismatch for local_mix.")
+
+            A = np.zeros((int(n_channels), int(n_channels)), dtype=np.float64)
+            for i in range(int(n_channels)):
+                start = int(offsets[int(i)])
+                end = int(offsets[int(i) + 1])
+                logits = base_logits[int(i)] + theta_vec[start:end]
+                w = _softmax(logits)
+                A[int(i), np.asarray(allowed[int(i)], dtype=int)] = w
+
+            if float(q_blend) < 1.0:
+                A = (1.0 - float(q_blend)) * np.eye(int(n_channels), dtype=np.float64) + float(q_blend) * A
+            return A
+
+    else:
+        # Random set of (i,j) planes; fixed per fold for reproducibility.
+        pairs = _sample_givens_pairs(n_channels=n_channels, n_rotations=int(n_rotations), rng=rng)
+        rot_dim = int(len(pairs))
+        scale_dim = int(n_channels) if transform == "rot_scale" else 0
+        theta = np.zeros(rot_dim + scale_dim, dtype=np.float64)
+        best_theta = theta.copy()
+        best_obj = float("inf")
 
     def _maybe_project(feats: np.ndarray) -> np.ndarray:
         """Apply an optional feature-space projector between CSP and LDA.
@@ -668,17 +744,18 @@ def _optimize_qt_oea_zo(
             return feats
         return np.asarray(projector.transform(feats), dtype=np.float64)
 
-    def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
-        theta_vec = np.asarray(theta_vec, dtype=np.float64)
-        phi_vec = theta_vec[:rot_dim]
-        Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi_vec)
-        if float(q_blend) < 1.0:
-            Q = blend_with_identity(Q, float(q_blend))
-        if transform == "rot_scale":
-            log_s = np.clip(theta_vec[rot_dim:], -max_abs_log_scale, max_abs_log_scale)
-            scales = np.exp(log_s).reshape(-1, 1)
-            return scales * Q
-        return Q
+    if transform != "local_mix":
+        def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
+            theta_vec = np.asarray(theta_vec, dtype=np.float64)
+            phi_vec = theta_vec[:rot_dim]
+            Q = _build_q_from_givens(n_channels=n_channels, pairs=pairs, angles=phi_vec)
+            if float(q_blend) < 1.0:
+                Q = blend_with_identity(Q, float(q_blend))
+            if transform == "rot_scale":
+                log_s = np.clip(theta_vec[rot_dim:], -max_abs_log_scale, max_abs_log_scale)
+                scales = np.exp(log_s).reshape(-1, 1)
+                return scales * Q
+            return Q
 
     def _proba_from_theta(theta_vec: np.ndarray, z_data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         A = _build_transform(theta_vec)
