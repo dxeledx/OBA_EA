@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import sys
 import warnings
 
 import numpy as np
@@ -77,6 +78,7 @@ def parse_args() -> argparse.Namespace:
             "ea-si-chan-csp-lda, "
             "ea-si-chan-safe-csp-lda, "
             "ea-si-chan-multi-safe-csp-lda, "
+            "raw-zo-csp-lda, raw-zo-ent-csp-lda, raw-zo-im-csp-lda, raw-zo-imr-csp-lda, raw-zo-pce-csp-lda, raw-zo-conf-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
         ),
@@ -895,6 +897,66 @@ def main() -> None:
                 f"min_improve={args.oea_zo_min_improvement}; "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
             )
+        elif method in {
+            "raw-zo-ent-csp-lda",
+            "raw-zo-im-csp-lda",
+            "raw-zo-imr-csp-lda",
+            "raw-zo-pce-csp-lda",
+            "raw-zo-conf-csp-lda",
+            "raw-zo-csp-lda",
+        }:
+            alignment = "raw_zo"
+            if method == "raw-zo-ent-csp-lda":
+                zo_objective_override = "entropy"
+            elif method == "raw-zo-im-csp-lda":
+                zo_objective_override = "infomax"
+            elif method == "raw-zo-imr-csp-lda":
+                zo_objective_override = "infomax_bilevel"
+            elif method == "raw-zo-pce-csp-lda":
+                zo_objective_override = "pseudo_ce"
+            elif method == "raw-zo-conf-csp-lda":
+                zo_objective_override = "confidence"
+
+            zo_obj = zo_objective_override or str(args.oea_zo_objective)
+            marginal_prior_str = ""
+            if str(args.oea_zo_marginal_mode) == "kl_prior":
+                marginal_prior_str = (
+                    f", prior={args.oea_zo_marginal_prior}, mix={args.oea_zo_marginal_prior_mix}"
+                )
+            drift_str = ""
+            if str(args.oea_zo_drift_mode) != "none":
+                drift_str = (
+                    f"; drift={args.oea_zo_drift_mode} "
+                    f"(gamma={args.oea_zo_drift_gamma}, delta={args.oea_zo_drift_delta})"
+                )
+            selector_str = f"; selector={args.oea_zo_selector}"
+            if str(args.oea_zo_selector) == "calibrated_ridge":
+                selector_str += (
+                    f"(alpha={args.oea_zo_calib_ridge_alpha}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
+            elif str(args.oea_zo_selector) == "calibrated_guard":
+                selector_str += (
+                    f"(C={args.oea_zo_calib_guard_c}, "
+                    f"thr={args.oea_zo_calib_guard_threshold}, margin={args.oea_zo_calib_guard_margin}, "
+                    f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed})"
+                )
+            method_details[method] = (
+                "RAW-ZO: source trains on raw (preprocessed) signals (no EA whitening); "
+                "target optimizes a channel-space transform by zero-order SPSA on unlabeled data "
+                f"(objective={zo_obj}, transform={args.oea_zo_transform}, iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, "
+                f"k={args.oea_zo_k}, seed={args.oea_zo_seed}, l2={args.oea_zo_l2}, q_blend={args.oea_q_blend}; "
+                f"infomax_lambda={args.oea_zo_infomax_lambda}; "
+                f"marginal={args.oea_zo_marginal_mode}*{args.oea_zo_marginal_beta} (tau={args.oea_zo_marginal_tau}{marginal_prior_str}); "
+                f"{drift_str}{selector_str} "
+                f"holdout={args.oea_zo_holdout_fraction}; "
+                f"warm_start={args.oea_zo_warm_start}x{args.oea_zo_warm_iters}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}; "
+                f"reliable={args.oea_zo_reliable_metric}@{args.oea_zo_reliable_threshold} (alpha={args.oea_zo_reliable_alpha}); "
+                f"trust=||Q-Q0||^2*{args.oea_zo_trust_lambda} (Q0={args.oea_zo_trust_q0}); "
+                f"min_improve={args.oea_zo_min_improvement}; "
+                f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)})."
+            )
         else:
             raise ValueError(
                 "Unknown method "
@@ -906,6 +968,7 @@ def main() -> None:
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
                 "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
                 "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, ea-si-chan-multi-safe-csp-lda, "
+                "raw-zo-csp-lda, raw-zo-ent-csp-lda, raw-zo-im-csp-lda, raw-zo-imr-csp-lda, raw-zo-pce-csp-lda, raw-zo-conf-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
@@ -1007,6 +1070,7 @@ def main() -> None:
         overall_metrics_by_method=overall_by_method,
         method_details_by_method=method_details,
         protocol_name="LOSO",
+        command_line=" ".join(sys.argv),
     )
 
     # Small, reproducible method-comparison table (mean / worst-subject / negative-transfer vs EA).

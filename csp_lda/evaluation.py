@@ -343,6 +343,7 @@ def loso_cross_subject_evaluation(
         "rpa_rot_mdm",
         "ea_si_zo",
         "ea_zo",
+        "raw_zo",
         "rpa_zo",
         "tsa",
         "tsa_zo",
@@ -354,7 +355,7 @@ def loso_cross_subject_evaluation(
             "alignment must be one of: "
             "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_stack_multi_safe', "
             "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', "
-            "'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+            "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
@@ -2198,8 +2199,10 @@ def loso_cross_subject_evaluation(
                     q_t = np.asarray(selected.get("Q"), dtype=np.float64)
 
             X_test = apply_spatial_transform(q_t, z_t)
-        elif alignment == "ea_zo":
-            # Train on EA-whitened source data (no Q_s selection), then adapt only Q_t at test time.
+        elif alignment in {"ea_zo", "raw_zo"}:
+            # Train on the current channel space, then adapt only Q_t at test time.
+            # - ea_zo: the current space is EA-whitened (per-subject).
+            # - raw_zo: the current space is the raw (preprocessed) channel space (no whitening).
             class_labels = tuple([str(c) for c in class_order])
 
             X_train_parts = [subject_data[s].X for s in train_subjects]
@@ -3003,6 +3006,7 @@ def cross_session_within_subject_evaluation(
     train_sessions: Sequence[str],
     test_sessions: Sequence[str],
     class_order: Sequence[str],
+    channel_names: Sequence[str] | None = None,
     n_components: int = 4,
     average: str = "macro",
     alignment: str = "ea",
@@ -3016,6 +3020,8 @@ def cross_session_within_subject_evaluation(
     oea_pseudo_balance: bool = False,
     oea_zo_objective: str = "entropy",
     oea_zo_transform: str = "orthogonal",
+    oea_zo_localmix_neighbors: int = 4,
+    oea_zo_localmix_self_bias: float = 3.0,
     oea_zo_infomax_lambda: float = 1.0,
     oea_zo_reliable_metric: str = "none",
     oea_zo_reliable_threshold: float = 0.0,
@@ -3082,6 +3088,10 @@ def cross_session_within_subject_evaluation(
         )
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
+    if int(oea_zo_localmix_neighbors) < 0:
+        raise ValueError("oea_zo_localmix_neighbors must be >= 0.")
+    if float(oea_zo_localmix_self_bias) < 0.0:
+        raise ValueError("oea_zo_localmix_self_bias must be >= 0.")
 
     subjects = sorted(subject_session_data.keys())
     if not subjects:

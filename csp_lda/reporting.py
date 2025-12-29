@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import importlib.metadata as im
 from pathlib import Path
+import subprocess
 from typing import Sequence
 
 import pandas as pd
@@ -21,6 +22,17 @@ def _pkg_version(name: str) -> str:
     except im.PackageNotFoundError:
         return "not-installed"
 
+def _git_commit() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out
+    except Exception:
+        return ""
+
 
 def write_results_txt(
     results_df: pd.DataFrame,
@@ -30,11 +42,17 @@ def write_results_txt(
     metric_columns: Sequence[str],
     overall_metrics: dict | None = None,
     protocol_name: str = "LOSO",
+    command_line: str | None = None,
 ) -> None:
     summary_df = summarize_results(results_df, metric_columns=metric_columns)
 
     lines = []
     lines.append(f"Date: {today_yyyymmdd()}")
+    commit = _git_commit()
+    if commit:
+        lines.append(f"Git commit: {commit}")
+    if command_line:
+        lines.append(f"Command: {command_line}")
     lines.append("")
     lines.append("=== Experiment Config ===")
     lines.append(f"Dataset: MOABB BNCI2014_001 (BCI Competition IV 2a)")
@@ -77,9 +95,15 @@ def write_results_txt_multi(
     overall_metrics_by_method: dict[str, dict[str, float]] | None = None,
     method_details_by_method: dict[str, str] | None = None,
     protocol_name: str = "LOSO",
+    command_line: str | None = None,
 ) -> None:
     lines = []
     lines.append(f"Date: {today_yyyymmdd()}")
+    commit = _git_commit()
+    if commit:
+        lines.append(f"Git commit: {commit}")
+    if command_line:
+        lines.append(f"Command: {command_line}")
     lines.append("")
     lines.append("=== Experiment Config ===")
     lines.append("Dataset: MOABB BNCI2014_001 (BCI Competition IV 2a)")

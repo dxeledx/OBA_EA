@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import sys
 import warnings
 
 import numpy as np
@@ -426,6 +427,7 @@ def main() -> None:
         overall_metrics_by_method=overall_by_method,
         method_details_by_method=method_details,
         protocol_name=f"CrossSession ({','.join(train_sessions)}→{','.join(test_sessions)})",
+        command_line=" ".join(sys.argv),
     )
 
     all_pred_parts: list[pd.DataFrame] = []

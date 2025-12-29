@@ -87,6 +87,32 @@ Key numbers:
 - Worst-subject: `0.2604`
 - Negative transfer rate vs EA: `0.0`
 
+### D) Removing EA whitening (RAW-ZO) — fails badly
+Purpose: test the physiology-motivated idea “local electrode remapping should replace EA whitening”.
+
+Same transform/objective as (C), but train the classifier on **raw** signals (no EA whitening), and adapt the target with LocalMix:
+```bash
+conda run -n eeg python run_csp_lda_loso.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue --sessions 0train \
+  --methods ea-csp-lda,raw-zo-imr-csp-lda \
+  --oea-zo-transform local_mix \
+  --oea-zo-localmix-neighbors 8 --oea-zo-localmix-self-bias 3.0 \
+  --oea-zo-iters 15 --oea-zo-lr 0.2 --oea-zo-mu 0.05 --oea-zo-l2 0.001 \
+  --oea-zo-reliable-metric confidence --oea-zo-reliable-threshold 0.7 --oea-zo-reliable-alpha 10 \
+  --oea-zo-marginal-mode kl_prior --oea-zo-marginal-beta 0 --oea-zo-marginal-prior anchor_pred \
+  --oea-zo-selector calibrated_guard --oea-zo-calib-guard-threshold 0.5 --oea-zo-calib-max-subjects 3 \
+  --no-plots \
+  --run-name loso4_rawzo_localmix_imr_calguard_k8_cal3_i15
+```
+Outputs:
+- `outputs/20251229/4class/loso4_rawzo_localmix_imr_calguard_k8_cal3_i15/20251229_method_comparison.csv`
+
+Observed:
+- `raw-zo-imr-csp-lda` mean acc: `0.4101` (**-12.19% abs vs EA**), negative transfer rate: `1.0`
+
+Interpretation: on this dataset/protocol, EA whitening is not just a “coordinate change”, but a crucial per-subject normalization/preconditioning step. A local remapping alone (even if physiologically motivated) does **not** replace it.
+
 ## Reference comparison (best existing method in this repo)
 - `EA-SI-CHAN-MULTI-SAFE` (rank=21, λ={0.5,1,2}, selector=calibrated_ridge_guard) achieves mean acc `0.5463` (+1.43% abs vs EA) on the same setup; see:
   - `docs/experiments/20251227_loso_4class_ea_si_chan_multi_safe.md`
@@ -95,4 +121,3 @@ Key numbers:
 - The **local-mixing family** has measurable oracle headroom on 4-class LOSO without needing electrode coordinates.
 - **Unlabeled objective selection can be unreliable** when the transform family becomes more expressive (k larger).
 - A **calibrated guard + fallback** recovers a stable gain (**+0.39% abs, 0 negative transfer**) but still trails the current strongest baseline (`EA-SI-CHAN-MULTI-SAFE`).
-

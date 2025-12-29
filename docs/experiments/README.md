@@ -7,6 +7,17 @@ This folder contains **date-stamped experiment notes** that document:
 
 File naming convention: `YYYYMMDD_<topic>.md`
 
+## Results registry
+
+`results_registry.csv` is a **registered table** of past runs, built by scanning `outputs/**/**/**/**_method_comparison.csv`
+and (when available) reading metadata from each `*_results.txt`.
+
+To refresh it (without rerunning experiments):
+
+```bash
+python3 scripts/update_results_registry.py --outputs-dir outputs --out docs/experiments/results_registry.csv
+```
+
 ## Index
 
 - `20251222_oea_zo_ablation_summary.md`: 2-class OEA/OEA-ZO ablation notes (q_blend, objectives).
