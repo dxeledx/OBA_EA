@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
         default="csp-lda,ea-csp-lda",
         help=(
             "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+            "riemann-mdm, rpa-mdm, rpa-rot-mdm, "
             "ea-stack-multi-safe-csp-lda, "
             "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
@@ -612,6 +613,25 @@ def main() -> None:
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)} "
                 f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
             )
+        elif method == "riemann-mdm":
+            alignment = "riemann_mdm"
+            method_details[method] = (
+                "pyRiemann baseline: MDM(metric='riemann') on per-trial SPD covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "rpa-mdm":
+            alignment = "rpa_mdm"
+            method_details[method] = (
+                "pyRiemann transfer baseline: TLCenter+TLStretch then MDM(metric='riemann') on covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "rpa-rot-mdm":
+            alignment = "rpa_rot_mdm"
+            method_details[method] = (
+                "pyRiemann transfer baseline: TLCenter+TLStretch+TLRotate (pseudo-labels) then "
+                "MDM(metric='riemann') "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
         elif method == "ea-stack-multi-safe-csp-lda":
             alignment = "ea_stack_multi_safe"
             ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
@@ -863,6 +883,8 @@ def main() -> None:
             raise ValueError(
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
+                "rpa-csp-lda, tsa-csp-lda, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
+                "ea-stack-multi-safe-csp-lda, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
@@ -1116,6 +1138,18 @@ def main() -> None:
     )
 
     for method in results_by_method.keys():
+        if method.endswith("-mdm"):
+            # MDM-based methods do not use CSP; only plot confusion matrix.
+            y_true_all, y_pred_all = predictions_by_method[method]
+            plot_confusion_matrix(
+                y_true_all,
+                y_pred_all,
+                labels=class_order,
+                output_path=out_dir / f"{date_prefix}_{method}_confusion_matrix.png",
+                title=f"{method} confusion matrix (LOSO, all subjects)",
+            )
+            continue
+
         if method == "ea-csp-lda" or method.startswith("ea-zo"):
             # Align each subject independently, then concatenate for a representative visualization.
             X_parts = []

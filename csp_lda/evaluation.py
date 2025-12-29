@@ -51,6 +51,7 @@ from .zo import (
     _soft_class_cov_diff,
     _write_zo_diagnostics,
 )
+from .riemann import covariances_from_epochs
 
 
 def _compute_tsa_target_rotation(
@@ -334,6 +335,9 @@ def loso_cross_subject_evaluation(
         "ea_si_chan_safe",
         "ea_si_chan_multi_safe",
         "ea_stack_multi_safe",
+        "riemann_mdm",
+        "rpa_mdm",
+        "rpa_rot_mdm",
         "ea_si_zo",
         "ea_zo",
         "rpa_zo",
@@ -345,7 +349,9 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_stack_multi_safe', 'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
+            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_stack_multi_safe', "
+            "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', "
+            "'ea_si_zo', 'ea_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
@@ -671,6 +677,71 @@ def loso_cross_subject_evaluation(
             y_train_parts = [subject_data[s].y for s in train_subjects]
             X_train = np.concatenate(X_train_parts, axis=0)
             y_train = np.concatenate(y_train_parts, axis=0)
+        elif alignment in {"riemann_mdm", "rpa_mdm", "rpa_rot_mdm"}:
+            # pyRiemann baselines on SPD covariances (Riemannian TL / Procrustes family).
+            #
+            # Note: this branch operates on covariance matrices directly (not on time series),
+            # so `X_test` is replaced by (n_trials,C,C) SPD matrices.
+            from pyriemann.classification import MDM
+            from pyriemann.transfer import TLCenter, TLRotate, TLStretch, encode_domains
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = []
+            y_train_parts = []
+            dom_train_parts = []
+            for s in train_subjects:
+                sd = subject_data[int(s)]
+                X_train_parts.append(sd.X)
+                y_train_parts.append(sd.y)
+                dom_train_parts.append(np.full(sd.y.shape[0], f"src_{int(s)}", dtype=object))
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+            dom_train = np.concatenate(dom_train_parts, axis=0)
+
+            dom_test = np.full(y_test.shape[0], "target", dtype=object)
+
+            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+
+            if alignment == "riemann_mdm":
+                model = MDM(metric="riemann")
+                model.fit(cov_train, y_train)
+                X_test = cov_test
+            else:
+                # Center + stretch (RPA without rotation) using both source and target (unlabeled) covariances.
+                y_dummy = np.full(y_test.shape[0], str(class_order[0]), dtype=object)
+                cov_all = np.concatenate([cov_train, cov_test], axis=0)
+                y_all = np.concatenate([y_train, y_dummy], axis=0)
+                dom_all = np.concatenate([dom_train, dom_test], axis=0)
+                _, y_enc = encode_domains(cov_all, y_all, dom_all)
+
+                center = TLCenter(target_domain="target", metric="riemann")
+                cov_centered = center.fit_transform(cov_all, y_enc)
+
+                stretch = TLStretch(target_domain="target", centered_data=True, metric="riemann")
+                cov_stretched = stretch.fit_transform(cov_centered, y_enc)
+
+                cov_src = cov_stretched[: cov_train.shape[0]]
+                cov_tgt = cov_stretched[cov_train.shape[0] :]
+
+                if alignment == "rpa_rot_mdm":
+                    # One-step pseudo-label rotation (RPA full): predict pseudo labels on target then rotate sources.
+                    base = MDM(metric="riemann")
+                    base.fit(cov_src, y_train)
+                    y_pseudo = np.asarray(base.predict(cov_tgt))
+                    y_all2 = np.concatenate([y_train, y_pseudo], axis=0)
+                    _, y_enc2 = encode_domains(cov_stretched, y_all2, dom_all)
+
+                    rotate = TLRotate(target_domain="target", metric="euclid", n_jobs=1)
+                    cov_rot = rotate.fit_transform(cov_stretched, y_enc2)
+                    cov_src = cov_rot[: cov_train.shape[0]]
+                    cov_tgt = cov_rot[cov_train.shape[0] :]
+
+                model = MDM(metric="riemann")
+                model.fit(cov_src, y_train)
+                X_test = cov_tgt
         elif alignment == "tsa":
             # Tangent-space alignment (TSA) using pseudo-label anchors in the LEA/RPA-whitened space.
             X_test = subject_data[test_subject].X
