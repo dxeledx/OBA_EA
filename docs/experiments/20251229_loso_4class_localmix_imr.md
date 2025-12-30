@@ -132,7 +132,7 @@ conda run -n eeg python run_csp_lda_loso.py \
 ```
 
 Outputs:
-- `outputs/20251230/4class/loso4_eazo_localmix_then_ea_imr_calguard_k8_cal3_i15/20251230_method_comparison.csv`
+- `outputs/20251230/4class/loso4_eazo_localmix_then_ea_imr_calguard_k8_cal3_i15_01/20251230_method_comparison.csv`
 
 Observed:
 - Mean acc is **exactly** the EA baseline (`0.5320`, Δ=0.0), and neg-transfer rate `0.0`.
