@@ -113,6 +113,32 @@ Observed:
 
 Interpretation: on this dataset/protocol, EA whitening is not just a “coordinate change”, but a crucial per-subject normalization/preconditioning step. A local remapping alone (even if physiologically motivated) does **not** replace it.
 
+### E) Moving EA whitening after LocalMix (LocalMix→EA) — no gain (falls back to EA)
+Purpose: test whether “electrode remapping” (LocalMix) can be treated as a *pre*-whitening physical correction, with EA applied afterwards.
+
+```bash
+conda run -n eeg python run_csp_lda_loso.py \
+  --preprocess paper_fir --n-components 6 \
+  --events left_hand,right_hand,feet,tongue --sessions 0train \
+  --methods ea-csp-lda,ea-zo-imr-csp-lda \
+  --oea-zo-transform local_mix_then_ea \
+  --oea-zo-localmix-neighbors 8 --oea-zo-localmix-self-bias 3.0 \
+  --oea-zo-iters 15 --oea-zo-lr 0.2 --oea-zo-mu 0.05 --oea-zo-l2 0.001 \
+  --oea-zo-reliable-metric confidence --oea-zo-reliable-threshold 0.7 --oea-zo-reliable-alpha 10 \
+  --oea-zo-marginal-mode kl_prior --oea-zo-marginal-beta 0 --oea-zo-marginal-prior anchor_pred \
+  --oea-zo-selector calibrated_guard --oea-zo-calib-guard-threshold 0.5 --oea-zo-calib-max-subjects 3 \
+  --no-plots \
+  --run-name loso4_eazo_localmix_then_ea_imr_calguard_k8_cal3_i15
+```
+
+Outputs:
+- `outputs/20251230/4class/loso4_eazo_localmix_then_ea_imr_calguard_k8_cal3_i15/20251230_method_comparison.csv`
+
+Observed:
+- Mean acc is **exactly** the EA baseline (`0.5320`, Δ=0.0), and neg-transfer rate `0.0`.
+
+Interpretation: in this setting, LocalMix→EA does not provide a selectable improvement over EA (the safe selector effectively keeps the EA anchor).
+
 ## Reference comparison (best existing method in this repo)
 - `EA-SI-CHAN-MULTI-SAFE` (rank=21, λ={0.5,1,2}, selector=calibrated_ridge_guard) achieves mean acc `0.5463` (+1.43% abs vs EA) on the same setup; see:
   - `docs/experiments/20251227_loso_4class_ea_si_chan_multi_safe.md`

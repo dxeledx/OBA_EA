@@ -317,6 +317,7 @@ def loso_cross_subject_evaluation(
         Trained model for each test subject (useful for inspection/plotting).
     """
 
+    subject_data_raw = subject_data
     subject_data_rpa: Dict[int, SubjectData] | None = None
 
     subjects = sorted(subject_data.keys())
@@ -2204,6 +2205,9 @@ def loso_cross_subject_evaluation(
             # - ea_zo: the current space is EA-whitened (per-subject).
             # - raw_zo: the current space is the raw (preprocessed) channel space (no whitening).
             class_labels = tuple([str(c) for c in class_order])
+            use_post_ea = str(oea_zo_transform) == "local_mix_then_ea"
+            if use_post_ea and alignment != "ea_zo":
+                raise ValueError("oea_zo_transform='local_mix_then_ea' is only supported with alignment='ea_zo'.")
 
             X_train_parts = [subject_data[s].X for s in train_subjects]
             y_train_parts = [subject_data[s].y for s in train_subjects]
@@ -2260,7 +2264,9 @@ def loso_cross_subject_evaluation(
                         )
                     d_ref_inner = np.mean(np.stack(diffs_inner, axis=0), axis=0)
 
-                    z_pseudo = subject_data[int(pseudo_t)].X
+                    z_pseudo = (
+                        subject_data_raw[int(pseudo_t)].X if use_post_ea else subject_data[int(pseudo_t)].X
+                    )
                     y_pseudo = subject_data[int(pseudo_t)].y
 
                     marginal_prior_inner: np.ndarray | None = None
@@ -2273,7 +2279,13 @@ def loso_cross_subject_evaluation(
                             counts = np.array([(y_inner == c).sum() for c in class_labels], dtype=np.float64)
                             marginal_prior_inner = (counts + 1e-3) / float(np.sum(counts + 1e-3))
                         else:
-                            proba_id = model_inner.predict_proba(z_pseudo)
+                            if use_post_ea:
+                                z_pseudo_ea = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(
+                                    z_pseudo
+                                )
+                                proba_id = model_inner.predict_proba(z_pseudo_ea)
+                            else:
+                                proba_id = model_inner.predict_proba(z_pseudo)
                             proba_id = _reorder_proba_columns(
                                 proba_id, model_inner.classes_, list(class_order)
                             )
@@ -2409,7 +2421,7 @@ def loso_cross_subject_evaluation(
                 )
             d_ref = np.mean(np.stack(diffs_train, axis=0), axis=0)
 
-            z_t = subject_data[int(test_subject)].X
+            z_t = subject_data_raw[int(test_subject)].X if use_post_ea else subject_data[int(test_subject)].X
             z_test_base = z_t
             marginal_prior_vec: np.ndarray | None = None
             if oea_zo_marginal_mode == "kl_prior":
@@ -2420,7 +2432,11 @@ def loso_cross_subject_evaluation(
                     marginal_prior_vec = (counts + 1e-3) / float(np.sum(counts + 1e-3))
                 else:
                     # anchor_pred: use target predicted marginal at Q=I (EA), fixed during optimization.
-                    proba_id = model.predict_proba(z_t)
+                    if use_post_ea:
+                        z_t_ea = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(z_t)
+                        proba_id = model.predict_proba(z_t_ea)
+                    else:
+                        proba_id = model.predict_proba(z_t)
                     proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_order))
                     marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
                     marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
@@ -2740,11 +2756,15 @@ def loso_cross_subject_evaluation(
                     elif oea_zo_marginal_prior == "source":
                         counts = np.array([(y_train == c).sum() for c in class_labels], dtype=np.float64)
                         marginal_prior_vec = (counts + 1e-3) / float(np.sum(counts + 1e-3))
+                else:
+                    if use_post_ea:
+                        z_t_ea = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(z_t)
+                        proba_id = model.predict_proba(z_t_ea)
                     else:
                         proba_id = model.predict_proba(z_t)
-                        proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_order))
-                        marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
-                        marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
+                    proba_id = _reorder_proba_columns(proba_id, model.classes_, list(class_order))
+                    marginal_prior_vec = np.mean(np.clip(proba_id, 1e-12, 1.0), axis=0)
+                    marginal_prior_vec = marginal_prior_vec / float(np.sum(marginal_prior_vec))
                     mix = float(oea_zo_marginal_prior_mix)
                     if mix > 0.0 and marginal_prior_vec is not None:
                         u = np.ones_like(marginal_prior_vec) / float(marginal_prior_vec.shape[0])
@@ -3093,6 +3113,10 @@ def cross_session_within_subject_evaluation(
     if float(oea_zo_localmix_self_bias) < 0.0:
         raise ValueError("oea_zo_localmix_self_bias must be >= 0.")
 
+    use_post_ea = str(oea_zo_transform) == "local_mix_then_ea"
+    if use_post_ea and alignment != "ea_zo":
+        raise ValueError("oea_zo_transform='local_mix_then_ea' is only supported with alignment='ea_zo'.")
+
     subjects = sorted(subject_session_data.keys())
     if not subjects:
         raise ValueError("Empty subject_session_data.")
@@ -3145,7 +3169,7 @@ def cross_session_within_subject_evaluation(
             base_test = base_aligner_cls(eps=oea_eps, shrinkage=oea_shrinkage).fit(X_test_raw)
             z_train = base_train.transform(X_train)
             z_test = base_test.transform(X_test_raw)
-            z_test_base = z_test
+            z_test_base = X_test_raw if use_post_ea else z_test
 
             if alignment in {"ea", "rpa"}:
                 model = fit_csp_lda(z_train, y_train, n_components=n_components)
@@ -3296,7 +3320,7 @@ def cross_session_within_subject_evaluation(
                                 shrinkage=oea_shrinkage,
                             )
 
-                            z_te_p_base = z_te_p
+                            z_te_p_base = X_te_p if use_post_ea else z_te_p
                             if alignment == "tsa_zo":
                                 q_base_p = _compute_tsa_target_rotation(
                                     z_train=z_tr_p,
@@ -3325,7 +3349,7 @@ def cross_session_within_subject_evaluation(
                                     counts = np.array([(y_tr_p == c).sum() for c in class_labels], dtype=np.float64)
                                     marginal_prior_p = (counts + 1e-3) / float(np.sum(counts + 1e-3))
                                 else:
-                                    proba_id = model_p.predict_proba(z_te_p_base)
+                                    proba_id = model_p.predict_proba(z_te_p if use_post_ea else z_te_p_base)
                                     proba_id = _reorder_proba_columns(
                                         proba_id, model_p.classes_, list(class_labels)
                                     )

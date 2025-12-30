@@ -611,8 +611,8 @@ def _optimize_qt_oea_zo(
         raise ValueError("bilevel_coverage_power must be >= 0.")
 
     transform = str(transform)
-    if transform not in {"orthogonal", "rot_scale", "local_mix"}:
-        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale', 'local_mix'")
+    if transform not in {"orthogonal", "rot_scale", "local_mix", "local_mix_then_ea"}:
+        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale', 'local_mix', 'local_mix_then_ea'")
 
     # Optional KL(π || p̄) prior (π fixed during optimization).
     marginal_prior_vec: np.ndarray | None = None
@@ -656,13 +656,38 @@ def _optimize_qt_oea_zo(
     rot_dim = 0
     max_abs_log_scale = 2.0  # exp(±2) ~= [0.135, 7.39]
 
-    if transform == "local_mix":
+    raw_cov: np.ndarray | None = None
+    q_anchor_override: np.ndarray | None = None
+
+    if transform in {"local_mix", "local_mix_then_ea"}:
         if warm_start != "none":
-            raise ValueError("warm_start must be 'none' when transform='local_mix'.")
+            raise ValueError("warm_start must be 'none' when transform is 'local_mix' or 'local_mix_then_ea'.")
         if trust_q0 != "identity":
-            raise ValueError("trust_q0 must be 'identity' when transform='local_mix'.")
+            raise ValueError("trust_q0 must be 'identity' when transform is 'local_mix' or 'local_mix_then_ea'.")
         if float(localmix_self_bias) < 0.0:
             raise ValueError("localmix_self_bias must be >= 0.")
+
+        if transform == "local_mix_then_ea":
+            # Precompute raw covariance for EA-after-A whitening:
+            # cov(A X) = A cov(X) Aᵀ, so per candidate we only need an eigendecomposition.
+            raw_cov = np.zeros((int(n_channels), int(n_channels)), dtype=np.float64)
+            for i in range(int(n_trials)):
+                xi = z_t[i]
+                raw_cov += xi @ xi.T
+            raw_cov /= float(n_trials)
+            raw_cov = 0.5 * (raw_cov + raw_cov.T)
+
+            # Anchor transform: EA whitening in raw space (A=I).
+            cov0 = raw_cov.copy()
+            if float(shrinkage) > 0.0:
+                alpha = float(shrinkage)
+                cov0 = (1.0 - alpha) * cov0 + alpha * (np.trace(cov0) / float(n_channels)) * np.eye(
+                    int(n_channels), dtype=np.float64
+                )
+            evals0, evecs0 = sorted_eigh(cov0)
+            floor0 = float(eps) * float(np.max(evals0)) if float(np.max(evals0)) > 0.0 else float(eps)
+            evals0 = np.maximum(evals0, floor0)
+            q_anchor_override = evecs0 @ np.diag(1.0 / np.sqrt(evals0)) @ evecs0.T
 
         k = int(localmix_neighbors)
         if k < 0:
@@ -723,6 +748,23 @@ def _optimize_qt_oea_zo(
 
             if float(q_blend) < 1.0:
                 A = (1.0 - float(q_blend)) * np.eye(int(n_channels), dtype=np.float64) + float(q_blend) * A
+
+            if transform == "local_mix_then_ea":
+                if raw_cov is None:
+                    raise RuntimeError("raw_cov missing for local_mix_then_ea.")
+                cov_a = A @ raw_cov @ A.T
+                cov_a = 0.5 * (cov_a + cov_a.T)
+                if float(shrinkage) > 0.0:
+                    alpha = float(shrinkage)
+                    cov_a = (1.0 - alpha) * cov_a + alpha * (
+                        np.trace(cov_a) / float(n_channels)
+                    ) * np.eye(int(n_channels), dtype=np.float64)
+                evals, evecs = sorted_eigh(cov_a)
+                floor = float(eps) * float(np.max(evals)) if float(np.max(evals)) > 0.0 else float(eps)
+                evals = np.maximum(evals, floor)
+                whitening = evecs @ np.diag(1.0 / np.sqrt(evals)) @ evecs.T
+                return whitening @ A
+
             return A
 
     else:
@@ -782,8 +824,13 @@ def _optimize_qt_oea_zo(
         return _reorder_proba_columns(proba, lda.classes_, list(class_order)), feats
 
     # Anchor predictions at EA (Q=I). Used for drift guard/certificate.
-    proba_anchor_best, feats_anchor_best = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_best)
-    proba_anchor_full, feats_anchor_full = _proba_from_Q(np.eye(int(n_channels), dtype=np.float64), z_t)
+    q_anchor = (
+        np.asarray(q_anchor_override, dtype=np.float64)
+        if q_anchor_override is not None
+        else np.eye(int(n_channels), dtype=np.float64)
+    )
+    proba_anchor_best, feats_anchor_best = _proba_from_Q(q_anchor, z_best)
+    proba_anchor_full, feats_anchor_full = _proba_from_Q(q_anchor, z_t)
 
     def _kl_drift_vec(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
         """Per-sample KL(p0 || p1)."""
@@ -830,7 +877,7 @@ def _optimize_qt_oea_zo(
             balance=bool(pseudo_balance),
         )
 
-    q0 = np.eye(int(n_channels), dtype=np.float64)
+    q0 = np.asarray(q_anchor, dtype=np.float64)
 
     def _sigmoid(x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
@@ -1693,18 +1740,18 @@ def _optimize_qt_oea_zo(
             if warm_start == "delta":
                 theta[:rot_dim] = phi_init.copy()
 
-    # Candidate set on holdout (Step A): always include identity (EA) and, if available, Q_delta.
+    # Candidate set on holdout (Step A): always include anchor (EA) and, if available, Q_delta.
     best_Q_override: np.ndarray | None = None
     theta_id = np.zeros_like(best_theta)
     proba_id = proba_anchor_best
     obj_id = _objective_from_proba(
         proba=proba_id,
         feats=feats_anchor_best,
-        Q=np.eye(int(n_channels), dtype=np.float64),
+        Q=q_anchor,
         theta_vec=theta_id,
     )
     score_id = _score_with_drift(float(obj_id), 0.0)
-    _record_candidate(kind="identity", iter_idx=-1, theta_vec=theta_id, Q=np.eye(int(n_channels), dtype=np.float64))
+    _record_candidate(kind="identity", iter_idx=-1, theta_vec=theta_id, Q=q_anchor)
     best_theta = theta_id.copy()
     best_obj = float(obj_id)
     best_score = float(score_id)

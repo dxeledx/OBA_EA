@@ -97,9 +97,30 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-transform",
-        choices=["orthogonal", "rot_scale"],
+        choices=["orthogonal", "rot_scale", "local_mix", "local_mix_then_ea"],
         default="orthogonal",
-        help="Channel-space transform family for ZO: orthogonal Q or rot_scale A=diag(exp(s))·Q.",
+        help=(
+            "Channel-space transform family for ZO. "
+            "'orthogonal' uses Q∈O(C); "
+            "'rot_scale' uses A=diag(exp(s))·Q; "
+            "'local_mix' uses a row-stochastic local mixing A; "
+            "'local_mix_then_ea' applies EA whitening after the local mixing (A→EA)."
+        ),
+    )
+    p.add_argument(
+        "--oea-zo-localmix-neighbors",
+        type=int,
+        default=4,
+        help="For transform=local_mix/local_mix_then_ea: k nearest neighbors per channel (k>=0).",
+    )
+    p.add_argument(
+        "--oea-zo-localmix-self-bias",
+        type=float,
+        default=3.0,
+        help=(
+            "For transform=local_mix/local_mix_then_ea: non-negative logit bias for the self-weight "
+            "(larger keeps A closer to identity)."
+        ),
     )
     p.add_argument("--oea-zo-infomax-lambda", type=float, default=1.0)
     p.add_argument(
@@ -218,6 +239,7 @@ def main() -> None:
     )
     X, y, meta = loader.load_arrays(dtype="float32")
     subject_session_data = split_by_subject_session(X, y, meta)
+    info = loader.load_epochs_info()
 
     metric_columns = ["accuracy", "precision", "recall", "f1", "auc", "kappa"]
     class_order = list(config.preprocessing.events)
@@ -350,6 +372,7 @@ def main() -> None:
             train_sessions=train_sessions,
             test_sessions=test_sessions,
             class_order=class_order,
+            channel_names=list(info["ch_names"]),
             n_components=config.model.csp_n_components,
             average=config.metrics_average,
             alignment=alignment,
@@ -363,6 +386,8 @@ def main() -> None:
             oea_pseudo_balance=bool(args.oea_pseudo_balance),
             oea_zo_objective=str(zo_objective_override or args.oea_zo_objective),
             oea_zo_transform=str(args.oea_zo_transform),
+            oea_zo_localmix_neighbors=int(args.oea_zo_localmix_neighbors),
+            oea_zo_localmix_self_bias=float(args.oea_zo_localmix_self_bias),
             oea_zo_infomax_lambda=float(args.oea_zo_infomax_lambda),
             oea_zo_reliable_metric=str(args.oea_zo_reliable_metric),
             oea_zo_reliable_threshold=float(args.oea_zo_reliable_threshold),
