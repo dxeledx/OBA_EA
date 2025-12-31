@@ -108,8 +108,11 @@ Fixed settings (unless noted):
 - `--oea-zo-selector calibrated_ridge_guard`
 - `--oea-zo-calib-guard-c 4`
 - `--oea-zo-calib-guard-threshold 0.85`
-- `--oea-zo-calib-max-subjects 4`
 - `--mm-safe-mdm-guard-threshold 0.9`
+
+Note on reproducibility:
+- `--oea-zo-calib-seed` only affects results if `--oea-zo-calib-max-subjects > 0` (because it samples pseudo-target subjects).
+- For the paper-facing setting we prefer `--oea-zo-calib-max-subjects 0` (use all pseudo-targets → deterministic).
 
 ### 4-class (BNCI2014_001, 0train, paper_fir, CSP=6)
 
@@ -118,6 +121,7 @@ Fixed settings (unless noted):
 - EA mean acc: `0.5320`
 - EA-MM-SAFE mean acc: `0.5475` (**Δ +0.0154**)
 - accept_rate: `0.4444`, neg_transfer_rate_vs_ea: `0.0`
+  - (This run uses `--oea-zo-calib-max-subjects 0`.)
 
 2) `mdm_drift_delta=0.20` (too permissive → gain disappears)
 - Run: `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_mdmhard_thr85_d20/`
@@ -128,6 +132,33 @@ Fixed settings (unless noted):
 - Run: `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_mdmhard_thr85_d25/`
 - EA-MM-SAFE mean acc: `0.5324` (**Δ +0.0004**)
 - accept_rate: `0.1111`, neg_transfer_rate_vs_ea: `0.0`
+
+### 4-class stability check (5 seeds; demonstrates why we keep `calib_max_subjects=0`)
+
+Protocol: same as above, but with **subsampled pseudo-target calibration**
+(`--oea-zo-calib-max-subjects 4`) and varying `--oea-zo-calib-seed`.
+
+Runs:
+- `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_thr85_mdm90_d15_seed0/`
+- `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_thr85_mdm90_d15_seed1/`
+- `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_thr85_mdm90_d15_seed2/`
+- `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_thr85_mdm90_d15_seed3/`
+- `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_thr85_mdm90_d15_seed4/`
+
+Per-seed outcomes (EA mean always `0.5320`):
+- seed0: EA-MM-SAFE `0.5324` (Δ `+0.0004`), accept `0.1111`, neg-transfer `0.0`
+- seed1: EA-MM-SAFE `0.5478` (Δ `+0.0158`), accept `0.5556`, neg-transfer `0.0`
+- seed2: EA-MM-SAFE `0.5374` (Δ `+0.0054`), accept `0.5556`, neg-transfer `0.1111`
+- seed3: EA-MM-SAFE `0.5436` (Δ `+0.0116`), accept `0.3333`, neg-transfer `0.0`
+- seed4: EA-MM-SAFE `0.5382` (Δ `+0.0062`), accept `0.4444`, neg-transfer `0.1111`
+
+Across 5 seeds (subsampled calibration):
+- mean Δ: `+0.0079 ± 0.0060`
+- mean accept_rate: `0.4000 ± 0.1859`
+- seeds with any negative transfer: `2/5`
+
+Takeaway: subsampling pseudo-target subjects adds unwanted variance and can re-introduce negative transfer; we keep
+`--oea-zo-calib-max-subjects 0` for the main setting.
 
 ### 2-class (BNCI2015_001, ALL, moabb, CSP=6)
 
