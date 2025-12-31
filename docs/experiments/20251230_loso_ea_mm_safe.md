@@ -101,3 +101,45 @@ Run: `outputs/20251230/2class/loso2_bnci2015_001_mm_safe_pf2/`
 To avoid MNE writing config under `~/.mne`, run with:
 - `_MNE_FAKE_HOME_DIR=$PWD/.mne_home`
 - `MNE_DATA=$PWD/.mne_data`
+
+## 2025-12-31 — MDM drift gate sweep (safety/accept tradeoff)
+
+Fixed settings (unless noted):
+- `--oea-zo-selector calibrated_ridge_guard`
+- `--oea-zo-calib-guard-c 4`
+- `--oea-zo-calib-guard-threshold 0.85`
+- `--oea-zo-calib-max-subjects 4`
+- `--mm-safe-mdm-guard-threshold 0.9`
+
+### 4-class (BNCI2014_001, 0train, paper_fir, CSP=6)
+
+1) `mdm_drift_delta=0.15` (best so far)
+- Run: `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_mdmhard_thr85_d15/`
+- EA mean acc: `0.5320`
+- EA-MM-SAFE mean acc: `0.5475` (**Δ +0.0154**)
+- accept_rate: `0.4444`, neg_transfer_rate_vs_ea: `0.0`
+
+2) `mdm_drift_delta=0.20` (too permissive → gain disappears)
+- Run: `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_mdmhard_thr85_d20/`
+- EA-MM-SAFE mean acc: `0.5324` (**Δ +0.0004**)
+- accept_rate: `0.1111`, neg_transfer_rate_vs_ea: `0.0`
+
+3) `mdm_drift_delta=0.25` (same as 0.20 on this sweep)
+- Run: `outputs/20251231/4class/loso4_bnci2014_001_mm_safe_mdmhard_thr85_d25/`
+- EA-MM-SAFE mean acc: `0.5324` (**Δ +0.0004**)
+- accept_rate: `0.1111`, neg_transfer_rate_vs_ea: `0.0`
+
+### 2-class (BNCI2015_001, ALL, moabb, CSP=6)
+
+1) `mdm_drift_delta=0.15` (safe + positive mean)
+- Run: `outputs/20251231/2class/loso2_bnci2015_001_mm_safe_mdmhard_thr85_d15/`
+- EA mean acc: `0.7220`
+- EA-MM-SAFE mean acc: `0.7332` (**Δ +0.0112**)
+- accept_rate: `0.3333`, neg_transfer_rate_vs_ea: `0.0`
+
+2) `mdm_drift_delta=0.20` (safety breaks on this dataset)
+- Run: `outputs/20251231/2class/loso2_bnci2015_001_mm_safe_mdmhard_thr85_d20/`
+- EA-MM-SAFE mean acc: `0.7206` (**Δ -0.0014**)
+- accept_rate: `0.5833`, neg_transfer_rate_vs_ea: `0.3333`
+
+Takeaway: `mdm_drift_delta≈0.15` is currently the sweet spot; pushing it looser hurts stability and can erase the gain.
