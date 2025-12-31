@@ -42,6 +42,7 @@ class ExperimentConfig:
     """Experiment configuration."""
 
     out_dir: Path
+    dataset: str = "BNCI2014_001"
     preprocessing: PreprocessingConfig = PreprocessingConfig()
     model: ModelConfig = ModelConfig()
     metrics_average: str = "macro"

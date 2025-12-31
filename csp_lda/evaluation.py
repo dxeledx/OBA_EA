@@ -286,6 +286,9 @@ def loso_cross_subject_evaluation(
     oea_zo_k: int = 50,
     oea_zo_seed: int = 0,
     oea_zo_l2: float = 0.0,
+    mm_safe_mdm_guard_threshold: float = -1.0,
+    mm_safe_mdm_min_pred_improve: float = 0.0,
+    mm_safe_mdm_drift_delta: float = 0.0,
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -338,6 +341,7 @@ def loso_cross_subject_evaluation(
         "ea_si_chan",
         "ea_si_chan_safe",
         "ea_si_chan_multi_safe",
+        "ea_mm_safe",
         "ea_stack_multi_safe",
         "riemann_mdm",
         "rpa_mdm",
@@ -354,7 +358,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_stack_multi_safe', "
+            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
             "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', "
             "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
@@ -485,6 +489,12 @@ def loso_cross_subject_evaluation(
         raise ValueError("oea_zo_localmix_self_bias must be >= 0.")
     if float(oea_zo_l2) < 0.0:
         raise ValueError("oea_zo_l2 must be >= 0.")
+    if float(mm_safe_mdm_guard_threshold) >= 0.0 and not (0.0 <= float(mm_safe_mdm_guard_threshold) <= 1.0):
+        raise ValueError("mm_safe_mdm_guard_threshold must be in [0,1] (or <0 to disable).")
+    if float(mm_safe_mdm_min_pred_improve) < 0.0:
+        raise ValueError("mm_safe_mdm_min_pred_improve must be >= 0.")
+    if float(mm_safe_mdm_drift_delta) < 0.0:
+        raise ValueError("mm_safe_mdm_drift_delta must be >= 0.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -500,7 +510,7 @@ def loso_cross_subject_evaluation(
 
     # Optional: extra per-subject diagnostics for specific alignments.
     extra_rows: list[dict] | None = (
-        [] if alignment in {"ea_si_chan_safe", "ea_si_chan_multi_safe", "ea_stack_multi_safe"} else None
+        [] if alignment in {"ea_si_chan_safe", "ea_si_chan_multi_safe", "ea_mm_safe", "ea_stack_multi_safe"} else None
     )
 
     def _rankdata(x: np.ndarray) -> np.ndarray:
@@ -511,7 +521,16 @@ def loso_cross_subject_evaluation(
         return ranks
 
     # Fast path: subject-wise EA can be precomputed once.
-    if alignment in {"ea", "ea_si", "ea_si_chan", "ea_si_chan_safe", "ea_si_chan_multi_safe", "ea_zo", "ea_si_zo"}:
+    if alignment in {
+        "ea",
+        "ea_si",
+        "ea_si_chan",
+        "ea_si_chan_safe",
+        "ea_si_chan_multi_safe",
+        "ea_mm_safe",
+        "ea_zo",
+        "ea_si_zo",
+    }:
         aligned: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_aligned = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
@@ -538,7 +557,7 @@ def loso_cross_subject_evaluation(
     # Cache for expensive per-train-set computations (used by ea_si_chan_multi_safe).
     chan_bundle_cache: dict[tuple[int, ...], dict] = {}
     chan_candidate_grid: list[tuple[int, float]] = []
-    if alignment == "ea_si_chan_multi_safe":
+    if alignment in {"ea_si_chan_multi_safe", "ea_mm_safe"}:
         ranks = [int(r) for r in (list(si_chan_candidate_ranks) or [int(si_proj_dim)])]
         lambdas = [float(l) for l in (list(si_chan_candidate_lambdas) or [float(si_subject_lambda)])]
         seen: set[tuple[int, float]] = set()
@@ -1742,6 +1761,499 @@ def loso_cross_subject_evaluation(
                         "chan_multi_guard_train_auc": float(guard_train_auc),
                         "chan_multi_guard_train_spearman": float(guard_train_spearman),
                         "chan_multi_guard_train_pearson": float(guard_train_pearson),
+                    }
+                )
+        elif alignment == "ea_mm_safe":
+            # Cross-model multi-candidate selection with calibrated selection (ridge/guard)
+            # and safe fallback to the EA anchor.
+            #
+            # Candidate set includes:
+            # - EA anchor (CSP+LDA on EA-whitened time series)
+            # - EA-SI-CHAN candidates (rank-deficient channel projectors + CSP+LDA)
+            # - MDM(RPA) candidate (TLCenter+TLStretch on SPD covariances + MDM classifier)
+            #
+            # Selection is performed on the target subject without using target labels.
+            X_test = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+            X_test_raw = X_test
+
+            # For reporting only (n_train) and consistency with other branches.
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            selector = str(oea_zo_selector)
+            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard", "calibrated_stack_ridge"}
+            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
+
+            outer_bundle = _get_chan_bundle(train_subjects)
+            model_id = outer_bundle["model_id"]
+            candidates_outer: dict = dict(outer_bundle.get("candidates", {}))
+
+            class_labels = list([str(c) for c in class_order])
+
+            def _row_entropy(p: np.ndarray) -> np.ndarray:
+                p = np.asarray(p, dtype=np.float64)
+                p = np.clip(p, 1e-12, 1.0)
+                p = p / np.sum(p, axis=1, keepdims=True)
+                return -np.sum(p * np.log(p), axis=1)
+
+            def _drift_vec(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
+                p0 = np.asarray(p0, dtype=np.float64)
+                p1 = np.asarray(p1, dtype=np.float64)
+                p0 = np.clip(p0, 1e-12, 1.0)
+                p1 = np.clip(p1, 1e-12, 1.0)
+                p0 = p0 / np.sum(p0, axis=1, keepdims=True)
+                p1 = p1 / np.sum(p1, axis=1, keepdims=True)
+                return np.sum(p0 * (np.log(p0) - np.log(p1)), axis=1)
+
+            def _safe_float_local(x, default: float = 0.0) -> float:
+                try:
+                    v = float(x)
+                except Exception:
+                    return float(default)
+                if not np.isfinite(v):
+                    return float(default)
+                return float(v)
+
+            def _record_for_candidate(*, p_id: np.ndarray, p_c: np.ndarray) -> dict:
+                p_c = np.asarray(p_c, dtype=np.float64)
+                p_bar = np.mean(np.clip(p_c, 1e-12, 1.0), axis=0)
+                p_bar = p_bar / float(np.sum(p_bar))
+                ent = _row_entropy(p_c)
+                ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
+
+                d = _drift_vec(p_id, p_c)
+                rec = {
+                    "kind": "candidate",
+                    "objective_base": float(np.mean(ent)),
+                    "pen_marginal": 0.0,
+                    "mean_entropy": float(np.mean(ent)),
+                    "entropy_bar": float(ent_bar),
+                    "drift_best": float(np.mean(d)),
+                    "drift_best_std": float(np.std(d)),
+                    "drift_best_q90": float(np.quantile(d, 0.90)),
+                    "drift_best_q95": float(np.quantile(d, 0.95)),
+                    "drift_best_max": float(np.max(d)),
+                    "drift_best_tail_frac": float(np.mean(d > float(oea_zo_drift_delta)))
+                    if float(oea_zo_drift_delta) > 0.0
+                    else 0.0,
+                    "p_bar_full": p_bar.astype(np.float64),
+                    "q_bar": np.zeros_like(p_bar),
+                }
+                # Convenience aliases for selectors that expect `score`/`objective`.
+                rec["objective"] = float(rec["objective_base"])
+                rec["score"] = float(rec["objective_base"])
+                return rec
+
+            def _fit_rpa_mdm(
+                *,
+                inner_train_subjects: Sequence[int],
+                target_subject: int,
+            ):
+                from pyriemann.classification import MDM
+                from pyriemann.transfer import TLCenter, TLStretch, encode_domains
+
+                X_train_parts_raw: list[np.ndarray] = []
+                y_train_parts_raw: list[np.ndarray] = []
+                dom_train_parts: list[np.ndarray] = []
+                for s in inner_train_subjects:
+                    sd = subject_data_raw[int(s)]
+                    X_train_parts_raw.append(sd.X)
+                    y_train_parts_raw.append(sd.y)
+                    dom_train_parts.append(np.full(sd.y.shape[0], f"src_{int(s)}", dtype=object))
+                X_tr_raw = np.concatenate(X_train_parts_raw, axis=0)
+                y_tr = np.concatenate(y_train_parts_raw, axis=0)
+                dom_train = np.concatenate(dom_train_parts, axis=0)
+
+                z_t_raw = subject_data_raw[int(target_subject)].X
+
+                cov_train = covariances_from_epochs(X_tr_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+                cov_test = covariances_from_epochs(z_t_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+
+                dom_test = np.full(cov_test.shape[0], "target", dtype=object)
+                y_dummy = np.full(cov_test.shape[0], str(class_order[0]), dtype=object)
+                cov_all = np.concatenate([cov_train, cov_test], axis=0)
+                y_all = np.concatenate([y_tr, y_dummy], axis=0)
+                dom_all = np.concatenate([dom_train, dom_test], axis=0)
+                _, y_enc = encode_domains(cov_all, y_all, dom_all)
+
+                center = TLCenter(target_domain="target", metric="riemann")
+                cov_centered = center.fit_transform(cov_all, y_enc)
+
+                stretch = TLStretch(target_domain="target", centered_data=True, metric="riemann")
+                cov_stretched = stretch.fit_transform(cov_centered, y_enc)
+
+                cov_src = cov_stretched[: cov_train.shape[0]]
+                cov_tgt = cov_stretched[cov_train.shape[0] :]
+
+                model_mdm = MDM(metric="riemann")
+                model_mdm.fit(cov_src, y_tr)
+                return model_mdm, cov_tgt
+
+            # Calibrate ridge/guard per candidate family (chan vs mdm) on pseudo-target subjects.
+            cert_by_family: dict[str, RidgeCertificate | None] = {"chan": None, "mdm": None}
+            guard_by_family: dict[str, LogisticGuard | None] = {"chan": None, "mdm": None}
+
+            ridge_train_spearman_chan = float("nan")
+            ridge_train_pearson_chan = float("nan")
+            ridge_train_spearman_mdm = float("nan")
+            ridge_train_pearson_mdm = float("nan")
+            guard_train_auc_chan = float("nan")
+            guard_train_spearman_chan = float("nan")
+            guard_train_pearson_chan = float("nan")
+            guard_train_auc_mdm = float("nan")
+            guard_train_spearman_mdm = float("nan")
+            guard_train_pearson_mdm = float("nan")
+
+            if use_ridge or use_guard:
+                rng = np.random.RandomState(int(oea_zo_calib_seed) + int(test_subject) * 997)
+                calib_subjects = list(train_subjects)
+                if int(oea_zo_calib_max_subjects) > 0 and int(oea_zo_calib_max_subjects) < len(calib_subjects):
+                    rng.shuffle(calib_subjects)
+                    calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
+
+                X_ridge_rows: dict[str, List[np.ndarray]] = {"chan": [], "mdm": []}
+                y_ridge_rows: dict[str, List[float]] = {"chan": [], "mdm": []}
+                X_guard_rows: dict[str, List[np.ndarray]] = {"chan": [], "mdm": []}
+                y_guard_rows: dict[str, List[int]] = {"chan": [], "mdm": []}
+                improve_guard_rows: dict[str, List[float]] = {"chan": [], "mdm": []}
+                feat_names: tuple[str, ...] | None = None
+
+                for pseudo_t in calib_subjects:
+                    inner_train = [s for s in train_subjects if s != pseudo_t]
+                    if len(inner_train) < 2:
+                        continue
+                    inner_bundle = _get_chan_bundle(inner_train)
+                    m_id = inner_bundle["model_id"]
+                    cand_inner: dict = dict(inner_bundle.get("candidates", {}))
+
+                    z_p = subject_data[int(pseudo_t)].X
+                    y_p = subject_data[int(pseudo_t)].y
+                    p_id = _reorder_proba_columns(m_id.predict_proba(z_p), m_id.classes_, class_labels)
+                    yp_id = np.asarray(m_id.predict(z_p))
+                    acc_id = float(accuracy_score(y_p, yp_id))
+
+                    # Channel candidates.
+                    for cand_key, info in cand_inner.items():
+                        A = info["A"]
+                        m_A = info["model"]
+                        z_p_A = apply_spatial_transform(A, z_p)
+                        p_A = _reorder_proba_columns(m_A.predict_proba(z_p_A), m_A.classes_, class_labels)
+                        yp_A = np.asarray(m_A.predict(z_p_A))
+                        acc_A = float(accuracy_score(y_p, yp_A))
+                        improve = float(acc_A - acc_id)
+
+                        rec = _record_for_candidate(p_id=p_id, p_c=p_A)
+                        rec["cand_family"] = "chan"
+                        rec["cand_key"] = cand_key
+                        rec["cand_rank"] = float(info.get("rank", float("nan")))
+                        rec["cand_lambda"] = float(info.get("lambda", float("nan")))
+                        feats_vec, names = candidate_features_from_record(
+                            rec, n_classes=len(class_order), include_pbar=True
+                        )
+                        if feat_names is None:
+                            feat_names = names
+                        if use_ridge:
+                            X_ridge_rows["chan"].append(feats_vec)
+                            y_ridge_rows["chan"].append(float(improve))
+                        if use_guard:
+                            X_guard_rows["chan"].append(feats_vec)
+                            y_guard_rows["chan"].append(1 if improve >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows["chan"].append(float(improve))
+
+                    # MDM(RPA) candidate.
+                    try:
+                        mdm_inner, cov_tgt_inner = _fit_rpa_mdm(
+                            inner_train_subjects=inner_train,
+                            target_subject=int(pseudo_t),
+                        )
+                        p_mdm = _reorder_proba_columns(
+                            mdm_inner.predict_proba(cov_tgt_inner), mdm_inner.classes_, class_labels
+                        )
+                        yp_mdm = np.asarray(mdm_inner.predict(cov_tgt_inner))
+                        acc_mdm = float(accuracy_score(y_p, yp_mdm))
+                        improve_mdm = float(acc_mdm - acc_id)
+
+                        rec_mdm = _record_for_candidate(p_id=p_id, p_c=p_mdm)
+                        rec_mdm["cand_family"] = "mdm"
+                        rec_mdm["cand_key"] = "mdm_rpa"
+                        rec_mdm["cand_rank"] = float("nan")
+                        rec_mdm["cand_lambda"] = float("nan")
+                        feats_mdm, names_mdm = candidate_features_from_record(
+                            rec_mdm, n_classes=len(class_order), include_pbar=True
+                        )
+                        if feat_names is None:
+                            feat_names = names_mdm
+                        if use_ridge:
+                            X_ridge_rows["mdm"].append(feats_mdm)
+                            y_ridge_rows["mdm"].append(float(improve_mdm))
+                        if use_guard:
+                            X_guard_rows["mdm"].append(feats_mdm)
+                            y_guard_rows["mdm"].append(1 if improve_mdm >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows["mdm"].append(float(improve_mdm))
+                    except Exception:
+                        pass
+
+                # Train per-family models.
+                for fam in ("chan", "mdm"):
+                    if use_ridge and X_ridge_rows[fam] and feat_names is not None:
+                        X_ridge = np.vstack(X_ridge_rows[fam])
+                        y_ridge = np.asarray(y_ridge_rows[fam], dtype=np.float64)
+                        cert_by_family[fam] = train_ridge_certificate(
+                            X_ridge,
+                            y_ridge,
+                            feature_names=feat_names,
+                            alpha=float(oea_zo_calib_ridge_alpha),
+                        )
+                        try:
+                            pred = np.asarray(
+                                cert_by_family[fam].predict_accuracy(X_ridge), dtype=np.float64
+                            ).reshape(-1)
+                            if y_ridge.size >= 2:
+                                pear = float(np.corrcoef(pred, y_ridge)[0, 1])
+                                spear = float(np.corrcoef(_rankdata(pred), _rankdata(y_ridge))[0, 1])
+                                if fam == "chan":
+                                    ridge_train_pearson_chan = pear
+                                    ridge_train_spearman_chan = spear
+                                else:
+                                    ridge_train_pearson_mdm = pear
+                                    ridge_train_spearman_mdm = spear
+                        except Exception:
+                            pass
+
+                    if use_guard and X_guard_rows[fam] and feat_names is not None:
+                        X_guard = np.vstack(X_guard_rows[fam])
+                        y_guard = np.asarray(y_guard_rows[fam], dtype=int)
+                        if len(np.unique(y_guard)) >= 2:
+                            guard_by_family[fam] = train_logistic_guard(
+                                X_guard,
+                                y_guard,
+                                feature_names=feat_names,
+                                c=float(oea_zo_calib_guard_c),
+                            )
+                            try:
+                                p_train = np.asarray(
+                                    guard_by_family[fam].predict_pos_proba(X_guard), dtype=np.float64
+                                ).reshape(-1)
+                                improve_train = np.asarray(improve_guard_rows[fam], dtype=np.float64).reshape(-1)
+                                auc = float(roc_auc_score(y_guard, p_train))
+                                pear = float("nan")
+                                spear = float("nan")
+                                if improve_train.size == p_train.size and improve_train.size >= 2:
+                                    pear = float(np.corrcoef(p_train, improve_train)[0, 1])
+                                    spear = float(np.corrcoef(_rankdata(p_train), _rankdata(improve_train))[0, 1])
+                                if fam == "chan":
+                                    guard_train_auc_chan = auc
+                                    guard_train_pearson_chan = pear
+                                    guard_train_spearman_chan = spear
+                                else:
+                                    guard_train_auc_mdm = auc
+                                    guard_train_pearson_mdm = pear
+                                    guard_train_spearman_mdm = spear
+                            except Exception:
+                                pass
+
+            # Build candidate records on the target subject (unlabeled).
+            p_id_t = _reorder_proba_columns(model_id.predict_proba(X_test_raw), model_id.classes_, class_labels)
+            rec_id = _record_for_candidate(p_id=p_id_t, p_c=p_id_t)
+            rec_id["kind"] = "identity"
+            rec_id["cand_key"] = None
+            rec_id["cand_family"] = "ea"
+            rec_id["cand_rank"] = float("nan")
+            rec_id["cand_lambda"] = float("nan")
+            records: list[dict] = [rec_id]
+
+            # Channel candidates.
+            for cand_key, info in candidates_outer.items():
+                A = info["A"]
+                m_A = info["model"]
+                X_test_A = apply_spatial_transform(A, X_test_raw)
+                p_A_t = _reorder_proba_columns(m_A.predict_proba(X_test_A), m_A.classes_, class_labels)
+                rec = _record_for_candidate(p_id=p_id_t, p_c=p_A_t)
+                rec["kind"] = "candidate"
+                rec["cand_key"] = cand_key
+                rec["cand_family"] = "chan"
+                rec["cand_rank"] = float(info.get("rank", float("nan")))
+                rec["cand_lambda"] = float(info.get("lambda", float("nan")))
+                records.append(rec)
+
+            # MDM(RPA) candidate.
+            mdm_outer = None
+            cov_tgt_outer = None
+            try:
+                mdm_outer, cov_tgt_outer = _fit_rpa_mdm(inner_train_subjects=train_subjects, target_subject=int(test_subject))
+                p_mdm_t = _reorder_proba_columns(
+                    mdm_outer.predict_proba(cov_tgt_outer), mdm_outer.classes_, class_labels
+                )
+                rec_mdm = _record_for_candidate(p_id=p_id_t, p_c=p_mdm_t)
+                rec_mdm["kind"] = "candidate"
+                rec_mdm["cand_key"] = "mdm_rpa"
+                rec_mdm["cand_family"] = "mdm"
+                rec_mdm["cand_rank"] = float("nan")
+                rec_mdm["cand_lambda"] = float("nan")
+                records.append(rec_mdm)
+            except Exception:
+                mdm_outer = None
+                cov_tgt_outer = None
+
+            # Per-family selection (avoid mixing CSP+LDA vs MDM probability statistics).
+            selected = rec_id
+            drift_mode = str(oea_zo_drift_mode)
+            drift_gamma = float(oea_zo_drift_gamma)
+            drift_delta = float(oea_zo_drift_delta)
+
+            if selector in {"calibrated_ridge_guard", "calibrated_ridge", "calibrated_guard"}:
+                best_pred = -float("inf")
+                best_score = float("inf")
+                best_rec: dict | None = None
+
+                for rec in records:
+                    if str(rec.get("kind", "")) == "identity":
+                        continue
+                    fam = str(rec.get("cand_family", "")).strip().lower()
+                    if fam not in {"chan", "mdm"}:
+                        continue
+
+                    feats, _names = candidate_features_from_record(
+                        rec, n_classes=len(class_order), include_pbar=True
+                    )
+
+                    # Guard probability (if required).
+                    if selector in {"calibrated_ridge_guard", "calibrated_guard"}:
+                        g = guard_by_family.get(fam, None)
+                        if g is None:
+                            continue
+                        p_pos = float(g.predict_pos_proba(feats)[0])
+                        rec["guard_p_pos"] = float(p_pos)
+                        thr = float(oea_zo_calib_guard_threshold)
+                        if fam == "mdm" and float(mm_safe_mdm_guard_threshold) >= 0.0:
+                            thr = max(float(thr), float(mm_safe_mdm_guard_threshold))
+                        if p_pos < float(thr):
+                            continue
+
+                    drift = _safe_float_local(rec.get("drift_best", 0.0))
+                    if fam == "mdm" and float(mm_safe_mdm_drift_delta) > 0.0 and drift > float(mm_safe_mdm_drift_delta):
+                        continue
+                    if drift_mode == "hard" and drift_delta > 0.0 and drift > drift_delta:
+                        continue
+
+                    if selector in {"calibrated_ridge_guard", "calibrated_ridge"}:
+                        c = cert_by_family.get(fam, None)
+                        if c is None:
+                            continue
+                        pred_improve = float(c.predict_accuracy(feats)[0])
+                        rec["ridge_pred_improve"] = float(pred_improve)
+                        if fam == "mdm" and float(mm_safe_mdm_min_pred_improve) > 0.0 and float(pred_improve) < float(
+                            mm_safe_mdm_min_pred_improve
+                        ):
+                            continue
+                        if drift_mode == "penalty" and drift_gamma > 0.0:
+                            pred_improve = float(pred_improve) - drift_gamma * float(drift)
+                        if pred_improve > best_pred:
+                            best_pred = float(pred_improve)
+                            best_rec = rec
+                    else:
+                        # Guard-only selector: pick by objective among accepted candidates.
+                        score = _safe_float_local(rec.get("score", rec.get("objective", 0.0)))
+                        if drift_mode == "penalty" and drift_gamma > 0.0:
+                            score = float(score) + drift_gamma * float(drift)
+                        if score < best_score:
+                            best_score = float(score)
+                            best_rec = rec
+
+                if selector == "calibrated_guard":
+                    selected = best_rec if best_rec is not None else rec_id
+                else:
+                    if best_rec is None or not np.isfinite(best_pred) or float(best_pred) <= 0.0:
+                        selected = rec_id
+                    else:
+                        selected = best_rec
+            elif selector == "objective":
+                selected = min(records, key=lambda r: float(r.get("score", r.get("objective_base", 0.0))))
+
+            # Optional marginal-entropy fallback (unlabeled safety valve).
+            if (
+                float(oea_zo_fallback_min_marginal_entropy) > 0.0
+                and str(selected.get("kind", "")) != "identity"
+                and float(selected.get("entropy_bar", float("inf"))) < float(oea_zo_fallback_min_marginal_entropy)
+            ):
+                selected = rec_id
+
+            # Apply selection.
+            accept = str(selected.get("kind", "")) != "identity"
+            sel_family = str(selected.get("cand_family", "ea"))
+            sel_guard_pos = float(selected.get("guard_p_pos", float("nan")))
+            sel_ridge_pred = float(selected.get("ridge_pred_improve", float("nan")))
+            sel_key = selected.get("cand_key", None)
+
+            if accept and sel_family == "chan" and sel_key in candidates_outer:
+                A_sel = candidates_outer[sel_key]["A"]
+                model = candidates_outer[sel_key]["model"]
+                X_test = apply_spatial_transform(A_sel, X_test_raw)
+            elif accept and sel_family == "mdm" and mdm_outer is not None and cov_tgt_outer is not None:
+                model = mdm_outer
+                X_test = cov_tgt_outer
+            else:
+                model = model_id
+                X_test = X_test_raw
+                accept = False
+                sel_family = "ea"
+
+            # Analysis-only: compute true improvement for the selected candidate (not used in selection).
+            try:
+                acc_id_t = float(accuracy_score(y_test, np.asarray(model_id.predict(X_test_raw))))
+            except Exception:
+                acc_id_t = float("nan")
+            try:
+                acc_sel_t = float(accuracy_score(y_test, np.asarray(model.predict(X_test))))
+            except Exception:
+                acc_sel_t = float("nan")
+            improve_t = float(acc_sel_t - acc_id_t) if np.isfinite(acc_sel_t) and np.isfinite(acc_id_t) else float("nan")
+
+            if extra_rows is not None:
+                # Aggregate training stats (compat with existing columns).
+                mm_ridge_train_spearman = float(
+                    np.nanmean(np.asarray([ridge_train_spearman_chan, ridge_train_spearman_mdm], dtype=np.float64))
+                )
+                mm_ridge_train_pearson = float(
+                    np.nanmean(np.asarray([ridge_train_pearson_chan, ridge_train_pearson_mdm], dtype=np.float64))
+                )
+                mm_guard_train_auc = float(
+                    np.nanmean(np.asarray([guard_train_auc_chan, guard_train_auc_mdm], dtype=np.float64))
+                )
+                mm_guard_train_spearman = float(
+                    np.nanmean(np.asarray([guard_train_spearman_chan, guard_train_spearman_mdm], dtype=np.float64))
+                )
+                mm_guard_train_pearson = float(
+                    np.nanmean(np.asarray([guard_train_pearson_chan, guard_train_pearson_mdm], dtype=np.float64))
+                )
+                extra_rows.append(
+                    {
+                        "subject": int(test_subject),
+                        "mm_safe_accept": int(bool(accept)),
+                        "mm_safe_family": str(sel_family),
+                        "mm_safe_guard_pos": float(sel_guard_pos),
+                        "mm_safe_ridge_pred_improve": float(sel_ridge_pred),
+                        "mm_safe_acc_anchor": float(acc_id_t),
+                        "mm_safe_acc_selected": float(acc_sel_t),
+                        "mm_safe_improve": float(improve_t),
+                        "mm_safe_ridge_train_spearman": float(mm_ridge_train_spearman),
+                        "mm_safe_ridge_train_pearson": float(mm_ridge_train_pearson),
+                        "mm_safe_guard_train_auc": float(mm_guard_train_auc),
+                        "mm_safe_guard_train_spearman": float(mm_guard_train_spearman),
+                        "mm_safe_guard_train_pearson": float(mm_guard_train_pearson),
+                        "mm_safe_chan_ridge_train_spearman": float(ridge_train_spearman_chan),
+                        "mm_safe_chan_ridge_train_pearson": float(ridge_train_pearson_chan),
+                        "mm_safe_mdm_ridge_train_spearman": float(ridge_train_spearman_mdm),
+                        "mm_safe_mdm_ridge_train_pearson": float(ridge_train_pearson_mdm),
+                        "mm_safe_chan_guard_train_auc": float(guard_train_auc_chan),
+                        "mm_safe_chan_guard_train_spearman": float(guard_train_spearman_chan),
+                        "mm_safe_chan_guard_train_pearson": float(guard_train_pearson_chan),
+                        "mm_safe_mdm_guard_train_auc": float(guard_train_auc_mdm),
+                        "mm_safe_mdm_guard_train_spearman": float(guard_train_spearman_mdm),
+                        "mm_safe_mdm_guard_train_pearson": float(guard_train_pearson_mdm),
                     }
                 )
         elif alignment == "ea_si_zo":

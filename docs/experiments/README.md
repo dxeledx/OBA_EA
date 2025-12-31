@@ -12,6 +12,8 @@ File naming convention: `YYYYMMDD_<topic>.md`
 `results_registry.csv` is a **registered table** of past runs, built by scanning `outputs/**/**/**/**_method_comparison.csv`
 and (when available) reading metadata from each `*_results.txt`.
 
+Registry fields include `dataset` (parsed from the `Dataset:` line in `*_results.txt`) so multi-dataset benchmarking stays comparable.
+
 To refresh it (without rerunning experiments):
 
 ```bash

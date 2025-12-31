@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import mne
 import numpy as np
 import pandas as pd
-from moabb.datasets import BNCI2014_001
+import re
 from moabb.paradigms import MotorImagery
 from scipy.signal import firwin, lfilter
 
@@ -17,26 +17,52 @@ class SubjectData:
     X: np.ndarray  # shape: (n_trials, n_channels, n_times)
     y: np.ndarray  # shape: (n_trials,)
 
+def resolve_moabb_dataset(dataset: str):
+    """Resolve a MOABB dataset name to a dataset instance.
 
-class BCIIV2aMoabbLoader:
-    """Load BCI Competition IV 2a (MOABB BNCI2014-001) using MOABB Dataset+Paradigm.
-
-    References (MOABB)
-    ------------------
-    - Paradigms API (`MotorImagery`): https://github.com/NeuroTechX/moabb/blob/develop/docs/source/api.rst
-      (see paradigms; `MotorImagery` supports bandpass via `fmin/fmax`, epoching via
-      `tmin/tmax`, and resampling via `resample`).
-    - MOABB examples also demonstrate `MotorImagery(...).get_data(dataset=BNCI2014_001(), ...)`.
-
-    References (Braindecode)
-    ------------------------
-    Braindecode lists MOABB as an optional dependency and notes that certain older
-    MOABB versions (e.g., 1.0.0) had incorrect epoching; ensure a recent MOABB:
-    https://github.com/braindecode/braindecode/blob/master/docs/whats_new.rst
+    Accepts common aliases/casings, e.g.:
+    - BNCI2014_001 / bnci2014_001 / BNCI2014001
+    - Cho2017 / PhysionetMI / Schirrmeister2017
     """
+
+    dataset = str(dataset).strip()
+    if not dataset:
+        raise ValueError("dataset must be a non-empty string.")
+
+    import moabb.datasets as moabb_datasets
+
+    # Fast path: exact match.
+    if hasattr(moabb_datasets, dataset):
+        cls = getattr(moabb_datasets, dataset)
+        return cls()
+
+    # Normalize BNCI variants: BNCI2014001 -> BNCI2014_001 when available.
+    m = re.match(r"^BNCI(\d{4})_?(\d{3})$", dataset.strip().upper())
+    if m:
+        with_underscore = f"BNCI{m.group(1)}_{m.group(2)}"
+        without_underscore = f"BNCI{m.group(1)}{m.group(2)}"
+        if hasattr(moabb_datasets, with_underscore):
+            return getattr(moabb_datasets, with_underscore)()
+        if hasattr(moabb_datasets, without_underscore):
+            return getattr(moabb_datasets, without_underscore)()
+
+    # Case-insensitive match for other datasets.
+    lower_to_name = {name.lower(): name for name in dir(moabb_datasets)}
+    key = dataset.lower()
+    if key in lower_to_name:
+        cls = getattr(moabb_datasets, lower_to_name[key])
+        return cls()
+
+    raise ValueError(f"Unknown MOABB dataset: {dataset}")
+
+
+class MoabbMotorImageryLoader:
+    """Load a MOABB MotorImagery dataset using MOABB Dataset+Paradigm."""
 
     def __init__(
         self,
+        *,
+        dataset: str,
         fmin: float,
         fmax: float,
         tmin: float,
@@ -48,7 +74,8 @@ class BCIIV2aMoabbLoader:
         paper_fir_order: int = 50,
         paper_fir_window: str = "hamming",
     ) -> None:
-        self.dataset = BNCI2014_001()
+        self.dataset = resolve_moabb_dataset(dataset)
+        self.dataset_id = str(self.dataset.__class__.__name__)
         self.sessions = tuple(sessions) if sessions is not None else None
         self.preprocess = str(preprocess)
         self.fmin = float(fmin)
@@ -88,7 +115,7 @@ class BCIIV2aMoabbLoader:
         """Return (X, y, meta) as numpy arrays.
 
         - preprocess="moabb": use MOABB paradigm standard pipeline.
-        - preprocess="paper_fir": use causal 50-order FIR(Hamming) bandpass, then epoch.
+        - preprocess="paper_fir": use causal FIR(Hamming) bandpass, then epoch.
         """
 
         if subjects is None:
@@ -105,6 +132,8 @@ class BCIIV2aMoabbLoader:
                     raise ValueError("MOABB metadata must contain a 'session' column.")
                 session_col = meta["session"].astype(str)
                 mask = session_col.isin([str(s) for s in self.sessions]).to_numpy()
+                if not bool(np.any(mask)):
+                    raise RuntimeError(f"No trials left after filtering sessions={list(self.sessions)}.")
                 X = X[mask]
                 y = y[mask]
                 meta = meta.loc[mask].reset_index(drop=True)
@@ -126,7 +155,7 @@ class BCIIV2aMoabbLoader:
         if self.preprocess == "moabb":
             if self.paradigm is None:
                 raise RuntimeError("MOABB paradigm is not initialized.")
-            epochs, y, meta = self.paradigm.get_data(
+            epochs, _y, meta = self.paradigm.get_data(
                 dataset=self.dataset, subjects=[subject], return_epochs=True
             )
             if self.sessions is not None:
@@ -151,9 +180,9 @@ class BCIIV2aMoabbLoader:
         subjects: Sequence[int],
         dtype: np.dtype,
     ) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-        """Paper-matched preprocessing on Raw:
+        """Paper-matched preprocessing on Raw.
 
-        - causal FIR (order=50, Hamming), bandpass [fmin, fmax]
+        - causal FIR (order=`paper_fir_order`, Hamming by default), bandpass [fmin, fmax]
         - resample to target sfreq if needed
         - epoch tmin..tmax relative to cue (annotation onset)
         - select requested events
@@ -175,11 +204,9 @@ class BCIIV2aMoabbLoader:
                 for run_name, raw in runs.items():
                     raw = raw.copy().pick_types(eeg=True, eog=False, stim=False, misc=False)
 
-                    # Resample first (paper uses 250Hz already for Dataset 2a).
                     if raw.info["sfreq"] != self.resample:
                         raw.resample(self.resample, npad="auto")
 
-                    # Apply causal FIR filter to EEG channels.
                     self._apply_causal_fir(raw)
 
                     events, _ = mne.events_from_annotations(raw, event_id=event_id, verbose="ERROR")
@@ -238,6 +265,37 @@ class BCIIV2aMoabbLoader:
         # Causal filtering (one-pass), matching Matlab `filter` behavior.
         filtered = lfilter(b, [1.0], data, axis=-1)
         raw._data[:] = filtered
+
+
+class BCIIV2aMoabbLoader(MoabbMotorImageryLoader):
+    """Backward-compatible loader for MOABB BNCI2014_001 (BCI Competition IV 2a)."""
+
+    def __init__(
+        self,
+        fmin: float,
+        fmax: float,
+        tmin: float,
+        tmax: float,
+        resample: float,
+        events: Sequence[str],
+        sessions: Optional[Sequence[str]] = None,
+        preprocess: str = "moabb",
+        paper_fir_order: int = 50,
+        paper_fir_window: str = "hamming",
+    ) -> None:
+        super().__init__(
+            dataset="BNCI2014_001",
+            fmin=fmin,
+            fmax=fmax,
+            tmin=tmin,
+            tmax=tmax,
+            resample=resample,
+            events=events,
+            sessions=sessions,
+            preprocess=preprocess,
+            paper_fir_order=paper_fir_order,
+            paper_fir_window=paper_fir_window,
+        )
 
 
 def split_by_subject(X: np.ndarray, y: np.ndarray, meta: pd.DataFrame) -> Dict[int, SubjectData]:

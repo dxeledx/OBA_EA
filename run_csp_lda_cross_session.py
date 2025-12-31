@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 import sys
 import warnings
 
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from csp_lda.config import ExperimentConfig, ModelConfig, PreprocessingConfig
-from csp_lda.data import BCIIV2aMoabbLoader, split_by_subject_session
+from csp_lda.data import MoabbMotorImageryLoader, split_by_subject_session
 from csp_lda.evaluation import compute_metrics, cross_session_within_subject_evaluation
 from csp_lda.plots import plot_confusion_matrix, plot_method_comparison_bar
 from csp_lda.reporting import today_yyyymmdd, write_results_txt_multi
@@ -18,7 +19,7 @@ from csp_lda.reporting import today_yyyymmdd, write_results_txt_multi
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="CSP+LDA within-subject cross-session on MOABB BNCI2014_001 (BCI IV 2a)."
+        description="CSP+LDA within-subject cross-session on MOABB MotorImagery datasets."
     )
     p.add_argument(
         "--out-dir",
@@ -31,6 +32,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional run subfolder name. Default: current time HHMMSS.",
+    )
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default="BNCI2014_001",
+        help=(
+            "MOABB dataset name (e.g., BNCI2014_001, Cho2017, PhysionetMI, Schirrmeister2017). "
+            "Default: BNCI2014_001 (BCI IV 2a)."
+        ),
     )
     p.add_argument("--fmin", type=float, default=8.0)
     p.add_argument("--fmax", type=float, default=30.0)
@@ -208,7 +218,8 @@ def main() -> None:
     methods = [m.strip() for m in str(args.methods).split(",") if m.strip()]
     date_prefix = today_yyyymmdd()
     n_classes = len(events)
-    run_name = args.run_name or datetime.now().strftime("%H%M%S")
+    dataset_slug = re.sub(r"[^0-9a-zA-Z]+", "", str(args.dataset).strip().lower()) or "dataset"
+    run_name = args.run_name or f"{datetime.now().strftime('%H%M%S')}_{dataset_slug}"
     out_dir = Path(args.out_dir) / date_prefix / f"{n_classes}class" / "cross_session" / run_name
 
     preprocessing = PreprocessingConfig(
@@ -223,20 +234,20 @@ def main() -> None:
         paper_fir_order=int(args.fir_order),
     )
     model_cfg = ModelConfig(csp_n_components=int(args.n_components))
-    config = ExperimentConfig(out_dir=out_dir, preprocessing=preprocessing, model=model_cfg)
-
-    loader = BCIIV2aMoabbLoader(
-        fmin=config.preprocessing.fmin,
-        fmax=config.preprocessing.fmax,
-        tmin=config.preprocessing.tmin,
-        tmax=config.preprocessing.tmax,
-        resample=config.preprocessing.resample,
-        events=config.preprocessing.events,
+    loader = MoabbMotorImageryLoader(
+        dataset=str(args.dataset),
+        fmin=preprocessing.fmin,
+        fmax=preprocessing.fmax,
+        tmin=preprocessing.tmin,
+        tmax=preprocessing.tmax,
+        resample=preprocessing.resample,
+        events=preprocessing.events,
         sessions=sessions,
-        preprocess=config.preprocessing.preprocess,
-        paper_fir_order=config.preprocessing.paper_fir_order,
-        paper_fir_window=config.preprocessing.paper_fir_window,
+        preprocess=preprocessing.preprocess,
+        paper_fir_order=preprocessing.paper_fir_order,
+        paper_fir_window=preprocessing.paper_fir_window,
     )
+    config = ExperimentConfig(out_dir=out_dir, dataset=f"MOABB {loader.dataset_id}", preprocessing=preprocessing, model=model_cfg)
     X, y, meta = loader.load_arrays(dtype="float32")
     subject_session_data = split_by_subject_session(X, y, meta)
     info = loader.load_epochs_info()

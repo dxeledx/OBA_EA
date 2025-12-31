@@ -16,6 +16,7 @@ class RunContext:
     run_dir: Path
     method_comparison_csv: Path
     results_txt: Path | None
+    dataset: str | None
     preprocess_line: str | None
     preprocess_mode: str | None
     events: str | None
@@ -45,6 +46,10 @@ def _parse_results_txt(path: Path) -> dict:
             if line.startswith(prefix):
                 return line.strip()
         return None
+
+    dataset = _find("Dataset:")
+    if dataset:
+        out["dataset"] = dataset.split(":", 1)[1].strip() or None
 
     preproc = _find("Preprocessing:")
     out["preprocess_line"] = preproc
@@ -107,6 +112,7 @@ def _infer_context(*, method_csv: Path) -> RunContext:
         run_dir=run_dir,
         method_comparison_csv=method_csv,
         results_txt=results_txt,
+        dataset=meta.get("dataset"),
         preprocess_line=meta.get("preprocess_line"),
         preprocess_mode=meta.get("preprocess_mode"),
         events=meta.get("events"),
@@ -136,6 +142,7 @@ def build_registry(*, outputs_dir: Path) -> pd.DataFrame:
                 "run_dir": str(ctx.run_dir),
                 "method_comparison_csv": str(ctx.method_comparison_csv),
                 "results_txt": (str(ctx.results_txt) if ctx.results_txt is not None else ""),
+                "dataset": ctx.dataset or "",
                 "preprocess_mode": ctx.preprocess_mode or "",
                 "events": ctx.events or "",
                 "sessions": ctx.sessions or "",

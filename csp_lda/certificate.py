@@ -152,7 +152,7 @@ def candidate_features_from_record(
 
     # Candidate meta info (optional; useful when mixing candidate families in a single selector).
     cand_family = str(rec.get("cand_family", "")).strip().lower()
-    for fam in ("ea", "rpa", "tsa", "chan"):
+    for fam in ("ea", "rpa", "tsa", "chan", "mdm"):
         feats.append(1.0 if cand_family == fam else 0.0)
         names.append(f"cand_family_{fam}")
     feats.append(_safe_float(rec.get("cand_rank", 0.0)))

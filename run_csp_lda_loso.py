@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 import sys
 import warnings
 
@@ -11,7 +12,7 @@ import pandas as pd
 import mne
 
 from csp_lda.config import ExperimentConfig, ModelConfig, PreprocessingConfig
-from csp_lda.data import BCIIV2aMoabbLoader, split_by_subject
+from csp_lda.data import MoabbMotorImageryLoader, split_by_subject
 from csp_lda.evaluation import compute_metrics, loso_cross_subject_evaluation
 from csp_lda.plots import (
     plot_confusion_matrix,
@@ -22,7 +23,7 @@ from csp_lda.reporting import today_yyyymmdd, write_results_txt_multi
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="CSP+LDA LOSO on MOABB BNCI2014_001 (BCI IV 2a).")
+    p = argparse.ArgumentParser(description="CSP+LDA LOSO on MOABB MotorImagery datasets.")
     p.add_argument(
         "--out-dir",
         type=Path,
@@ -34,6 +35,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional run subfolder name under OUT_DIR/YYYYMMDD/. Default: current time HHMMSS.",
+    )
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default="BNCI2014_001",
+        help=(
+            "MOABB dataset name (e.g., BNCI2014_001, BNCI2014_002, Cho2017, PhysionetMI, Schirrmeister2017). "
+            "Default: BNCI2014_001 (BCI IV 2a)."
+        ),
     )
     p.add_argument("--fmin", type=float, default=8.0)
     p.add_argument("--fmax", type=float, default=30.0)
@@ -70,6 +80,7 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
             "riemann-mdm, rpa-mdm, rpa-rot-mdm, "
             "ea-stack-multi-safe-csp-lda, "
+            "ea-mm-safe, "
             "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
             "oea-zo-imr-csp-lda, "
@@ -419,6 +430,34 @@ def parse_args() -> argparse.Namespace:
         help="For oea-zo-* methods with selector=calibrated_guard: label as positive if improvement > margin.",
     )
     p.add_argument(
+        "--mm-safe-mdm-guard-threshold",
+        type=float,
+        default=-1.0,
+        help=(
+            "For method=ea-mm-safe only: additional (family-specific) guard threshold for the MDM candidate. "
+            "If set >=0, the effective MDM threshold is max(--oea-zo-calib-guard-threshold, this). "
+            "Use this to treat MDM as a higher-risk candidate family."
+        ),
+    )
+    p.add_argument(
+        "--mm-safe-mdm-min-pred-improve",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-mm-safe only: require the MDM candidate's ridge-predicted improvement to be at least this value "
+            "before it can be selected (>=0)."
+        ),
+    )
+    p.add_argument(
+        "--mm-safe-mdm-drift-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-mm-safe only: additional hard drift guard (mean KL(p_anchor||p_mdm) <= delta) applied only "
+            "to the MDM candidate. 0 disables."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -523,7 +562,8 @@ def main() -> None:
         raise ValueError("--events must contain at least two classes.")
     task_dir = f"{len(events)}class"
     base_dir = out_root / date_prefix / task_dir
-    run_name = args.run_name or datetime.now().strftime("%H%M%S")
+    dataset_slug = re.sub(r"[^0-9a-zA-Z]+", "", str(args.dataset).strip().lower()) or "dataset"
+    run_name = args.run_name or f"{datetime.now().strftime('%H%M%S')}_{dataset_slug}"
     out_dir = base_dir / run_name
     i = 1
     while out_dir.exists():
@@ -581,21 +621,57 @@ def main() -> None:
         paper_fir_order=int(args.fir_order),
     )
     model_cfg = ModelConfig(csp_n_components=int(args.n_components))
-    config = ExperimentConfig(out_dir=out_dir, preprocessing=preprocessing, model=model_cfg)
-
-    loader = BCIIV2aMoabbLoader(
-        fmin=config.preprocessing.fmin,
-        fmax=config.preprocessing.fmax,
-        tmin=config.preprocessing.tmin,
-        tmax=config.preprocessing.tmax,
-        resample=config.preprocessing.resample,
-        events=config.preprocessing.events,
+    loader = MoabbMotorImageryLoader(
+        dataset=str(args.dataset),
+        fmin=preprocessing.fmin,
+        fmax=preprocessing.fmax,
+        tmin=preprocessing.tmin,
+        tmax=preprocessing.tmax,
+        resample=preprocessing.resample,
+        events=preprocessing.events,
         sessions=sessions,
-        preprocess=config.preprocessing.preprocess,
-        paper_fir_order=config.preprocessing.paper_fir_order,
-        paper_fir_window=config.preprocessing.paper_fir_window,
+        preprocess=preprocessing.preprocess,
+        paper_fir_order=preprocessing.paper_fir_order,
+        paper_fir_window=preprocessing.paper_fir_window,
     )
-    X, y, meta = loader.load_arrays(dtype="float32")
+    config = ExperimentConfig(out_dir=out_dir, dataset=f"MOABB {loader.dataset_id}", preprocessing=preprocessing, model=model_cfg)
+
+    try:
+        X, y, meta = loader.load_arrays(dtype="float32")
+    except RuntimeError as e:
+        if sessions is not None and "No trials left after filtering sessions=" in str(e):
+            print(f"[WARN] {e} Falling back to sessions=ALL.")
+            sessions = None
+            preprocessing = PreprocessingConfig(
+                fmin=float(args.fmin),
+                fmax=float(args.fmax),
+                tmin=float(args.tmin),
+                tmax=float(args.tmax),
+                resample=float(args.resample),
+                events=events,
+                sessions=(),
+                preprocess=str(args.preprocess),
+                paper_fir_order=int(args.fir_order),
+            )
+            loader = MoabbMotorImageryLoader(
+                dataset=str(args.dataset),
+                fmin=preprocessing.fmin,
+                fmax=preprocessing.fmax,
+                tmin=preprocessing.tmin,
+                tmax=preprocessing.tmax,
+                resample=preprocessing.resample,
+                events=preprocessing.events,
+                sessions=None,
+                preprocess=preprocessing.preprocess,
+                paper_fir_order=preprocessing.paper_fir_order,
+                paper_fir_window=preprocessing.paper_fir_window,
+            )
+            config = ExperimentConfig(
+                out_dir=out_dir, dataset=f"MOABB {loader.dataset_id}", preprocessing=preprocessing, model=model_cfg
+            )
+            X, y, meta = loader.load_arrays(dtype="float32")
+        else:
+            raise
     subject_data = split_by_subject(X, y, meta)
     info = loader.load_epochs_info()
 
@@ -665,6 +741,27 @@ def main() -> None:
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
                 f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+            )
+        elif method == "ea-mm-safe":
+            alignment = "ea_mm_safe"
+            ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
+            lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
+            mdm_gate_str = ""
+            if float(args.mm_safe_mdm_guard_threshold) >= 0.0:
+                mdm_gate_str += f", mdm_guard_thr={float(args.mm_safe_mdm_guard_threshold)}"
+            if float(args.mm_safe_mdm_min_pred_improve) > 0.0:
+                mdm_gate_str += f", mdm_min_pred={float(args.mm_safe_mdm_min_pred_improve)}"
+            if float(args.mm_safe_mdm_drift_delta) > 0.0:
+                mdm_gate_str += f", mdm_drift_delta={float(args.mm_safe_mdm_drift_delta)}"
+            method_details[method] = (
+                "EA-MM-SAFE: multi-model candidate selection with safe fallback to EA anchor. "
+                "Candidates include EA(anchor CSP+LDA), EA-SI-CHAN channel projectors, and MDM(RPA: TLCenter+TLStretch) "
+                f"(ranks={ranks_str}, lambdas={lambdas_str}, si_ridge={args.si_ridge}); "
+                f"selector={args.oea_zo_selector} "
+                f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "
+                f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
+                f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
+                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{mdm_gate_str})."
             )
         elif method == "oea-cov-csp-lda":
             alignment = "oea_cov"
@@ -964,6 +1061,7 @@ def main() -> None:
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
                 "rpa-csp-lda, tsa-csp-lda, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
                 "ea-stack-multi-safe-csp-lda, "
+                "ea-mm-safe, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
@@ -1040,6 +1138,9 @@ def main() -> None:
                 oea_zo_k=int(args.oea_zo_k),
                 oea_zo_seed=int(args.oea_zo_seed),
                 oea_zo_l2=float(args.oea_zo_l2),
+                mm_safe_mdm_guard_threshold=float(args.mm_safe_mdm_guard_threshold),
+                mm_safe_mdm_min_pred_improve=float(args.mm_safe_mdm_min_pred_improve),
+                mm_safe_mdm_drift_delta=float(args.mm_safe_mdm_drift_delta),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),
@@ -1132,6 +1233,18 @@ def main() -> None:
             else:
                 row["guard_improve_pearson"] = float("nan")
                 row["guard_improve_spearman"] = float("nan")
+        if "mm_safe_guard_pos" in df.columns and "mm_safe_improve" in df.columns:
+            p = df["mm_safe_guard_pos"].astype(float).to_numpy()
+            imp = df["mm_safe_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["guard_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["guard_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["guard_improve_pearson"] = float("nan")
+                row["guard_improve_spearman"] = float("nan")
         if "chan_multi_ridge_pred_improve" in df.columns and "chan_multi_improve" in df.columns:
             p = df["chan_multi_ridge_pred_improve"].astype(float).to_numpy()
             imp = df["chan_multi_improve"].astype(float).to_numpy()
@@ -1156,18 +1269,34 @@ def main() -> None:
             else:
                 row["cert_improve_pearson"] = float("nan")
                 row["cert_improve_spearman"] = float("nan")
+        if "mm_safe_ridge_pred_improve" in df.columns and "mm_safe_improve" in df.columns:
+            p = df["mm_safe_ridge_pred_improve"].astype(float).to_numpy()
+            imp = df["mm_safe_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["cert_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["cert_improve_pearson"] = float("nan")
+                row["cert_improve_spearman"] = float("nan")
         if "chan_safe_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["chan_safe_accept"].astype(float)))
         if "chan_multi_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["chan_multi_accept"].astype(float)))
         if "stack_multi_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["stack_multi_accept"].astype(float)))
+        if "mm_safe_accept" in df.columns:
+            row["accept_rate"] = float(np.mean(df["mm_safe_accept"].astype(float)))
         if "chan_safe_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_safe_guard_train_auc"].astype(float)))
         if "chan_multi_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_multi_guard_train_auc"].astype(float)))
         if "stack_multi_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["stack_multi_guard_train_auc"].astype(float)))
+        if "mm_safe_guard_train_auc" in df.columns:
+            row["guard_train_auc_mean"] = float(np.nanmean(df["mm_safe_guard_train_auc"].astype(float)))
         if "chan_safe_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(np.nanmean(df["chan_safe_guard_train_spearman"].astype(float)))
         if "chan_multi_guard_train_spearman" in df.columns:
@@ -1177,6 +1306,10 @@ def main() -> None:
         if "stack_multi_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(
                 np.nanmean(df["stack_multi_guard_train_spearman"].astype(float))
+            )
+        if "mm_safe_guard_train_spearman" in df.columns:
+            row["guard_train_spearman_mean"] = float(
+                np.nanmean(df["mm_safe_guard_train_spearman"].astype(float))
             )
         if base_acc is not None and method != base_method:
             m_acc = df.set_index("subject")["accuracy"].astype(float)

@@ -45,6 +45,7 @@ class TrainedModel:
 def build_csp_lda_pipeline(
     n_components: int = 4,
     aligner: Optional[BaseAligner] = None,
+    csp_reg: float | str | None = None,
 ) -> Pipeline:
     """Build CSP+LDA sklearn pipeline.
 
@@ -62,7 +63,7 @@ def build_csp_lda_pipeline(
         steps=[
             ("to_float64", EnsureFloat64()),
             ("align", aligner),
-            ("csp", CSP(n_components=int(n_components))),
+            ("csp", CSP(n_components=int(n_components), reg=csp_reg)),
             ("lda", LinearDiscriminantAnalysis()),
         ]
     )
@@ -74,9 +75,23 @@ def fit_csp_lda(
     n_components: int = 4,
     aligner: Optional[BaseAligner] = None,
 ) -> TrainedModel:
-    pipeline = build_csp_lda_pipeline(n_components=n_components, aligner=aligner)
-    pipeline.fit(X_train, y_train)
-    return TrainedModel(pipeline=pipeline)
+    # CSP can fail on rank-deficient inputs (e.g. low-rank channel projectors) because the
+    # generalized eigen-problem requires SPD covariance. We retry with covariance regularization.
+    last_err: Exception | None = None
+    for csp_reg in (None, 1e-6, 1e-3, 1e-1):
+        try:
+            pipeline = build_csp_lda_pipeline(n_components=n_components, aligner=aligner, csp_reg=csp_reg)
+            pipeline.fit(X_train, y_train)
+            return TrainedModel(pipeline=pipeline)
+        except Exception as e:  # noqa: BLE001  (narrowing to LinAlgError is brittle across scipy/mne)
+            msg = str(e)
+            if "positive definite" in msg or "LinAlgError" in type(e).__name__:
+                last_err = e
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("CSP+LDA fitting failed for unknown reason.")
 
 
 def fit_csp_projected_lda(

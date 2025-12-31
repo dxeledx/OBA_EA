@@ -1,8 +1,8 @@
-# CSP+LDA (MOABB BNCI2014-001 / BCI Competition IV 2a)
+# CSP+LDA (MOABB MotorImagery；默认 BNCI2014_001 / BCI Competition IV 2a)
 
-本项目实现脑电运动意图识别中的 **CSP + LDA** 基线方法：
+本项目实现脑电运动意图识别中的 **CSP + LDA** 基线方法（默认 BCI IV 2a；也支持其他 MOABB MI 数据集）：
 
-- 数据集：MOABB `BNCI2014_001`（BCI Competition IV 2a，4 类：left/right/feet/tongue）
+- 数据集：默认 MOABB `BNCI2014_001`（BCI Competition IV 2a，4 类：left/right/feet/tongue）；可通过 `--dataset` 切换到如 `Cho2017` / `PhysionetMI` / `Schirrmeister2017` / `BNCI2014_002` 等
 - 默认对齐 He & Wu (EA) 论文的 2 类设置：left vs right，仅使用训练会话 `0train`
 - 预处理（MOABB paradigm）：8–30 Hz 带通、重采样 250 Hz、分段 `tmin=0.5s` 到 `tmax=3.5s`（相对 cue 出现后的时间窗）
 - 模型：CSP（`n_components=4`）+ LDA（默认参数）
@@ -23,6 +23,16 @@ pip install -U "git+https://github.com/NeuroTechX/moabb.git"
 
 ```bash
 conda run -n eeg python run_csp_lda_loso.py
+```
+
+切换数据集（MOABB）：
+
+```bash
+# Cho2017: 2-class (left/right)
+conda run -n eeg python run_csp_lda_loso.py --dataset Cho2017 --events left_hand,right_hand --sessions ALL
+
+# Schirrmeister2017: 4-class (left/right/feet/rest)
+conda run -n eeg python run_csp_lda_loso.py --dataset Schirrmeister2017 --events left_hand,right_hand,feet,rest --sessions ALL
 ```
 
 默认会在 `outputs/YYYYMMDD/<N>class/HHMMSS/` 目录生成（同一天多次运行不会覆盖；`<N>` 由 `--events` 决定）：
