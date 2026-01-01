@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="csp-lda,ea-csp-lda",
 	        help=(
-	            "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+	            "Comma-separated methods to run: csp-lda, fbcsp-lda, ea-csp-lda, ea-fbcsp-lda, rpa-csp-lda, tsa-csp-lda, "
 	            "riemann-mdm, rpa-mdm, rpa-rot-mdm, ts-lr, rpa-ts-lr, ea-ts-lr, "
 	            "ea-stack-multi-safe-csp-lda, "
 	            "ea-mm-safe, "
@@ -691,9 +691,24 @@ def main() -> None:
         if method == "csp-lda":
             alignment = "none"
             method_details[method] = "No alignment."
+        elif method == "fbcsp-lda":
+            alignment = "fbcsp"
+            fb_n_components = max(2, min(4, int(config.model.csp_n_components)))
+            method_details[method] = (
+                "FBCSP+LDA: FilterBank-CSP over sub-bands within 8–30 Hz "
+                f"(n_components_per_band={fb_n_components}, selector=MI@24, lda=shrinkage_auto)."
+            )
         elif method == "ea-csp-lda":
             alignment = "ea"
             method_details[method] = f"EA: per-subject whitening (eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+        elif method == "ea-fbcsp-lda":
+            alignment = "ea_fbcsp"
+            fb_n_components = max(2, min(4, int(config.model.csp_n_components)))
+            method_details[method] = (
+                "EA + FBCSP+LDA: per-subject EA whitening, then FilterBank-CSP over sub-bands within 8–30 Hz "
+                f"(n_components_per_band={fb_n_components}, selector=MI@24, lda=shrinkage_auto, "
+                f"eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
         elif method == "rpa-csp-lda":
             alignment = "rpa"
             method_details[method] = (
@@ -1080,7 +1095,7 @@ def main() -> None:
             raise ValueError(
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
-                "rpa-csp-lda, tsa-csp-lda, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
+                "fbcsp-lda, ea-fbcsp-lda, rpa-csp-lda, tsa-csp-lda, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
                 "ea-stack-multi-safe-csp-lda, "
                 "ea-mm-safe, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
@@ -1109,6 +1124,7 @@ def main() -> None:
                 n_components=config.model.csp_n_components,
                 average=config.metrics_average,
                 alignment=alignment,
+                sfreq=float(args.resample),
                 oea_eps=float(args.oea_eps),
                 oea_shrinkage=float(args.oea_shrinkage),
                 oea_pseudo_iters=int(args.oea_pseudo_iters),

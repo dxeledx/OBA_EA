@@ -19,7 +19,7 @@ from .alignment import (
     orthogonal_align_symmetric,
     sorted_eigh,
 )
-from .model import TrainedModel, fit_csp_lda
+from .model import TrainedModel, fit_csp_lda, fit_fbcsp_lda
 from .model import fit_csp_projected_lda
 from .subject_invariant import (
     HSICProjectorParams,
@@ -236,6 +236,7 @@ def loso_cross_subject_evaluation(
     n_components: int = 4,
     average: str = "macro",
     alignment: str = "none",
+    sfreq: float = 250.0,
     oea_eps: float = 1e-10,
     oea_shrinkage: float = 0.0,
     oea_pseudo_iters: int = 2,
@@ -337,6 +338,8 @@ def loso_cross_subject_evaluation(
         "none",
         "ea",
         "rpa",
+        "fbcsp",
+        "ea_fbcsp",
         "ea_si",
         "ea_si_chan",
         "ea_si_chan_safe",
@@ -361,7 +364,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
+            "'none', 'ea', 'rpa', 'fbcsp', 'ea_fbcsp', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
             "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', 'ts_lr', 'rpa_ts_lr', 'ea_ts_lr', "
             "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
@@ -526,6 +529,7 @@ def loso_cross_subject_evaluation(
     # Fast path: subject-wise EA can be precomputed once.
     if alignment in {
         "ea",
+        "ea_fbcsp",
         "ea_ts_lr",
         "ea_si",
         "ea_si_chan",
@@ -701,7 +705,7 @@ def loso_cross_subject_evaluation(
         z_test_base: np.ndarray | None = None
 
         # Build per-fold aligned train/test data if needed.
-        if alignment in {"none", "ea", "rpa"}:
+        if alignment in {"none", "ea", "rpa", "fbcsp", "ea_fbcsp"}:
             X_test = subject_data[test_subject].X
             y_test = subject_data[test_subject].y
 
@@ -3563,7 +3567,33 @@ def loso_cross_subject_evaluation(
             y_test = subject_data[test_subject].y
 
         if model is None:
-            model = fit_csp_lda(X_train, y_train, n_components=n_components)
+            if alignment in {"fbcsp", "ea_fbcsp"}:
+                # Default filterbank within the base paper_fir 8–30 Hz protocol band.
+                bands = [
+                    (8.0, 12.0),
+                    (10.0, 14.0),
+                    (12.0, 16.0),
+                    (14.0, 18.0),
+                    (16.0, 20.0),
+                    (18.0, 22.0),
+                    (20.0, 24.0),
+                    (22.0, 26.0),
+                    (24.0, 28.0),
+                    (26.0, 30.0),
+                ]
+                fb_n_components = max(2, min(4, int(n_components)))
+                model = fit_fbcsp_lda(
+                    X_train,
+                    y_train,
+                    bands=bands,
+                    sfreq=float(sfreq),
+                    n_components=fb_n_components,
+                    filter_order=4,
+                    multiclass_strategy="auto",
+                    select_k=24,
+                )
+            else:
+                model = fit_csp_lda(X_train, y_train, n_components=n_components)
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test)
         y_proba = _reorder_proba_columns(y_proba, model.classes_, class_order)

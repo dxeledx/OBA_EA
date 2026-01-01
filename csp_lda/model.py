@@ -5,8 +5,10 @@ from typing import Optional
 
 from mne.decoding import CSP
 import numpy as np
+from scipy.signal import butter, sosfiltfilt
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.feature_selection import mutual_info_classif
 from sklearn.pipeline import Pipeline
 
 from .alignment import BaseAligner, NoAligner
@@ -21,6 +23,142 @@ class EnsureFloat64(BaseEstimator, TransformerMixin):
 
     def transform(self, X):  # noqa: N803  (match sklearn signature)
         return np.asarray(X, dtype=np.float64)
+
+
+class FilterBankCSP(BaseEstimator, TransformerMixin):
+    """Filterbank CSP feature extractor.
+
+    This transformer applies a bank of band-pass filters to epochs and fits a CSP
+    model per band. At transform time it concatenates CSP log-variance features
+    across bands.
+    """
+
+    def __init__(
+        self,
+        *,
+        bands: list[tuple[float, float]],
+        sfreq: float,
+        n_components: int,
+        filter_order: int = 4,
+        csp_reg: float | str | None = None,
+        multiclass_strategy: str = "auto",
+    ) -> None:
+        self.bands = bands
+        self.sfreq = sfreq
+        self.n_components = n_components
+        self.filter_order = filter_order
+        self.csp_reg = csp_reg
+        self.multiclass_strategy = multiclass_strategy
+
+        self._sos: list[np.ndarray] | None = None
+        self._csps_by_band: list[list[CSP]] | None = None
+
+    def fit(self, X, y=None):  # noqa: N803  (match sklearn signature)
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 3:
+            raise ValueError(f"Expected X with shape (n_trials,n_channels,n_times); got {X.shape}.")
+        if y is None:
+            raise ValueError("y must be provided for CSP fitting.")
+        y = np.asarray(y)
+
+        sfreq = float(self.sfreq)
+        if not np.isfinite(sfreq) or sfreq <= 0.0:
+            raise ValueError("sfreq must be positive and finite.")
+        nyq = 0.5 * sfreq
+
+        bands = [(float(lo), float(hi)) for lo, hi in list(self.bands)]
+        if not bands:
+            raise ValueError("bands must be a non-empty list of (fmin,fmax).")
+
+        sos_list: list[np.ndarray] = []
+        csps_by_band: list[list[CSP]] = []
+
+        classes = np.unique(y)
+        strategy = str(self.multiclass_strategy).strip().lower()
+        if strategy == "auto":
+            strategy = "multiclass" if int(classes.size) <= 2 else "ovo"
+        if strategy not in {"multiclass", "ovo", "ovr"}:
+            raise ValueError("multiclass_strategy must be one of: 'auto', 'multiclass', 'ovo', 'ovr'.")
+
+        for fmin, fmax in bands:
+            if not (0.0 < fmin < fmax < nyq):
+                raise ValueError(f"Invalid band ({fmin}, {fmax}) for sfreq={sfreq}.")
+            sos = butter(int(self.filter_order), [fmin, fmax], btype="bandpass", fs=sfreq, output="sos")
+            X_f = sosfiltfilt(sos, X, axis=-1)
+            sos_list.append(sos)
+            csps: list[CSP] = []
+            if strategy == "multiclass":
+                csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                csp.fit(X_f, y)
+                csps.append(csp)
+            elif strategy == "ovo":
+                # One-vs-one CSP per class pair (common in multi-class FBCSP).
+                from itertools import combinations
+
+                for c1, c2 in combinations(classes.tolist(), 2):
+                    mask = (y == c1) | (y == c2)
+                    if int(np.sum(mask)) < 2:
+                        continue
+                    csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                    csp.fit(X_f[mask], y[mask])
+                    csps.append(csp)
+            else:  # "ovr"
+                for c in classes.tolist():
+                    y_bin = (y == c).astype(int)
+                    if int(np.unique(y_bin).size) < 2:
+                        continue
+                    csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                    csp.fit(X_f, y_bin)
+                    csps.append(csp)
+            csps_by_band.append(csps)
+
+        self._sos = sos_list
+        self._csps_by_band = csps_by_band
+        return self
+
+    def transform(self, X):  # noqa: N803  (match sklearn signature)
+        X = np.asarray(X, dtype=np.float64)
+        if self._sos is None or self._csps_by_band is None:
+            raise RuntimeError("FilterBankCSP is not fitted yet.")
+        feats = []
+        for sos, csps in zip(self._sos, self._csps_by_band):
+            X_f = sosfiltfilt(sos, X, axis=-1)
+            for csp in csps:
+                feats.append(np.asarray(csp.transform(X_f), dtype=np.float64))
+        return np.concatenate(feats, axis=1)
+
+
+class MutualInfoSelector(BaseEstimator, TransformerMixin):
+    """Select top-k features by mutual information with labels (training only)."""
+
+    def __init__(self, *, k: int = 24, random_state: int = 0) -> None:
+        self.k = int(k)
+        self.random_state = int(random_state)
+        self.indices_: np.ndarray | None = None
+
+    def fit(self, X, y=None):  # noqa: N803  (match sklearn signature)
+        X = np.asarray(X, dtype=np.float64)
+        if y is None:
+            raise ValueError("y must be provided for feature selection.")
+        y = np.asarray(y)
+
+        scores = mutual_info_classif(X, y, random_state=self.random_state)
+        scores = np.asarray(scores, dtype=np.float64)
+
+        k = int(self.k)
+        if k <= 0 or k >= int(scores.size):
+            self.indices_ = np.arange(scores.size, dtype=int)
+            return self
+
+        order = np.argsort(scores)[::-1]
+        self.indices_ = np.asarray(order[:k], dtype=int)
+        return self
+
+    def transform(self, X):  # noqa: N803  (match sklearn signature)
+        X = np.asarray(X, dtype=np.float64)
+        if self.indices_ is None:
+            raise RuntimeError("MutualInfoSelector is not fitted yet.")
+        return X[:, self.indices_]
 
 
 @dataclass(frozen=True)
@@ -92,6 +230,82 @@ def fit_csp_lda(
     if last_err is not None:
         raise last_err
     raise RuntimeError("CSP+LDA fitting failed for unknown reason.")
+
+
+def build_fbcsp_lda_pipeline(
+    *,
+    bands: list[tuple[float, float]],
+    sfreq: float,
+    n_components: int = 4,
+    filter_order: int = 4,
+    csp_reg: float | str | None = None,
+    multiclass_strategy: str = "auto",
+    select_k: int = 24,
+    mi_random_state: int = 0,
+) -> Pipeline:
+    """Build FilterBank-CSP + LDA pipeline (no alignment step here).
+
+    Notes
+    -----
+    - Alignment (EA/OEA/...) is handled outside this pipeline by preparing X.
+    - CSP is fitted per band; features are concatenated then fed into LDA.
+    """
+
+    return Pipeline(
+        steps=[
+            ("to_float64", EnsureFloat64()),
+            (
+                "fbcsp",
+                FilterBankCSP(
+                    bands=list(bands),
+                    sfreq=float(sfreq),
+                    n_components=int(n_components),
+                    filter_order=int(filter_order),
+                    csp_reg=csp_reg,
+                    multiclass_strategy=str(multiclass_strategy),
+                ),
+            ),
+            ("select", MutualInfoSelector(k=int(select_k), random_state=int(mi_random_state))),
+            ("lda", LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")),
+        ]
+    )
+
+
+def fit_fbcsp_lda(
+    X_train,
+    y_train,
+    *,
+    bands: list[tuple[float, float]],
+    sfreq: float,
+    n_components: int = 4,
+    filter_order: int = 4,
+    multiclass_strategy: str = "auto",
+    select_k: int = 24,
+) -> TrainedModel:
+    # Similar to `fit_csp_lda`, CSP can fail on some inputs; retry with increasing regularization.
+    last_err: Exception | None = None
+    for csp_reg in (None, 1e-6, 1e-3, 1e-1):
+        try:
+            pipeline = build_fbcsp_lda_pipeline(
+                bands=bands,
+                sfreq=sfreq,
+                n_components=n_components,
+                filter_order=filter_order,
+                csp_reg=csp_reg,
+                multiclass_strategy=str(multiclass_strategy),
+                select_k=int(select_k),
+            )
+            pipeline.fit(X_train, y_train)
+            return TrainedModel(pipeline=pipeline)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "positive definite" in msg or "LinAlgError" in type(e).__name__:
+                last_err = e
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("FBCSP+LDA fitting failed for unknown reason.")
 
 
 def fit_csp_projected_lda(
