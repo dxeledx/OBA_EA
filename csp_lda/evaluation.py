@@ -346,6 +346,9 @@ def loso_cross_subject_evaluation(
         "riemann_mdm",
         "rpa_mdm",
         "rpa_rot_mdm",
+        "ts_lr",
+        "rpa_ts_lr",
+        "ea_ts_lr",
         "ea_si_zo",
         "ea_zo",
         "raw_zo",
@@ -359,7 +362,7 @@ def loso_cross_subject_evaluation(
         raise ValueError(
             "alignment must be one of: "
             "'none', 'ea', 'rpa', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
-            "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', "
+            "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', 'ts_lr', 'rpa_ts_lr', 'ea_ts_lr', "
             "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
@@ -523,6 +526,7 @@ def loso_cross_subject_evaluation(
     # Fast path: subject-wise EA can be precomputed once.
     if alignment in {
         "ea",
+        "ea_ts_lr",
         "ea_si",
         "ea_si_chan",
         "ea_si_chan_safe",
@@ -730,8 +734,11 @@ def loso_cross_subject_evaluation(
 
             dom_test = np.full(y_test.shape[0], "target", dtype=object)
 
-            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
-            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            # Use centered covariances (subtract per-channel mean) for tangent-space features.
+            X_train_c = X_train - np.mean(X_train, axis=2, keepdims=True)
+            X_test_c = X_test_raw - np.mean(X_test_raw, axis=2, keepdims=True)
+            cov_train = covariances_from_epochs(X_train_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            cov_test = covariances_from_epochs(X_test_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
 
             if alignment == "riemann_mdm":
                 model = MDM(metric="riemann")
@@ -770,6 +777,102 @@ def loso_cross_subject_evaluation(
                 model = MDM(metric="riemann")
                 model.fit(cov_src, y_train)
                 X_test = cov_tgt
+        elif alignment in {"ts_lr", "ea_ts_lr"}:
+            # Tangent-space classifier: TangentSpace(metric='riemann') + LogisticRegression on SPD covariances.
+            from pyriemann.tangentspace import TangentSpace
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+
+            # Riemannian pipelines commonly apply trace-normalization to reduce per-trial power scale effects
+            # (keeps SPD and improves cross-subject robustness).
+            def _trace_normalize(covs: np.ndarray) -> np.ndarray:
+                covs = np.asarray(covs, dtype=np.float64)
+                tr = np.trace(covs, axis1=1, axis2=2)
+                tr = np.maximum(tr, 1e-12)
+                return covs / tr[:, None, None]
+
+            cov_train = _trace_normalize(cov_train)
+            cov_test = _trace_normalize(cov_test)
+
+            model = make_pipeline(
+                TangentSpace(metric="riemann"),
+                StandardScaler(with_mean=True, with_std=True),
+                LogisticRegression(
+                    solver="lbfgs",
+                    max_iter=1000,
+                    n_jobs=1,
+                ),
+            )
+            model.fit(cov_train, y_train)
+            X_test = cov_test
+        elif alignment == "rpa_ts_lr":
+            # RPA-style tangent-space classifier: TLCenter+TLStretch (unlabeled target) then
+            # TangentSpace(metric='riemann') + LogisticRegression on covariances.
+            from pyriemann.tangentspace import TangentSpace
+            from pyriemann.transfer import TLCenter, TLStretch, encode_domains
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            X_train_parts = []
+            y_train_parts = []
+            dom_train_parts = []
+            for s in train_subjects:
+                sd = subject_data[int(s)]
+                X_train_parts.append(sd.X)
+                y_train_parts.append(sd.y)
+                dom_train_parts.append(np.full(sd.y.shape[0], f"src_{int(s)}", dtype=object))
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+            dom_train = np.concatenate(dom_train_parts, axis=0)
+
+            dom_test = np.full(y_test.shape[0], "target", dtype=object)
+
+            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+
+            # Center + stretch (RPA without rotation) using both source and target (unlabeled) covariances.
+            y_dummy = np.full(y_test.shape[0], str(class_order[0]), dtype=object)
+            cov_all = np.concatenate([cov_train, cov_test], axis=0)
+            y_all = np.concatenate([y_train, y_dummy], axis=0)
+            dom_all = np.concatenate([dom_train, dom_test], axis=0)
+            _, y_enc = encode_domains(cov_all, y_all, dom_all)
+
+            center = TLCenter(target_domain="target", metric="riemann")
+            cov_centered = center.fit_transform(cov_all, y_enc)
+
+            stretch = TLStretch(target_domain="target", centered_data=True, metric="riemann")
+            cov_stretched = stretch.fit_transform(cov_centered, y_enc)
+
+            cov_src = cov_stretched[: cov_train.shape[0]]
+            cov_tgt = cov_stretched[cov_train.shape[0] :]
+
+            model = make_pipeline(
+                TangentSpace(metric="riemann"),
+                StandardScaler(with_mean=True, with_std=True),
+                LogisticRegression(
+                    solver="lbfgs",
+                    max_iter=1000,
+                    n_jobs=1,
+                ),
+            )
+            model.fit(cov_src, y_train)
+            X_test = cov_tgt
         elif alignment == "tsa":
             # Tangent-space alignment (TSA) using pseudo-label anchors in the LEA/RPA-whitened space.
             X_test = subject_data[test_subject].X

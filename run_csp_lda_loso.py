@@ -76,12 +76,12 @@ def parse_args() -> argparse.Namespace:
         "--methods",
         type=str,
         default="csp-lda,ea-csp-lda",
-        help=(
-            "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
-            "riemann-mdm, rpa-mdm, rpa-rot-mdm, "
-            "ea-stack-multi-safe-csp-lda, "
-            "ea-mm-safe, "
-            "oea-cov-csp-lda, oea-csp-lda, "
+	        help=(
+	            "Comma-separated methods to run: csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+	            "riemann-mdm, rpa-mdm, rpa-rot-mdm, ts-lr, rpa-ts-lr, ea-ts-lr, "
+	            "ea-stack-multi-safe-csp-lda, "
+	            "ea-mm-safe, "
+	            "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
             "oea-zo-imr-csp-lda, "
             "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
@@ -725,6 +725,27 @@ def main() -> None:
             method_details[method] = (
                 "pyRiemann transfer baseline: TLCenter+TLStretch+TLRotate (pseudo-labels) then "
                 "MDM(metric='riemann') "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "ts-lr":
+            alignment = "ts_lr"
+            method_details[method] = (
+                "pyRiemann baseline: TangentSpace(metric='riemann') + LogisticRegression "
+                "on per-trial SPD covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "rpa-ts-lr":
+            alignment = "rpa_ts_lr"
+            method_details[method] = (
+                "pyRiemann transfer baseline: TLCenter+TLStretch then TangentSpace(metric='riemann') + LogisticRegression "
+                "on covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "ea-ts-lr":
+            alignment = "ea_ts_lr"
+            method_details[method] = (
+                "EA + TangentSpace-LR: apply EA whitening on time series, then "
+                "TangentSpace(metric='riemann') + LogisticRegression on per-trial covariances "
                 f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
             )
         elif method == "ea-stack-multi-safe-csp-lda":
