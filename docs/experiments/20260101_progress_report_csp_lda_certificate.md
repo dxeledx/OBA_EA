@@ -119,7 +119,30 @@ Outputs：
 
 ---
 
-## 3) Round‑2（扩展，非 CSP+LDA‑only）— 加入跨 family 候选（EA‑MM‑SAFE）
+## 3) Round‑2（尝试，未达标）— 半联动：连续 λ 搜索（SPSA）会引入负迁移
+
+> 完整记录：`docs/experiments/20260102_loso4_bnci2014_001_chan_spsa_safe.md:1`
+
+动机：希望把下层从离散网格（`λ∈{0.5,1,2}`）升级到连续 λ 搜索，以扩大候选覆盖并进一步提高 mean。
+
+方法：`ea-si-chan-spsa-safe-csp-lda`（目标被试上用 SPSA 优化 `φ=log λ`，上层仍用 calibrated ridge/guard + fallback）。
+
+结果（同协议 BNCI2014_001 4‑class LOSO）：
+- mean acc **0.5436**（**+1.16% abs** vs EA），但
+- worst‑subject **0.2396**（低于 EA 的 0.2569）
+- `neg_transfer_rate_vs_ea = 0.3333`（负迁移回来了）
+- `accept_rate = 7/9` 且 S1/S2/S8 被误接受后真实掉点（每个 −0.01736）
+
+诊断图：
+- `docs/experiments/figures/20260102_loso4_chan_spsa_safe_delta_compare.png`
+- `docs/experiments/figures/20260102_loso4_chan_spsa_safe_lambda_vs_true.png`
+- `docs/experiments/figures/20260102_loso4_chan_spsa_safe_pred_vs_true.png`
+
+结论：连续搜索“有增益但不稳”，当前不适合作为主方法；若继续，需要先把接收规则/λ‑trust‑region 做到 **neg_transfer≈0** 再谈提升。
+
+---
+
+## 4) Round‑3（扩展，非 CSP+LDA‑only）— 加入跨 family 候选（EA‑MM‑SAFE）
 
 > 仅用于补充：`docs/experiments/20251231_loso4_bnci2014_001_ea_chan_mdm_mmsafe.md:1`
 
@@ -127,7 +150,7 @@ Outputs：
 
 ---
 
-## 4) 下一次实验记录模板（从现在开始按这个写）
+## 5) 下一次实验记录模板（从现在开始按这个写）
 
 每次新实验笔记建议固定为四段（对应你要求的“先分析失败→再计划→再执行→再结果”）：
 
@@ -149,4 +172,3 @@ Outputs：
    - 主表：mean / worst / neg‑transfer  
    - 至少 1 张：per‑subject Δacc 图  
    - 若主打“证书有效性”：附证书‑acc 图（散点 + 相关系数）
-
