@@ -26,6 +26,8 @@ from .subject_invariant import (
     CenteredLinearProjector,
     learn_hsic_subject_invariant_projector,
     ChannelProjectorParams,
+    compute_channel_projector_scatter,
+    solve_channel_projector_from_scatter,
     learn_subject_invariant_channel_projector,
 )
 from .certificate import (
@@ -344,6 +346,7 @@ def loso_cross_subject_evaluation(
         "ea_si_chan",
         "ea_si_chan_safe",
         "ea_si_chan_multi_safe",
+        "ea_si_chan_spsa_safe",
         "ea_mm_safe",
         "ea_stack_multi_safe",
         "riemann_mdm",
@@ -364,7 +367,7 @@ def loso_cross_subject_evaluation(
     }:
         raise ValueError(
             "alignment must be one of: "
-            "'none', 'ea', 'rpa', 'fbcsp', 'ea_fbcsp', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
+            "'none', 'ea', 'rpa', 'fbcsp', 'ea_fbcsp', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_si_chan_spsa_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
             "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', 'ts_lr', 'rpa_ts_lr', 'ea_ts_lr', "
             "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
@@ -516,7 +519,10 @@ def loso_cross_subject_evaluation(
 
     # Optional: extra per-subject diagnostics for specific alignments.
     extra_rows: list[dict] | None = (
-        [] if alignment in {"ea_si_chan_safe", "ea_si_chan_multi_safe", "ea_mm_safe", "ea_stack_multi_safe"} else None
+        []
+        if alignment
+        in {"ea_si_chan_safe", "ea_si_chan_multi_safe", "ea_si_chan_spsa_safe", "ea_mm_safe", "ea_stack_multi_safe"}
+        else None
     )
 
     def _rankdata(x: np.ndarray) -> np.ndarray:
@@ -535,6 +541,7 @@ def loso_cross_subject_evaluation(
         "ea_si_chan",
         "ea_si_chan_safe",
         "ea_si_chan_multi_safe",
+        "ea_si_chan_spsa_safe",
         "ea_mm_safe",
         "ea_zo",
         "ea_si_zo",
@@ -565,7 +572,7 @@ def loso_cross_subject_evaluation(
     # Cache for expensive per-train-set computations (used by ea_si_chan_multi_safe).
     chan_bundle_cache: dict[tuple[int, ...], dict] = {}
     chan_candidate_grid: list[tuple[int, float]] = []
-    if alignment in {"ea_si_chan_multi_safe", "ea_mm_safe"}:
+    if alignment in {"ea_si_chan_multi_safe", "ea_si_chan_spsa_safe", "ea_mm_safe"}:
         ranks = [int(r) for r in (list(si_chan_candidate_ranks) or [int(si_proj_dim)])]
         lambdas = [float(l) for l in (list(si_chan_candidate_lambdas) or [float(si_subject_lambda)])]
         seen: set[tuple[int, float]] = set()
@@ -1870,6 +1877,359 @@ def loso_cross_subject_evaluation(
                         "chan_multi_guard_train_pearson": float(guard_train_pearson),
                     }
                 )
+        elif alignment == "ea_si_chan_spsa_safe":
+            # Semi-coupled bilevel (continuous lower-level, calibrated safe upper-level):
+            #
+            # - Lower-level: channel projector solution map A(λ) for continuous λ (rank-deficient projector),
+            #   solved from precomputed scatter matrices (B,S).
+            # - Upper-level: keep the calibrated ridge/guard selection rule, but optimize λ directly on the
+            #   target subject via SPSA using the *predicted improvement* as the objective (unlabeled).
+            #
+            # This is a "half-linked" variant of the existing multi-candidate selection: instead of a discrete
+            # grid over λ, we search λ continuously.
+            X_test = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+            X_test_raw = X_test
+
+            # For reporting only (n_train) and consistency with other branches.
+            X_train_parts = [subject_data[s].X for s in train_subjects]
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            X_train = np.concatenate(X_train_parts, axis=0)
+            y_train = np.concatenate(y_train_parts, axis=0)
+            subj_train = np.concatenate(
+                [np.full(subject_data[int(s)].y.shape[0], int(s), dtype=int) for s in train_subjects],
+                axis=0,
+            )
+
+            selector = str(oea_zo_selector)
+            if selector not in {"calibrated_ridge", "calibrated_ridge_guard"}:
+                raise ValueError("ea_si_chan_spsa_safe requires --oea-zo-selector calibrated_ridge(_guard).")
+
+            use_ridge = True
+            use_guard = selector == "calibrated_ridge_guard"
+
+            # Anchor model (EA) and discrete candidates (only used for calibration).
+            outer_bundle = _get_chan_bundle(train_subjects)
+            model_id = outer_bundle["model_id"]
+
+            def _row_entropy(p: np.ndarray) -> np.ndarray:
+                p = np.asarray(p, dtype=np.float64)
+                p = np.clip(p, 1e-12, 1.0)
+                p = p / np.sum(p, axis=1, keepdims=True)
+                return -np.sum(p * np.log(p), axis=1)
+
+            def _drift_vec(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
+                p0 = np.asarray(p0, dtype=np.float64)
+                p1 = np.asarray(p1, dtype=np.float64)
+                p0 = np.clip(p0, 1e-12, 1.0)
+                p1 = np.clip(p1, 1e-12, 1.0)
+                p0 = p0 / np.sum(p0, axis=1, keepdims=True)
+                p1 = p1 / np.sum(p1, axis=1, keepdims=True)
+                return np.sum(p0 * (np.log(p0) - np.log(p1)), axis=1)
+
+            def _record_for_candidate(*, p_id: np.ndarray, p_c: np.ndarray) -> dict:
+                p_c = np.asarray(p_c, dtype=np.float64)
+                p_bar = np.mean(np.clip(p_c, 1e-12, 1.0), axis=0)
+                p_bar = p_bar / float(np.sum(p_bar))
+                ent = _row_entropy(p_c)
+                ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
+
+                d = _drift_vec(p_id, p_c)
+                rec = {
+                    "kind": "candidate",
+                    "objective_base": float(np.mean(ent)),
+                    "pen_marginal": 0.0,
+                    "mean_entropy": float(np.mean(ent)),
+                    "entropy_bar": float(ent_bar),
+                    "drift_best": float(np.mean(d)),
+                    "drift_best_std": float(np.std(d)),
+                    "drift_best_q90": float(np.quantile(d, 0.90)),
+                    "drift_best_q95": float(np.quantile(d, 0.95)),
+                    "drift_best_max": float(np.max(d)),
+                    "drift_best_tail_frac": float(np.mean(d > float(oea_zo_drift_delta)))
+                    if float(oea_zo_drift_delta) > 0.0
+                    else 0.0,
+                    "p_bar_full": p_bar.astype(np.float64),
+                    "q_bar": np.zeros_like(p_bar),
+                }
+                # Convenience aliases for selectors that expect `score`/`objective`.
+                rec["objective"] = float(rec["objective_base"])
+                rec["score"] = float(rec["objective_base"])
+                return rec
+
+            # Calibrate ridge/guard on pseudo-target subjects (source-only; per outer fold).
+            cert = None
+            guard = None
+            ridge_train_spearman = float("nan")
+            ridge_train_pearson = float("nan")
+            guard_train_auc = float("nan")
+            guard_train_spearman = float("nan")
+            guard_train_pearson = float("nan")
+
+            rng = np.random.RandomState(int(oea_zo_calib_seed) + int(test_subject) * 997)
+            calib_subjects = list(train_subjects)
+            if int(oea_zo_calib_max_subjects) > 0 and int(oea_zo_calib_max_subjects) < len(calib_subjects):
+                rng.shuffle(calib_subjects)
+                calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
+
+            X_ridge_rows: List[np.ndarray] = []
+            y_ridge_rows: List[float] = []
+            X_guard_rows: List[np.ndarray] = []
+            y_guard_rows: List[int] = []
+            improve_guard_rows: List[float] = []
+            feat_names: tuple[str, ...] | None = None
+
+            for pseudo_t in calib_subjects:
+                inner_train = [s for s in train_subjects if s != pseudo_t]
+                if len(inner_train) < 2:
+                    continue
+                inner_bundle = _get_chan_bundle(inner_train)
+                m_id = inner_bundle["model_id"]
+                cand_inner: dict = dict(inner_bundle.get("candidates", {}))
+                if not cand_inner:
+                    continue
+
+                z_p = subject_data[int(pseudo_t)].X
+                y_p = subject_data[int(pseudo_t)].y
+                p_id = _reorder_proba_columns(m_id.predict_proba(z_p), m_id.classes_, list(class_order))
+                yp_id = np.asarray(m_id.predict(z_p))
+                acc_id = float(accuracy_score(y_p, yp_id))
+
+                for _cand_key, info in cand_inner.items():
+                    A = info["A"]
+                    m_A = info["model"]
+                    z_p_A = apply_spatial_transform(A, z_p)
+                    p_A = _reorder_proba_columns(m_A.predict_proba(z_p_A), m_A.classes_, list(class_order))
+                    yp_A = np.asarray(m_A.predict(z_p_A))
+                    acc_A = float(accuracy_score(y_p, yp_A))
+                    improve = float(acc_A - acc_id)
+
+                    rec = _record_for_candidate(p_id=p_id, p_c=p_A)
+                    rec["cand_rank"] = float(info.get("rank", float("nan")))
+                    rec["cand_lambda"] = float(info.get("lambda", float("nan")))
+                    feats_vec, names = candidate_features_from_record(rec, n_classes=len(class_order), include_pbar=True)
+                    if feat_names is None:
+                        feat_names = names
+
+                    X_ridge_rows.append(feats_vec)
+                    y_ridge_rows.append(float(improve))
+
+                    if use_guard:
+                        X_guard_rows.append(feats_vec)
+                        y_guard_rows.append(1 if improve >= float(oea_zo_calib_guard_margin) else 0)
+                        improve_guard_rows.append(float(improve))
+
+            if X_ridge_rows and feat_names is not None:
+                X_ridge = np.vstack(X_ridge_rows)
+                y_ridge = np.asarray(y_ridge_rows, dtype=np.float64)
+                cert = train_ridge_certificate(
+                    X_ridge,
+                    y_ridge,
+                    feature_names=feat_names,
+                    alpha=float(oea_zo_calib_ridge_alpha),
+                )
+                try:
+                    pred = np.asarray(cert.predict_accuracy(X_ridge), dtype=np.float64).reshape(-1)
+                    if y_ridge.size >= 2:
+                        ridge_train_pearson = float(np.corrcoef(pred, y_ridge)[0, 1])
+                        ridge_train_spearman = float(np.corrcoef(_rankdata(pred), _rankdata(y_ridge))[0, 1])
+                except Exception:
+                    pass
+
+            if use_guard and X_guard_rows and feat_names is not None:
+                X_guard = np.vstack(X_guard_rows)
+                y_guard = np.asarray(y_guard_rows, dtype=int)
+                if len(np.unique(y_guard)) >= 2:
+                    guard = train_logistic_guard(
+                        X_guard,
+                        y_guard,
+                        feature_names=feat_names,
+                        c=float(oea_zo_calib_guard_c),
+                    )
+                    try:
+                        p_train = np.asarray(guard.predict_pos_proba(X_guard), dtype=np.float64).reshape(-1)
+                        improve_train = np.asarray(improve_guard_rows, dtype=np.float64).reshape(-1)
+                        guard_train_auc = float(roc_auc_score(y_guard, p_train))
+                        if improve_train.size == p_train.size and improve_train.size >= 2:
+                            guard_train_pearson = float(np.corrcoef(p_train, improve_train)[0, 1])
+                            guard_train_spearman = float(np.corrcoef(_rankdata(p_train), _rankdata(improve_train))[0, 1])
+                    except Exception:
+                        pass
+
+            # If calibration failed, fall back to EA anchor.
+            if cert is None or (use_guard and guard is None):
+                model = model_id
+                X_test = X_test_raw
+                try:
+                    acc_id_t = float(accuracy_score(y_test, np.asarray(model_id.predict(X_test_raw))))
+                except Exception:
+                    acc_id_t = float("nan")
+                if extra_rows is not None:
+                    extra_rows.append(
+                        {
+                            "subject": int(test_subject),
+                            "chan_spsa_accept": 0,
+                            "chan_spsa_guard_pos": float("nan"),
+                            "chan_spsa_ridge_pred_improve": float("nan"),
+                            "chan_spsa_acc_anchor": float(acc_id_t),
+                            "chan_spsa_acc_selected": float(acc_id_t),
+                            "chan_spsa_improve": 0.0,
+                            "chan_spsa_sel_rank": float(int(si_proj_dim) if int(si_proj_dim) > 0 else float("nan")),
+                            "chan_spsa_sel_lambda": float("nan"),
+                            "chan_spsa_ridge_train_spearman": float(ridge_train_spearman),
+                            "chan_spsa_ridge_train_pearson": float(ridge_train_pearson),
+                            "chan_spsa_guard_train_auc": float(guard_train_auc),
+                            "chan_spsa_guard_train_spearman": float(guard_train_spearman),
+                            "chan_spsa_guard_train_pearson": float(guard_train_pearson),
+                        }
+                    )
+            else:
+                # Precompute scatter for fast re-solving A(λ) and anchor probabilities on target subject.
+                scatter = compute_channel_projector_scatter(
+                    X=X_train,
+                    y=y_train,
+                    subjects=subj_train,
+                    class_order=tuple([str(c) for c in class_order]),
+                    eps=float(oea_eps),
+                    shrinkage=float(oea_shrinkage),
+                )
+                p_id_t = _reorder_proba_columns(
+                    model_id.predict_proba(X_test_raw), model_id.classes_, list(class_order)
+                )
+
+                cont_rank = int(si_proj_dim) if int(si_proj_dim) > 0 else int(X_train.shape[1]) - 1
+                cont_rank = max(1, min(int(X_train.shape[1]) - 1, cont_rank))
+
+                drift_mode = str(oea_zo_drift_mode)
+                drift_gamma = float(oea_zo_drift_gamma)
+                drift_delta = float(oea_zo_drift_delta)
+                thr = float(oea_zo_calib_guard_threshold)
+
+                rng_opt = np.random.RandomState(int(oea_zo_seed) + int(test_subject) * 997)
+                iters = max(1, int(oea_zo_iters))
+                lr = float(oea_zo_lr)
+                mu = max(1e-8, float(oea_zo_mu))
+
+                # Optimize log(λ) for multiplicative stability.
+                phi = float(np.log(max(float(si_subject_lambda), 1e-8)))
+                phi_lo = float(np.log(1e-3))
+                phi_hi = float(np.log(10.0))
+
+                best_pred = -float("inf")
+                best_model: TrainedModel | None = None
+                best_A: np.ndarray | None = None
+                best_rec: dict | None = None
+                best_lam = float("nan")
+
+                def _eval_phi(phi_val: float):
+                    if scatter is None:
+                        return 1.0, False, -float("inf"), float("nan"), float("nan"), None, None, None
+                    lam = float(np.exp(float(np.clip(phi_val, phi_lo, phi_hi))))
+                    A = solve_channel_projector_from_scatter(
+                        scatter,
+                        subject_lambda=float(lam),
+                        ridge=float(si_ridge),
+                        n_components=int(cont_rank),
+                        eps=float(oea_eps),
+                    )
+                    X_train_A = apply_spatial_transform(A, X_train)
+                    m_A = fit_csp_lda(X_train_A, y_train, n_components=n_components)
+                    X_test_A = apply_spatial_transform(A, X_test_raw)
+                    p_A_t = _reorder_proba_columns(
+                        m_A.predict_proba(X_test_A), m_A.classes_, list(class_order)
+                    )
+                    rec = _record_for_candidate(p_id=p_id_t, p_c=p_A_t)
+                    rec["cand_rank"] = float(cont_rank)
+                    rec["cand_lambda"] = float(lam)
+
+                    feats, _names = candidate_features_from_record(rec, n_classes=len(class_order), include_pbar=True)
+                    pred_improve = float(cert.predict_accuracy(feats)[0])
+                    p_pos = float(guard.predict_pos_proba(feats)[0]) if use_guard and guard is not None else 1.0
+                    rec["ridge_pred_improve"] = float(pred_improve)
+                    rec["guard_p_pos"] = float(p_pos)
+
+                    drift = float(rec.get("drift_best", 0.0))
+                    pred_eff = float(pred_improve)
+                    if drift_mode == "hard" and drift_delta > 0.0 and drift > drift_delta:
+                        ok = False
+                    else:
+                        ok = True
+                    if use_guard and p_pos < thr:
+                        ok = False
+                    if drift_mode == "penalty" and drift_gamma > 0.0:
+                        pred_eff = float(pred_eff) - float(drift_gamma) * float(drift)
+
+                    obj = -float(pred_eff)
+                    if not ok:
+                        obj = 1.0
+                    return obj, ok, pred_eff, p_pos, lam, rec, A, m_A
+
+                for _t in range(iters):
+                    u = 1.0 if rng_opt.rand() < 0.5 else -1.0
+                    obj_p, ok_p, pred_p, ppos_p, lam_p, rec_p, A_p, m_p = _eval_phi(phi + mu * u)
+                    obj_m, ok_m, pred_m, ppos_m, lam_m, rec_m, A_m, m_m = _eval_phi(phi - mu * u)
+                    g = float(obj_p - obj_m) / float(2.0 * mu) * float(u)
+                    phi = float(np.clip(phi - lr * g, phi_lo, phi_hi))
+
+                    if ok_p and pred_p > best_pred:
+                        best_pred = float(pred_p)
+                        best_model = m_p
+                        best_A = A_p
+                        best_rec = rec_p
+                        best_lam = float(lam_p)
+                    if ok_m and pred_m > best_pred:
+                        best_pred = float(pred_m)
+                        best_model = m_m
+                        best_A = A_m
+                        best_rec = rec_m
+                        best_lam = float(lam_m)
+
+                # Final accept/fallback decision.
+                accept = best_model is not None and best_A is not None and best_rec is not None and best_pred > 0.0
+                if (
+                    accept
+                    and float(oea_zo_fallback_min_marginal_entropy) > 0.0
+                    and float(best_rec.get("entropy_bar", float("inf"))) < float(oea_zo_fallback_min_marginal_entropy)
+                ):
+                    accept = False
+
+                if accept:
+                    model = best_model
+                    X_test = apply_spatial_transform(best_A, X_test_raw)
+                else:
+                    model = model_id
+                    X_test = X_test_raw
+
+                # Analysis-only: compute true improvement for the selected transform (not used in selection).
+                try:
+                    acc_id_t = float(accuracy_score(y_test, np.asarray(model_id.predict(X_test_raw))))
+                except Exception:
+                    acc_id_t = float("nan")
+                try:
+                    acc_sel_t = float(accuracy_score(y_test, np.asarray(model.predict(X_test))))
+                except Exception:
+                    acc_sel_t = float("nan")
+                improve_t = float(acc_sel_t - acc_id_t) if np.isfinite(acc_sel_t) and np.isfinite(acc_id_t) else float("nan")
+
+                if extra_rows is not None:
+                    extra_rows.append(
+                        {
+                            "subject": int(test_subject),
+                            "chan_spsa_accept": int(bool(accept)),
+                            "chan_spsa_guard_pos": float(best_rec.get("guard_p_pos", float("nan"))) if best_rec else float("nan"),
+                            "chan_spsa_ridge_pred_improve": float(best_rec.get("ridge_pred_improve", float("nan"))) if best_rec else float("nan"),
+                            "chan_spsa_acc_anchor": float(acc_id_t),
+                            "chan_spsa_acc_selected": float(acc_sel_t),
+                            "chan_spsa_improve": float(improve_t),
+                            "chan_spsa_sel_rank": float(cont_rank),
+                            "chan_spsa_sel_lambda": float(best_lam),
+                            "chan_spsa_ridge_train_spearman": float(ridge_train_spearman),
+                            "chan_spsa_ridge_train_pearson": float(ridge_train_pearson),
+                            "chan_spsa_guard_train_auc": float(guard_train_auc),
+                            "chan_spsa_guard_train_spearman": float(guard_train_spearman),
+                            "chan_spsa_guard_train_pearson": float(guard_train_pearson),
+                        }
+                    )
         elif alignment == "ea_mm_safe":
             # Cross-model multi-candidate selection with calibrated selection (ridge/guard)
             # and safe fallback to the EA anchor.

@@ -89,6 +89,7 @@ def parse_args() -> argparse.Namespace:
             "ea-si-chan-csp-lda, "
             "ea-si-chan-safe-csp-lda, "
             "ea-si-chan-multi-safe-csp-lda, "
+            "ea-si-chan-spsa-safe-csp-lda, "
             "raw-zo-csp-lda, raw-zo-ent-csp-lda, raw-zo-im-csp-lda, raw-zo-imr-csp-lda, raw-zo-pce-csp-lda, raw-zo-conf-csp-lda, "
             "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-pce-csp-lda, ea-zo-conf-csp-lda, "
             "ea-zo-imr-csp-lda"
@@ -916,6 +917,23 @@ def main() -> None:
                 f"seed={args.oea_zo_calib_seed}; drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
             )
+        elif method == "ea-si-chan-spsa-safe-csp-lda":
+            alignment = "ea_si_chan_spsa_safe"
+            ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
+            lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
+            method_details[method] = (
+                "EA-SI-CHAN-SPSA-SAFE: continuous λ search (SPSA on log λ) for the SI-CHAN projector on the target "
+                "subject, using a fold-local calibrated ridge/guard to score candidates; fallback to EA when not "
+                "confident/positive. "
+                f"(selector={args.oea_zo_selector}; ranks_grid={ranks_str}, lambdas_grid={lambdas_str}, "
+                f"si_lambda_init={args.si_subject_lambda}, si_ridge={args.si_ridge}; "
+                f"spsa iters={args.oea_zo_iters}, lr={args.oea_zo_lr}, mu={args.oea_zo_mu}, seed={args.oea_zo_seed}; "
+                f"ridge_alpha={args.oea_zo_calib_ridge_alpha}; "
+                f"guard_C={args.oea_zo_calib_guard_c}, guard_thr={args.oea_zo_calib_guard_threshold}, "
+                f"guard_margin={args.oea_zo_calib_guard_margin}, max_subjects={args.oea_zo_calib_max_subjects}, "
+                f"calib_seed={args.oea_zo_calib_seed}; drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+            )
         elif method in {
             "ea-si-zo-csp-lda",
             "ea-si-zo-ent-csp-lda",
@@ -1102,7 +1120,7 @@ def main() -> None:
                 "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
                 "ea-si-csp-lda, ea-si-zo-csp-lda, ea-si-zo-ent-csp-lda, ea-si-zo-im-csp-lda, ea-si-zo-imr-csp-lda, "
                 "ea-si-zo-pce-csp-lda, ea-si-zo-conf-csp-lda, "
-                "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, ea-si-chan-multi-safe-csp-lda, "
+                "ea-si-chan-csp-lda, ea-si-chan-safe-csp-lda, ea-si-chan-multi-safe-csp-lda, ea-si-chan-spsa-safe-csp-lda, "
                 "raw-zo-csp-lda, raw-zo-ent-csp-lda, raw-zo-im-csp-lda, raw-zo-imr-csp-lda, raw-zo-pce-csp-lda, raw-zo-conf-csp-lda, "
                 "ea-zo-csp-lda, ea-zo-ent-csp-lda, ea-zo-im-csp-lda, ea-zo-imr-csp-lda, "
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
@@ -1417,7 +1435,12 @@ def main() -> None:
                 y_parts.append(sd.y)
             X_fit = np.concatenate(X_parts, axis=0)
             y_fit = np.concatenate(y_parts, axis=0)
-        elif method in {"ea-si-chan-csp-lda", "ea-si-chan-safe-csp-lda", "ea-si-chan-multi-safe-csp-lda"}:
+        elif method in {
+            "ea-si-chan-csp-lda",
+            "ea-si-chan-safe-csp-lda",
+            "ea-si-chan-multi-safe-csp-lda",
+            "ea-si-chan-spsa-safe-csp-lda",
+        }:
             # Visualization-only: learn a single channel projector on EA-whitened full data (using true labels),
             # then fit CSP+LDA on the projected signals.
             # Note: SAFE variants perform per-fold selection; this is only a representative visualization.

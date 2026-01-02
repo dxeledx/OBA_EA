@@ -159,6 +159,23 @@ class ChannelProjectorParams:
     n_components: int | None = None
 
 
+@dataclass(frozen=True)
+class ChannelProjectorScatter:
+    """Precomputed scatter matrices for channel-space projector learning.
+
+    This caches the expensive parts that do *not* depend on the regularization
+    hyper-parameters (e.g. subject_lambda, ridge), enabling fast re-solving
+    for different hyper-parameters.
+    """
+
+    B: np.ndarray  # between-class scatter surrogate in channel space (C×C)
+    S: np.ndarray  # subject scatter surrogate in channel space (C×C)
+
+    @property
+    def n_channels(self) -> int:
+        return int(self.B.shape[0])
+
+
 def _fix_vector_signs(V: np.ndarray) -> np.ndarray:
     V = np.asarray(V, dtype=np.float64)
     out = V.copy()
@@ -211,6 +228,51 @@ def learn_subject_invariant_channel_projector(
     """
 
     X = np.asarray(X, dtype=np.float64)
+    if X.ndim != 3:
+        raise ValueError(f"X must be (n_trials,n_channels,n_times); got {X.shape}.")
+    _n_trials, n_channels, _n_times = X.shape
+
+    r = params.n_components
+    if r is None or int(r) <= 0 or int(r) >= int(n_channels):
+        return np.eye(int(n_channels), dtype=np.float64)
+
+    scatter = compute_channel_projector_scatter(
+        X=X,
+        y=y,
+        subjects=subjects,
+        class_order=class_order,
+        eps=float(eps),
+        shrinkage=float(shrinkage),
+    )
+    if scatter is None:
+        return np.eye(int(n_channels), dtype=np.float64)
+
+    return solve_channel_projector_from_scatter(
+        scatter,
+        subject_lambda=float(params.subject_lambda),
+        ridge=float(params.ridge),
+        n_components=int(r),
+        eps=float(eps),
+    )
+
+
+def compute_channel_projector_scatter(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    subjects: np.ndarray,
+    class_order: Sequence[str],
+    eps: float = 1e-10,
+    shrinkage: float = 0.0,
+) -> ChannelProjectorScatter | None:
+    """Compute channel-space scatter matrices (B, S) used by SI-CHAN projector learning.
+
+    This is the expensive part of `learn_subject_invariant_channel_projector` that does not
+    depend on the regularization parameters. It enables re-solving the projector for
+    different `(subject_lambda, ridge, rank)` efficiently.
+    """
+
+    X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y)
     subjects = np.asarray(subjects)
     class_order = [str(c) for c in class_order]
@@ -219,23 +281,13 @@ def learn_subject_invariant_channel_projector(
         raise ValueError(f"X must be (n_trials,n_channels,n_times); got {X.shape}.")
     n_trials, n_channels, _n_times = X.shape
     if int(n_trials) < 2:
-        raise ValueError("Need at least 2 trials to learn a channel projector.")
+        raise ValueError("Need at least 2 trials to compute channel projector scatter.")
     if y.shape[0] != int(n_trials) or subjects.shape[0] != int(n_trials):
         raise ValueError("X/y/subjects length mismatch.")
 
-    if float(params.subject_lambda) < 0.0:
-        raise ValueError("params.subject_lambda must be >= 0.")
-    if float(params.ridge) <= 0.0:
-        raise ValueError("params.ridge must be > 0.")
-
-    r = params.n_components
-    if r is None or int(r) <= 0 or int(r) >= int(n_channels):
-        return np.eye(int(n_channels), dtype=np.float64)
-
     subj_ids = sorted({int(s) for s in subjects.tolist()})
     if len(subj_ids) < 2:
-        # No inter-subject shift to reduce.
-        return np.eye(int(n_channels), dtype=np.float64)
+        return None
 
     # Compute subject-wise class covariances Σ_{s,k}.
     cov_sk: dict[tuple[int, str], tuple[np.ndarray, int]] = {}
@@ -269,7 +321,7 @@ def learn_subject_invariant_channel_projector(
         pi_k[str(c)] = float(denom) / float(n_total)
 
     if len(cov_k) < 2:
-        return np.eye(int(n_channels), dtype=np.float64)
+        return None
 
     # S_w := Σ̄ = Σ_k π_k Σ_k.
     sw = np.zeros((n_channels, n_channels), dtype=np.float64)
@@ -286,14 +338,40 @@ def learn_subject_invariant_channel_projector(
 
     # Subject scatter: S := Σ_{s,k} ω_{s,k} (Σ_{s,k} - Σ_k)^2.
     S = np.zeros((n_channels, n_channels), dtype=np.float64)
-    for (s, c), (cov, n_sc) in cov_sk.items():
+    for (_s, c), (cov, n_sc) in cov_sk.items():
         if c not in cov_k:
             continue
         d = cov - cov_k[c]
         S += (float(n_sc) / float(n_total)) * (d @ d)
     S = 0.5 * (S + S.T)
 
-    C = float(params.subject_lambda) * S + float(params.ridge) * np.eye(n_channels, dtype=np.float64)
+    return ChannelProjectorScatter(B=np.asarray(B, dtype=np.float64), S=np.asarray(S, dtype=np.float64))
+
+
+def solve_channel_projector_from_scatter(
+    scatter: ChannelProjectorScatter,
+    *,
+    subject_lambda: float,
+    ridge: float,
+    n_components: int,
+    eps: float = 1e-10,
+) -> np.ndarray:
+    """Solve for A given precomputed scatter (B,S) and hyper-parameters."""
+
+    if float(subject_lambda) < 0.0:
+        raise ValueError("subject_lambda must be >= 0.")
+    if float(ridge) <= 0.0:
+        raise ValueError("ridge must be > 0.")
+
+    n_channels = int(scatter.n_channels)
+    r = int(n_components)
+    if r <= 0 or r >= int(n_channels):
+        return np.eye(int(n_channels), dtype=np.float64)
+
+    B = np.asarray(scatter.B, dtype=np.float64)
+    S = np.asarray(scatter.S, dtype=np.float64)
+
+    C = float(subject_lambda) * S + float(ridge) * np.eye(n_channels, dtype=np.float64)
     C = 0.5 * (C + C.T)
 
     C_inv_sqrt = _sym_inv_sqrt_spd(C, eps=float(eps))
