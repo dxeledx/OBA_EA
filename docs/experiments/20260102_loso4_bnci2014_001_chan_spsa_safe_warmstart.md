@@ -52,6 +52,8 @@ Outputs：
 - `outputs/20260102/4class/loso4_bnci2014_001_chan_spsa_safe_warmstart/20260102_results.txt`
 - `outputs/20260102/4class/loso4_bnci2014_001_chan_spsa_safe_warmstart/20260102_predictions_all_methods.csv`
 
+备注（可复现性）：该次 run 启动时尚未提交 warm‑start/trust‑region patch，因此 `20260102_results.txt` 中打印的 `Git commit` 仍为旧值；对应代码现已提交到 `da808ab`，复现实验请 checkout `da808ab` 后用同命令重跑。
+
 ---
 
 ## 4) 结果（主表 + 掉点被试）
@@ -86,4 +88,3 @@ Outputs：
 1) **把连续搜索改为“密网格”**（最省事且最稳）：把 `--si-chan-lambdas` 扩展为更密的集合（如 `0.25,0.35,0.5,0.7,1,1.4,2`），让证书训练与选择都在“见过的候选分布”里完成；先追 `neg_transfer_rate≈0` 再追 mean。
 
 2) **证书训练分布对齐连续候选**（更像方法创新，但更耗时）：在 pseudo‑target 校准阶段，为每个 inner fold 额外采样一小批 off‑grid λ（例如在 `[0.25,2]` 内 log‑uniform 采样 5 个），把这些样本也加入 ridge/guard 训练，让证书在连续 λ 上不再外推。
-
