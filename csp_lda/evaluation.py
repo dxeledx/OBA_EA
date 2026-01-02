@@ -3215,9 +3215,12 @@ def loso_cross_subject_evaluation(
             # - ea_zo: the current space is EA-whitened (per-subject).
             # - raw_zo: the current space is the raw (preprocessed) channel space (no whitening).
             class_labels = tuple([str(c) for c in class_order])
-            use_post_ea = str(oea_zo_transform) == "local_mix_then_ea"
+            use_post_ea = str(oea_zo_transform) in {"local_mix_then_ea", "local_affine_then_ea"}
             if use_post_ea and alignment != "ea_zo":
-                raise ValueError("oea_zo_transform='local_mix_then_ea' is only supported with alignment='ea_zo'.")
+                raise ValueError(
+                    "oea_zo_transform in {'local_mix_then_ea','local_affine_then_ea'} "
+                    "is only supported with alignment='ea_zo'."
+                )
 
             X_train_parts = [subject_data[s].X for s in train_subjects]
             y_train_parts = [subject_data[s].y for s in train_subjects]
@@ -4149,9 +4152,12 @@ def cross_session_within_subject_evaluation(
     if float(oea_zo_localmix_self_bias) < 0.0:
         raise ValueError("oea_zo_localmix_self_bias must be >= 0.")
 
-    use_post_ea = str(oea_zo_transform) == "local_mix_then_ea"
+    use_post_ea = str(oea_zo_transform) in {"local_mix_then_ea", "local_affine_then_ea"}
     if use_post_ea and alignment != "ea_zo":
-        raise ValueError("oea_zo_transform='local_mix_then_ea' is only supported with alignment='ea_zo'.")
+        raise ValueError(
+            "oea_zo_transform in {'local_mix_then_ea','local_affine_then_ea'} "
+            "is only supported with alignment='ea_zo'."
+        )
 
     subjects = sorted(subject_session_data.keys())
     if not subjects:

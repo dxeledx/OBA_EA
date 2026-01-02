@@ -611,8 +611,11 @@ def _optimize_qt_oea_zo(
         raise ValueError("bilevel_coverage_power must be >= 0.")
 
     transform = str(transform)
-    if transform not in {"orthogonal", "rot_scale", "local_mix", "local_mix_then_ea"}:
-        raise ValueError("transform must be one of: 'orthogonal', 'rot_scale', 'local_mix', 'local_mix_then_ea'")
+    if transform not in {"orthogonal", "rot_scale", "local_mix", "local_mix_then_ea", "local_affine_then_ea"}:
+        raise ValueError(
+            "transform must be one of: "
+            "'orthogonal', 'rot_scale', 'local_mix', 'local_mix_then_ea', 'local_affine_then_ea'"
+        )
 
     # Optional KL(π || p̄) prior (π fixed during optimization).
     marginal_prior_vec: np.ndarray | None = None
@@ -659,15 +662,21 @@ def _optimize_qt_oea_zo(
     raw_cov: np.ndarray | None = None
     q_anchor_override: np.ndarray | None = None
 
-    if transform in {"local_mix", "local_mix_then_ea"}:
+    if transform in {"local_mix", "local_mix_then_ea", "local_affine_then_ea"}:
         if warm_start != "none":
-            raise ValueError("warm_start must be 'none' when transform is 'local_mix' or 'local_mix_then_ea'.")
+            raise ValueError(
+                "warm_start must be 'none' when transform is "
+                "'local_mix', 'local_mix_then_ea', or 'local_affine_then_ea'."
+            )
         if trust_q0 != "identity":
-            raise ValueError("trust_q0 must be 'identity' when transform is 'local_mix' or 'local_mix_then_ea'.")
+            raise ValueError(
+                "trust_q0 must be 'identity' when transform is "
+                "'local_mix', 'local_mix_then_ea', or 'local_affine_then_ea'."
+            )
         if float(localmix_self_bias) < 0.0:
             raise ValueError("localmix_self_bias must be >= 0.")
 
-        if transform == "local_mix_then_ea":
+        if transform in {"local_mix_then_ea", "local_affine_then_ea"}:
             # Precompute raw covariance for EA-after-A whitening:
             # cov(A X) = A cov(X) Aᵀ, so per candidate we only need an eigendecomposition.
             raw_cov = np.zeros((int(n_channels), int(n_channels)), dtype=np.float64)
@@ -720,11 +729,19 @@ def _optimize_qt_oea_zo(
         best_theta = theta.copy()
         best_obj = float("inf")
 
-        base_logits = []
+        # Initialization close to identity:
+        # - local_mix: softmax over logits with positive self-bias and negative neighbor bias.
+        # - local_affine_then_ea: signed weights with L2-normalization and positive self-bias.
+        base_logits: list[np.ndarray] = []
+        base_weights: list[np.ndarray] = []
         for a in allowed:
-            b = np.full(len(a), -float(localmix_self_bias), dtype=np.float64)
-            b[0] = float(localmix_self_bias)
-            base_logits.append(b)
+            bl = np.full(len(a), -float(localmix_self_bias), dtype=np.float64)
+            bl[0] = float(localmix_self_bias)
+            base_logits.append(bl)
+
+            bw = np.zeros(len(a), dtype=np.float64)
+            bw[0] = float(localmix_self_bias)
+            base_weights.append(bw)
 
         def _softmax(v: np.ndarray) -> np.ndarray:
             v = np.asarray(v, dtype=np.float64)
@@ -742,16 +759,23 @@ def _optimize_qt_oea_zo(
             for i in range(int(n_channels)):
                 start = int(offsets[int(i)])
                 end = int(offsets[int(i) + 1])
-                logits = base_logits[int(i)] + theta_vec[start:end]
-                w = _softmax(logits)
-                A[int(i), np.asarray(allowed[int(i)], dtype=int)] = w
+                if transform in {"local_mix", "local_mix_then_ea"}:
+                    logits = base_logits[int(i)] + theta_vec[start:end]
+                    w = _softmax(logits)
+                    A[int(i), np.asarray(allowed[int(i)], dtype=int)] = w
+                else:
+                    # Signed local linear mixing (row-wise), normalized to unit L2 norm.
+                    w_raw = base_weights[int(i)] + theta_vec[start:end]
+                    denom = float(np.linalg.norm(w_raw)) + 1e-12
+                    w = w_raw / denom
+                    A[int(i), np.asarray(allowed[int(i)], dtype=int)] = w
 
             if float(q_blend) < 1.0:
                 A = (1.0 - float(q_blend)) * np.eye(int(n_channels), dtype=np.float64) + float(q_blend) * A
 
-            if transform == "local_mix_then_ea":
+            if transform in {"local_mix_then_ea", "local_affine_then_ea"}:
                 if raw_cov is None:
-                    raise RuntimeError("raw_cov missing for local_mix_then_ea.")
+                    raise RuntimeError("raw_cov missing for local_mix_then_ea/local_affine_then_ea.")
                 cov_a = A @ raw_cov @ A.T
                 cov_a = 0.5 * (cov_a + cov_a.T)
                 if float(shrinkage) > 0.0:
@@ -786,7 +810,7 @@ def _optimize_qt_oea_zo(
             return feats
         return np.asarray(projector.transform(feats), dtype=np.float64)
 
-    if transform != "local_mix":
+    if transform in {"orthogonal", "rot_scale"}:
         def _build_transform(theta_vec: np.ndarray) -> np.ndarray:
             theta_vec = np.asarray(theta_vec, dtype=np.float64)
             phi_vec = theta_vec[:rot_dim]

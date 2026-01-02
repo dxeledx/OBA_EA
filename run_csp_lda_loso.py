@@ -197,14 +197,15 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--oea-zo-transform",
-        choices=["orthogonal", "rot_scale", "local_mix", "local_mix_then_ea"],
+        choices=["orthogonal", "rot_scale", "local_mix", "local_mix_then_ea", "local_affine_then_ea"],
         default="orthogonal",
         help=(
             "For oea-zo-* methods: channel-space transform family. "
             "'orthogonal' uses Q∈O(C) (pure rotation); "
             "'rot_scale' uses A=diag(exp(s))·Q (rotation + per-channel scaling); "
             "'local_mix' uses a row-stochastic local mixing A (each channel mixes only itself + neighbors); "
-            "'local_mix_then_ea' applies EA whitening *after* the local mixing (A→EA), i.e. Q_eff = EA(A·X)·A."
+            "'local_mix_then_ea' applies EA whitening *after* the local mixing (A→EA), i.e. Q_eff = EA(A·X)·A; "
+            "'local_affine_then_ea' is a signed local linear mixing (neighbor-sparse) followed by EA whitening."
         ),
     )
     p.add_argument(
