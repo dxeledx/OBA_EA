@@ -142,7 +142,24 @@ Outputs：
 
 ---
 
-## 4) Round‑3（扩展，非 CSP+LDA‑only）— 加入跨 family 候选（EA‑MM‑SAFE）
+## 4) Round‑3（改进，仍未达标）— 连续 λ 加入 warm‑start + trust‑region：负迁移显著减少但未清零
+
+> 完整记录：`docs/experiments/20260102_loso4_bnci2014_001_chan_spsa_safe_warmstart.md:1`
+
+动机：上一轮负迁移主要来自“off‑grid 外推”，因此本轮只动下层搜索策略：
+- 在 `{0.5,1,2}` 网格上先选 predicted‑best 做 warm‑start；
+- 把 SPSA 的 λ 搜索限制在网格附近（trust‑region）。
+
+结果（同协议 BNCI2014_001 4‑class LOSO）：
+- `ea-si-chan-spsa-safe-csp-lda` mean acc **0.5440**（+**1.20%** abs vs EA）
+- `neg_transfer_rate_vs_ea = 0.1111`（只剩 **S2** 一例负迁移，但仍无法保证 safety）
+- worst‑subject **0.2326**（仍低于 EA 的 0.2569）
+
+结论：限制外推能“止血”，但连续 λ 仍会诱导证书外推误判（S2：ridge/guard 仍高置信误接受）。若继续沿连续方向，需要把证书训练分布扩展到 off‑grid 候选，或改成“密网格”替代连续搜索。
+
+---
+
+## 5) Round‑4（扩展，非 CSP+LDA‑only）— 加入跨 family 候选（EA‑MM‑SAFE）
 
 > 仅用于补充：`docs/experiments/20251231_loso4_bnci2014_001_ea_chan_mdm_mmsafe.md:1`
 
@@ -150,7 +167,7 @@ Outputs：
 
 ---
 
-## 5) 下一次实验记录模板（从现在开始按这个写）
+## 6) 下一次实验记录模板（从现在开始按这个写）
 
 每次新实验笔记建议固定为四段（对应你要求的“先分析失败→再计划→再执行→再结果”）：
 

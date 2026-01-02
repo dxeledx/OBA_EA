@@ -1276,6 +1276,18 @@ def main() -> None:
             else:
                 row["guard_improve_pearson"] = float("nan")
                 row["guard_improve_spearman"] = float("nan")
+        if "chan_spsa_guard_pos" in df.columns and "chan_spsa_improve" in df.columns:
+            p = df["chan_spsa_guard_pos"].astype(float).to_numpy()
+            imp = df["chan_spsa_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["guard_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["guard_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["guard_improve_pearson"] = float("nan")
+                row["guard_improve_spearman"] = float("nan")
         if "stack_multi_guard_pos" in df.columns and "stack_multi_improve" in df.columns:
             p = df["stack_multi_guard_pos"].astype(float).to_numpy()
             imp = df["stack_multi_improve"].astype(float).to_numpy()
@@ -1303,6 +1315,18 @@ def main() -> None:
         if "chan_multi_ridge_pred_improve" in df.columns and "chan_multi_improve" in df.columns:
             p = df["chan_multi_ridge_pred_improve"].astype(float).to_numpy()
             imp = df["chan_multi_improve"].astype(float).to_numpy()
+            mask = np.isfinite(p) & np.isfinite(imp)
+            if int(np.sum(mask)) >= 2:
+                row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
+                row["cert_improve_spearman"] = float(
+                    np.corrcoef(_rankdata(p[mask]), _rankdata(imp[mask]))[0, 1]
+                )
+            else:
+                row["cert_improve_pearson"] = float("nan")
+                row["cert_improve_spearman"] = float("nan")
+        if "chan_spsa_ridge_pred_improve" in df.columns and "chan_spsa_improve" in df.columns:
+            p = df["chan_spsa_ridge_pred_improve"].astype(float).to_numpy()
+            imp = df["chan_spsa_improve"].astype(float).to_numpy()
             mask = np.isfinite(p) & np.isfinite(imp)
             if int(np.sum(mask)) >= 2:
                 row["cert_improve_pearson"] = float(np.corrcoef(p[mask], imp[mask])[0, 1])
@@ -1340,6 +1364,8 @@ def main() -> None:
             row["accept_rate"] = float(np.mean(df["chan_safe_accept"].astype(float)))
         if "chan_multi_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["chan_multi_accept"].astype(float)))
+        if "chan_spsa_accept" in df.columns:
+            row["accept_rate"] = float(np.mean(df["chan_spsa_accept"].astype(float)))
         if "stack_multi_accept" in df.columns:
             row["accept_rate"] = float(np.mean(df["stack_multi_accept"].astype(float)))
         if "mm_safe_accept" in df.columns:
@@ -1348,6 +1374,8 @@ def main() -> None:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_safe_guard_train_auc"].astype(float)))
         if "chan_multi_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["chan_multi_guard_train_auc"].astype(float)))
+        if "chan_spsa_guard_train_auc" in df.columns:
+            row["guard_train_auc_mean"] = float(np.nanmean(df["chan_spsa_guard_train_auc"].astype(float)))
         if "stack_multi_guard_train_auc" in df.columns:
             row["guard_train_auc_mean"] = float(np.nanmean(df["stack_multi_guard_train_auc"].astype(float)))
         if "mm_safe_guard_train_auc" in df.columns:
@@ -1357,6 +1385,10 @@ def main() -> None:
         if "chan_multi_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(
                 np.nanmean(df["chan_multi_guard_train_spearman"].astype(float))
+            )
+        if "chan_spsa_guard_train_spearman" in df.columns:
+            row["guard_train_spearman_mean"] = float(
+                np.nanmean(df["chan_spsa_guard_train_spearman"].astype(float))
             )
         if "stack_multi_guard_train_spearman" in df.columns:
             row["guard_train_spearman_mean"] = float(

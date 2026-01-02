@@ -2111,9 +2111,28 @@ def loso_cross_subject_evaluation(
                 mu = max(1e-8, float(oea_zo_mu))
 
                 # Optimize log(λ) for multiplicative stability.
+                #
+                # NOTE: In early experiments, an overly wide λ range could produce out-of-distribution
+                # projectors that the calibrated selector (trained on a small λ grid) cannot reliably
+                # score, causing negative transfer. We therefore:
+                #   1) Set a λ trust region based on the configured candidate grid.
+                #   2) Warm-start from the best grid candidate (by predicted improvement) when possible.
+                lambda_grid = [float(l) for l in (list(si_chan_candidate_lambdas) or [float(si_subject_lambda)])]
+                lambda_grid = [l for l in lambda_grid if np.isfinite(l) and l > 0.0]
+                if lambda_grid:
+                    lam_min = float(np.min(np.asarray(lambda_grid, dtype=np.float64)))
+                    lam_max = float(np.max(np.asarray(lambda_grid, dtype=np.float64)))
+                else:
+                    lam_min = 1e-3
+                    lam_max = 10.0
+
                 phi = float(np.log(max(float(si_subject_lambda), 1e-8)))
-                phi_lo = float(np.log(1e-3))
-                phi_hi = float(np.log(10.0))
+                # Allow modest exploration beyond the discrete grid while avoiding extreme extrapolation.
+                phi_lo = float(np.log(max(lam_min / 2.0, 1e-3)))
+                phi_hi = float(np.log(min(lam_max * 2.0, 10.0)))
+                if not np.isfinite(phi_lo) or not np.isfinite(phi_hi) or phi_lo >= phi_hi:
+                    phi_lo = float(np.log(1e-3))
+                    phi_hi = float(np.log(10.0))
 
                 best_pred = -float("inf")
                 best_model: TrainedModel | None = None
@@ -2163,6 +2182,18 @@ def loso_cross_subject_evaluation(
                     if not ok:
                         obj = 1.0
                     return obj, ok, pred_eff, p_pos, lam, rec, A, m_A
+
+                # Evaluate the discrete grid first (so SPSA never does worse than the best grid candidate
+                # under the same calibrated selector).
+                for lam0 in lambda_grid:
+                    obj0, ok0, pred0, _ppos0, lam_eval, rec0, A0, m0 = _eval_phi(float(np.log(float(lam0))))
+                    if ok0 and pred0 > best_pred:
+                        best_pred = float(pred0)
+                        best_model = m0
+                        best_A = A0
+                        best_rec = rec0
+                        best_lam = float(lam_eval)
+                        phi = float(np.log(max(best_lam, 1e-8)))
 
                 for _t in range(iters):
                     u = 1.0 if rng_opt.rand() < 0.5 else -1.0
