@@ -771,7 +771,7 @@ def main() -> None:
             lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
-                "Candidates include EA(anchor), RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
+                "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
                 f"(ranks={ranks_str}, lambdas={lambdas_str}, si_ridge={args.si_ridge}); "
                 f"selector={args.oea_zo_selector} "
                 f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "

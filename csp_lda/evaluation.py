@@ -662,6 +662,32 @@ def loso_cross_subject_evaluation(
         )
         model_ea = fit_csp_lda(X_train_ea, y_train, n_components=n_components)
 
+        # EA-FBCSP view (EA time series + filterbank CSP+LDA).
+        # Keep consistent with the default fbcsp/ea_fbcsp branch in this file.
+        bands = [
+            (8.0, 12.0),
+            (10.0, 14.0),
+            (12.0, 16.0),
+            (14.0, 18.0),
+            (16.0, 20.0),
+            (18.0, 22.0),
+            (20.0, 24.0),
+            (22.0, 26.0),
+            (24.0, 28.0),
+            (26.0, 30.0),
+        ]
+        fb_n_components = max(2, min(4, int(n_components)))
+        model_fbcsp = fit_fbcsp_lda(
+            X_train_ea,
+            y_train,
+            bands=bands,
+            sfreq=float(sfreq),
+            n_components=fb_n_components,
+            filter_order=4,
+            multiclass_strategy="auto",
+            select_k=24,
+        )
+
         # RPA/LEA view.
         X_train_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in key], axis=0)
         model_rpa = fit_csp_lda(X_train_rpa, y_train, n_components=n_components)
@@ -669,6 +695,7 @@ def loso_cross_subject_evaluation(
         bundle: dict = {
             "subjects": key,
             "ea": {"model": model_ea},
+            "fbcsp": {"model": model_fbcsp},
             "rpa": {"model": model_rpa},
             "chan": {"candidates": {}},
         }
@@ -918,6 +945,7 @@ def loso_cross_subject_evaluation(
             # - RPA (LEA-whitened data)
             # - TSA (LEA-whitened + TSA target rotation)
             # - EA-SI-CHAN (rank-deficient channel projectors on EA-whitened data)
+            # - EA-FBCSP (EA-whitened time series + filterbank CSP+LDA)
             if subject_data_rpa is None:
                 raise RuntimeError("ea_stack_multi_safe requires subject_data_rpa.")
 
@@ -1011,8 +1039,31 @@ def loso_cross_subject_evaluation(
                     z_p_ea = subject_data[int(pseudo_t)].X
                     y_p = subject_data[int(pseudo_t)].y
                     m_ea = inner_bundle["ea"]["model"]
+                    m_fbcsp = inner_bundle["fbcsp"]["model"]
                     p_id = _reorder_proba_columns(m_ea.predict_proba(z_p_ea), m_ea.classes_, list(class_labels))
                     acc_id = float(accuracy_score(y_p, np.asarray(m_ea.predict(z_p_ea))))
+
+                    # EA-FBCSP candidate (EA view).
+                    try:
+                        p_fbcsp = _reorder_proba_columns(
+                            m_fbcsp.predict_proba(z_p_ea), m_fbcsp.classes_, list(class_labels)
+                        )
+                        acc_fbcsp = float(accuracy_score(y_p, np.asarray(m_fbcsp.predict(z_p_ea))))
+                        improve_fbcsp = float(acc_fbcsp - acc_id)
+                        rec_fbcsp = _record_for_candidate(p_id=p_id, p_c=p_fbcsp)
+                        rec_fbcsp["cand_family"] = "fbcsp"
+                        feats_fbcsp, _ = candidate_features_from_record(
+                            rec_fbcsp, n_classes=len(class_labels), include_pbar=True
+                        )
+                        if use_ridge:
+                            X_ridge_rows.append(feats_fbcsp)
+                            y_ridge_rows.append(improve_fbcsp)
+                        if use_guard:
+                            X_guard_rows.append(feats_fbcsp)
+                            y_guard_rows.append(1 if improve_fbcsp >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows.append(improve_fbcsp)
+                    except Exception:
+                        pass
 
                     # RPA candidate.
                     z_p_rpa = subject_data_rpa[int(pseudo_t)].X
@@ -1021,6 +1072,7 @@ def loso_cross_subject_evaluation(
                     acc_rpa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_rpa))))
                     improve_rpa = float(acc_rpa - acc_id)
                     rec_rpa = _record_for_candidate(p_id=p_id, p_c=p_rpa)
+                    rec_rpa["cand_family"] = "rpa"
                     feats_rpa, names = candidate_features_from_record(rec_rpa, n_classes=len(class_labels), include_pbar=True)
                     if feat_names is None:
                         feat_names = names
@@ -1058,6 +1110,7 @@ def loso_cross_subject_evaluation(
                         acc_tsa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_tsa))))
                         improve_tsa = float(acc_tsa - acc_id)
                         rec_tsa = _record_for_candidate(p_id=p_id, p_c=p_tsa)
+                        rec_tsa["cand_family"] = "tsa"
                         feats_tsa, _ = candidate_features_from_record(
                             rec_tsa, n_classes=len(class_labels), include_pbar=True
                         )
@@ -1081,6 +1134,10 @@ def loso_cross_subject_evaluation(
                         acc_A = float(accuracy_score(y_p, np.asarray(m_A.predict(z_p_A))))
                         improve_A = float(acc_A - acc_id)
                         rec_A = _record_for_candidate(p_id=p_id, p_c=p_A)
+                        rec_A["cand_family"] = "chan"
+                        rec_A["cand_key"] = cand_key
+                        rec_A["cand_rank"] = float(info.get("rank", float("nan")))
+                        rec_A["cand_lambda"] = float(info.get("lambda", float("nan")))
                         feats_A, _ = candidate_features_from_record(
                             rec_A, n_classes=len(class_labels), include_pbar=True
                         )
@@ -1141,6 +1198,18 @@ def loso_cross_subject_evaluation(
             rec_id["kind"] = "identity"
             rec_id["cand_family"] = "ea"
             records: list[dict] = [rec_id]
+
+            # EA-FBCSP candidate.
+            try:
+                model_fbcsp = outer_bundle["fbcsp"]["model"]
+                p_fbcsp_t = _reorder_proba_columns(
+                    model_fbcsp.predict_proba(X_test_ea), model_fbcsp.classes_, list(class_labels)
+                )
+                rec_fbcsp_t = _record_for_candidate(p_id=p_id_t, p_c=p_fbcsp_t)
+                rec_fbcsp_t["cand_family"] = "fbcsp"
+                records.append(rec_fbcsp_t)
+            except Exception:
+                model_fbcsp = None
 
             # RPA candidate.
             p_rpa_t = _reorder_proba_columns(model_rpa.predict_proba(X_test_rpa), model_rpa.classes_, list(class_labels))
@@ -1244,6 +1313,9 @@ def loso_cross_subject_evaluation(
             # Apply the selected candidate.
             if not accept or sel_family == "ea":
                 model = model_ea
+                X_test = X_test_ea
+            elif sel_family == "fbcsp" and model_fbcsp is not None:
+                model = model_fbcsp
                 X_test = X_test_ea
             elif sel_family == "rpa":
                 model = model_rpa
