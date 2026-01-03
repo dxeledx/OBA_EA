@@ -963,8 +963,9 @@ def loso_cross_subject_evaluation(
             X_train = np.empty((0,) + tuple(subject_data[int(train_subjects[0])].X.shape[1:]), dtype=np.float64)
 
             # Per-fold calibration on pseudo-target subjects (source-only).
-            cert = None
-            guard = None
+            # Use *per-family* calibrated models to reduce interference when mixing heterogeneous candidates.
+            cert_by_family: dict[str, RidgeCertificate | None] = {"fbcsp": None, "rpa": None, "tsa": None, "chan": None}
+            guard_by_family: dict[str, LogisticGuard | None] = {"fbcsp": None, "rpa": None, "tsa": None, "chan": None}
             ridge_train_spearman = float("nan")
             ridge_train_pearson = float("nan")
             guard_train_auc = float("nan")
@@ -1022,11 +1023,12 @@ def loso_cross_subject_evaluation(
                     rng.shuffle(calib_subjects)
                     calib_subjects = calib_subjects[: int(oea_zo_calib_max_subjects)]
 
-                X_ridge_rows: List[np.ndarray] = []
-                y_ridge_rows: List[float] = []
-                X_guard_rows: List[np.ndarray] = []
-                y_guard_rows: List[int] = []
-                improve_guard_rows: List[float] = []
+                fams = ("fbcsp", "rpa", "tsa", "chan")
+                X_ridge_rows: dict[str, List[np.ndarray]] = {k: [] for k in fams}
+                y_ridge_rows: dict[str, List[float]] = {k: [] for k in fams}
+                X_guard_rows: dict[str, List[np.ndarray]] = {k: [] for k in fams}
+                y_guard_rows: dict[str, List[int]] = {k: [] for k in fams}
+                improve_guard_rows: dict[str, List[float]] = {k: [] for k in fams}
                 feat_names: tuple[str, ...] | None = None
 
                 for pseudo_t in calib_subjects:
@@ -1056,12 +1058,12 @@ def loso_cross_subject_evaluation(
                             rec_fbcsp, n_classes=len(class_labels), include_pbar=True
                         )
                         if use_ridge:
-                            X_ridge_rows.append(feats_fbcsp)
-                            y_ridge_rows.append(improve_fbcsp)
+                            X_ridge_rows["fbcsp"].append(feats_fbcsp)
+                            y_ridge_rows["fbcsp"].append(improve_fbcsp)
                         if use_guard:
-                            X_guard_rows.append(feats_fbcsp)
-                            y_guard_rows.append(1 if improve_fbcsp >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_fbcsp)
+                            X_guard_rows["fbcsp"].append(feats_fbcsp)
+                            y_guard_rows["fbcsp"].append(1 if improve_fbcsp >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows["fbcsp"].append(improve_fbcsp)
                     except Exception:
                         pass
 
@@ -1077,12 +1079,12 @@ def loso_cross_subject_evaluation(
                     if feat_names is None:
                         feat_names = names
                     if use_ridge:
-                        X_ridge_rows.append(feats_rpa)
-                        y_ridge_rows.append(improve_rpa)
+                        X_ridge_rows["rpa"].append(feats_rpa)
+                        y_ridge_rows["rpa"].append(improve_rpa)
                     if use_guard:
-                        X_guard_rows.append(feats_rpa)
-                        y_guard_rows.append(1 if improve_rpa >= float(oea_zo_calib_guard_margin) else 0)
-                        improve_guard_rows.append(improve_rpa)
+                        X_guard_rows["rpa"].append(feats_rpa)
+                        y_guard_rows["rpa"].append(1 if improve_rpa >= float(oea_zo_calib_guard_margin) else 0)
+                        improve_guard_rows["rpa"].append(improve_rpa)
 
                     # TSA candidate (built on the RPA/LEA view).
                     try:
@@ -1115,12 +1117,12 @@ def loso_cross_subject_evaluation(
                             rec_tsa, n_classes=len(class_labels), include_pbar=True
                         )
                         if use_ridge:
-                            X_ridge_rows.append(feats_tsa)
-                            y_ridge_rows.append(improve_tsa)
+                            X_ridge_rows["tsa"].append(feats_tsa)
+                            y_ridge_rows["tsa"].append(improve_tsa)
                         if use_guard:
-                            X_guard_rows.append(feats_tsa)
-                            y_guard_rows.append(1 if improve_tsa >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_tsa)
+                            X_guard_rows["tsa"].append(feats_tsa)
+                            y_guard_rows["tsa"].append(1 if improve_tsa >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows["tsa"].append(improve_tsa)
                     except Exception:
                         pass
 
@@ -1142,51 +1144,92 @@ def loso_cross_subject_evaluation(
                             rec_A, n_classes=len(class_labels), include_pbar=True
                         )
                         if use_ridge:
-                            X_ridge_rows.append(feats_A)
-                            y_ridge_rows.append(improve_A)
+                            X_ridge_rows["chan"].append(feats_A)
+                            y_ridge_rows["chan"].append(improve_A)
                         if use_guard:
-                            X_guard_rows.append(feats_A)
-                            y_guard_rows.append(1 if improve_A >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_A)
+                            X_guard_rows["chan"].append(feats_A)
+                            y_guard_rows["chan"].append(1 if improve_A >= float(oea_zo_calib_guard_margin) else 0)
+                            improve_guard_rows["chan"].append(improve_A)
 
-                if use_ridge and X_ridge_rows and feat_names is not None:
-                    X_ridge = np.vstack(X_ridge_rows)
-                    y_ridge = np.asarray(y_ridge_rows, dtype=np.float64)
-                    cert = train_ridge_certificate(
-                        X_ridge,
-                        y_ridge,
-                        feature_names=feat_names,
-                        alpha=float(oea_zo_calib_ridge_alpha),
-                    )
-                    try:
-                        pred = np.asarray(cert.predict_accuracy(X_ridge), dtype=np.float64).reshape(-1)
-                        if y_ridge.size >= 2:
-                            ridge_train_pearson = float(np.corrcoef(pred, y_ridge)[0, 1])
-                            ridge_train_spearman = float(np.corrcoef(_rankdata(pred), _rankdata(y_ridge))[0, 1])
-                    except Exception:
-                        pass
+                if use_ridge and feat_names is not None:
+                    for fam in fams:
+                        if not X_ridge_rows[fam]:
+                            continue
+                        X_ridge = np.vstack(X_ridge_rows[fam])
+                        y_ridge = np.asarray(y_ridge_rows[fam], dtype=np.float64)
+                        cert_by_family[fam] = train_ridge_certificate(
+                            X_ridge,
+                            y_ridge,
+                            feature_names=feat_names,
+                            alpha=float(oea_zo_calib_ridge_alpha),
+                        )
 
-                if use_guard and X_guard_rows and feat_names is not None:
-                    X_guard = np.vstack(X_guard_rows)
-                    y_guard = np.asarray(y_guard_rows, dtype=int)
-                    if len(np.unique(y_guard)) >= 2:
-                        guard = train_logistic_guard(
+                if use_guard and feat_names is not None:
+                    for fam in fams:
+                        if not X_guard_rows[fam]:
+                            continue
+                        X_guard = np.vstack(X_guard_rows[fam])
+                        y_guard = np.asarray(y_guard_rows[fam], dtype=int)
+                        if len(np.unique(y_guard)) < 2:
+                            continue
+                        guard_by_family[fam] = train_logistic_guard(
                             X_guard,
                             y_guard,
                             feature_names=feat_names,
                             c=float(oea_zo_calib_guard_c),
                         )
-                        try:
-                            p_train = np.asarray(guard.predict_pos_proba(X_guard), dtype=np.float64).reshape(-1)
-                            improve_train = np.asarray(improve_guard_rows, dtype=np.float64).reshape(-1)
+
+                # Report aggregate certificate/guard effectiveness on the calibration data
+                # using the corresponding per-family models.
+                try:
+                    pred_all = []
+                    y_all = []
+                    for fam in fams:
+                        cert_f = cert_by_family.get(fam, None)
+                        if cert_f is None or not X_ridge_rows[fam]:
+                            continue
+                        X_f = np.vstack(X_ridge_rows[fam])
+                        y_f = np.asarray(y_ridge_rows[fam], dtype=np.float64).reshape(-1)
+                        p_f = np.asarray(cert_f.predict_accuracy(X_f), dtype=np.float64).reshape(-1)
+                        if p_f.size == y_f.size and p_f.size > 0:
+                            pred_all.append(p_f)
+                            y_all.append(y_f)
+                    if pred_all and y_all:
+                        pred = np.concatenate(pred_all, axis=0)
+                        y_r = np.concatenate(y_all, axis=0)
+                        if y_r.size >= 2:
+                            ridge_train_pearson = float(np.corrcoef(pred, y_r)[0, 1])
+                            ridge_train_spearman = float(np.corrcoef(_rankdata(pred), _rankdata(y_r))[0, 1])
+                except Exception:
+                    pass
+
+                try:
+                    ppos_all = []
+                    ybin_all = []
+                    improve_all = []
+                    for fam in fams:
+                        guard_f = guard_by_family.get(fam, None)
+                        if guard_f is None or not X_guard_rows[fam]:
+                            continue
+                        X_f = np.vstack(X_guard_rows[fam])
+                        y_f = np.asarray(y_guard_rows[fam], dtype=int).reshape(-1)
+                        p_f = np.asarray(guard_f.predict_pos_proba(X_f), dtype=np.float64).reshape(-1)
+                        imp_f = np.asarray(improve_guard_rows[fam], dtype=np.float64).reshape(-1)
+                        if p_f.size == y_f.size and p_f.size > 0:
+                            ppos_all.append(p_f)
+                            ybin_all.append(y_f)
+                            improve_all.append(imp_f)
+                    if ppos_all and ybin_all:
+                        p_train = np.concatenate(ppos_all, axis=0)
+                        y_guard = np.concatenate(ybin_all, axis=0)
+                        improve_train = np.concatenate(improve_all, axis=0)
+                        if len(np.unique(y_guard)) >= 2:
                             guard_train_auc = float(roc_auc_score(y_guard, p_train))
-                            if improve_train.size == p_train.size and improve_train.size >= 2:
-                                guard_train_pearson = float(np.corrcoef(p_train, improve_train)[0, 1])
-                                guard_train_spearman = float(
-                                    np.corrcoef(_rankdata(p_train), _rankdata(improve_train))[0, 1]
-                                )
-                        except Exception:
-                            pass
+                        if improve_train.size == p_train.size and improve_train.size >= 2:
+                            guard_train_pearson = float(np.corrcoef(p_train, improve_train)[0, 1])
+                            guard_train_spearman = float(np.corrcoef(_rankdata(p_train), _rankdata(improve_train))[0, 1])
+                except Exception:
+                    pass
 
             # Build target-subject candidate records (unlabeled).
             X_test_ea = subject_data[int(test_subject)].X
@@ -1260,41 +1303,66 @@ def loso_cross_subject_evaluation(
                 rec["cand_lambda"] = float(info.get("lambda", float("nan")))
                 records.append(rec)
 
+            def _select_per_family(records_in: list[dict]) -> dict:
+                identity: dict | None = None
+                best: dict | None = None
+                best_score = -float("inf")
+                best_obj = float("inf")
+                use_pred = selector in {"calibrated_ridge_guard", "calibrated_ridge"}
+                use_guard = selector in {"calibrated_ridge_guard", "calibrated_guard"}
+                for rec in records_in:
+                    if str(rec.get("kind", "")) == "identity":
+                        identity = rec
+                        continue
+                    fam = str(rec.get("cand_family", "")).strip().lower()
+                    cert_f = cert_by_family.get(fam, None)
+                    guard_f = guard_by_family.get(fam, None)
+                    if use_pred and cert_f is None:
+                        continue
+                    if use_guard and guard_f is None:
+                        continue
+
+                    feats, _ = candidate_features_from_record(rec, n_classes=len(class_labels), include_pbar=True)
+                    p_pos = float(guard_f.predict_pos_proba(feats)[0]) if guard_f is not None else float("nan")
+                    pred_improve = float(cert_f.predict_accuracy(feats)[0]) if cert_f is not None else float("nan")
+                    rec["guard_p_pos"] = float(p_pos)
+                    rec["ridge_pred_improve"] = float(pred_improve)
+
+                    if use_guard and p_pos < float(oea_zo_calib_guard_threshold):
+                        continue
+
+                    drift = float(rec.get("drift_best", 0.0))
+                    if str(oea_zo_drift_mode) == "hard" and float(oea_zo_drift_delta) > 0.0 and drift > float(
+                        oea_zo_drift_delta
+                    ):
+                        continue
+                    if use_pred:
+                        score = float(pred_improve)
+                        if str(oea_zo_drift_mode) == "penalty" and float(oea_zo_drift_gamma) > 0.0:
+                            score = float(score) - float(oea_zo_drift_gamma) * float(drift)
+                        if score > best_score:
+                            best_score = float(score)
+                            best = rec
+                    else:
+                        obj = float(rec.get("score", rec.get("objective", rec.get("objective_base", 0.0))))
+                        if str(oea_zo_drift_mode) == "penalty" and float(oea_zo_drift_gamma) > 0.0:
+                            obj = float(obj) + float(oea_zo_drift_gamma) * float(drift)
+                        if obj < best_obj:
+                            best_obj = float(obj)
+                            best = rec
+
+                if best is None:
+                    return identity if identity is not None else records_in[0]
+                if use_pred and best_score <= 0.0:
+                    return identity if identity is not None else records_in[0]
+                return best
+
             selected = rec_id
-            if selector == "calibrated_ridge_guard" and cert is not None and guard is not None:
-                selected = select_by_guarded_predicted_improvement(
-                    records,
-                    cert=cert,
-                    guard=guard,
-                    n_classes=len(class_labels),
-                    threshold=float(oea_zo_calib_guard_threshold),
-                    drift_mode=str(oea_zo_drift_mode),
-                    drift_gamma=float(oea_zo_drift_gamma),
-                    drift_delta=float(oea_zo_drift_delta),
-                )
-            elif selector == "calibrated_ridge" and cert is not None:
-                selected = select_by_predicted_improvement(
-                    records,
-                    cert=cert,
-                    n_classes=len(class_labels),
-                    drift_mode=str(oea_zo_drift_mode),
-                    drift_gamma=float(oea_zo_drift_gamma),
-                    drift_delta=float(oea_zo_drift_delta),
-                    feature_set="base",
-                )
-            elif selector == "calibrated_guard" and guard is not None:
-                selected = select_by_guarded_objective(
-                    records,
-                    guard=guard,
-                    n_classes=len(class_labels),
-                    threshold=float(oea_zo_calib_guard_threshold),
-                    drift_mode=str(oea_zo_drift_mode),
-                    drift_gamma=float(oea_zo_drift_gamma),
-                    drift_delta=float(oea_zo_drift_delta),
-                )
+            if selector in {"calibrated_ridge_guard", "calibrated_ridge", "calibrated_guard"}:
+                # Prefer per-family calibrated selection whenever requested.
+                selected = _select_per_family(records)
             elif selector == "objective":
-                best = min(records, key=lambda r: float(r.get("score", r.get("objective_base", 0.0))))
-                selected = best
+                selected = min(records, key=lambda r: float(r.get("score", r.get("objective_base", 0.0))))
 
             if (
                 float(oea_zo_fallback_min_marginal_entropy) > 0.0
