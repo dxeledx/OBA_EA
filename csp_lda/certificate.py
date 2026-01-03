@@ -834,6 +834,7 @@ def select_by_guarded_predicted_improvement(
     drift_mode: str = "none",
     drift_gamma: float = 0.0,
     drift_delta: float = 0.0,
+    feature_set: str = "base",
 ) -> dict:
     """Guarded selection: reject likely negative-transfer candidates, then pick by ridge prediction.
 
@@ -854,7 +855,10 @@ def select_by_guarded_predicted_improvement(
         if str(rec.get("kind", "")) == "identity":
             identity = rec
 
-        feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        if feature_set == "stacked":
+            feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        else:
+            feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         p_pos = float(guard.predict_pos_proba(feats)[0])
         pred_improve = float(cert.predict_accuracy(feats)[0])
         # Record for diagnostics / analysis.

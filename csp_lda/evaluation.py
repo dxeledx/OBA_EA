@@ -47,6 +47,9 @@ from .certificate import (
 )
 from .metrics import compute_metrics, summarize_results
 from .proba import reorder_proba_columns as _reorder_proba_columns
+from .probes import evidence_nll as _evidence_nll
+from .probes import probe_mixup as _probe_mixup
+from .probes import select_keep_indices as _select_keep_indices
 from .zo import (
     _optimize_qt_oea_zo,
     _select_pseudo_indices,
@@ -129,18 +132,15 @@ def _compute_tsa_target_rotation(
 
     return q_t
 
-def _csp_features_from_filters(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
-    """Compute CSP log-power features (same convention as ZO evaluation)."""
+def _features_before_lda(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
+    """Compute features fed into the final LDA step (supports CSP/FBCSP/projected pipelines)."""
 
     X = np.asarray(X, dtype=np.float64)
-    csp = model.csp
-    F = np.asarray(csp.filters_[: int(csp.n_components)], dtype=np.float64)
-
-    use_log = True if (getattr(csp, "log", None) is None) else bool(getattr(csp, "log"))
-    Y = np.einsum("kc,nct->nkt", F, X, optimize=True)
-    power = np.mean(Y * Y, axis=2)
-    power = np.maximum(power, 1e-20)
-    return np.log(power) if use_log else power
+    pipe = model.pipeline
+    if "lda" not in getattr(pipe, "named_steps", {}):
+        raise ValueError("Expected model.pipeline to contain a final 'lda' step.")
+    feats = pipe[:-1].transform(X)
+    return np.asarray(feats, dtype=np.float64)
 
 
 def _compute_lda_evidence_params(
@@ -151,7 +151,7 @@ def _compute_lda_evidence_params(
     class_order: Sequence[str],
     ridge: float = 1e-6,
 ) -> dict:
-    """Build Gaussian-mixture evidence params from CSP+LDA training data.
+    """Build Gaussian-mixture evidence params from *LDA feature space* training data.
 
     Returns a dict with:
     - mu: (K,d) class means in feature space
@@ -162,7 +162,7 @@ def _compute_lda_evidence_params(
     """
 
     class_order = [str(c) for c in class_order]
-    feats = _csp_features_from_filters(model=model, X=X_train)
+    feats = _features_before_lda(model=model, X=X_train)
     y_train = np.asarray(y_train)
     n = int(feats.shape[0])
     if n != int(y_train.shape[0]):
@@ -426,11 +426,12 @@ def loso_cross_subject_evaluation(
         "calibrated_guard",
         "calibrated_ridge_guard",
         "calibrated_stack_ridge",
+        "calibrated_stack_ridge_guard",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'calibrated_stack_ridge_guard', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -951,8 +952,14 @@ def loso_cross_subject_evaluation(
 
             class_labels = tuple([str(c) for c in class_order])
             selector = str(oea_zo_selector)
-            use_ridge = selector in {"calibrated_ridge", "calibrated_ridge_guard", "calibrated_stack_ridge"}
-            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard"}
+            use_stack = selector in {"calibrated_stack_ridge", "calibrated_stack_ridge_guard"}
+            use_ridge = selector in {
+                "calibrated_ridge",
+                "calibrated_ridge_guard",
+                "calibrated_stack_ridge",
+                "calibrated_stack_ridge_guard",
+            }
+            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard", "calibrated_stack_ridge_guard"}
 
             outer_bundle = _get_stack_bundle(train_subjects)
             model_ea = outer_bundle["ea"]["model"]
@@ -986,12 +993,21 @@ def loso_cross_subject_evaluation(
                 p1 = p1 / np.sum(p1, axis=1, keepdims=True)
                 return np.sum(p0 * (np.log(p0) - np.log(p1)), axis=1)
 
-            def _record_for_candidate(*, p_id: np.ndarray, p_c: np.ndarray) -> dict:
+            def _record_for_candidate(
+                *,
+                p_id: np.ndarray,
+                p_c: np.ndarray,
+                feats_c: np.ndarray | None = None,
+                lda_c=None,
+                lda_ev: dict | None = None,
+                seed_local: int = 0,
+            ) -> dict:
                 p_c = np.asarray(p_c, dtype=np.float64)
                 p_bar = np.mean(np.clip(p_c, 1e-12, 1.0), axis=0)
                 p_bar = p_bar / float(np.sum(p_bar))
                 ent = _row_entropy(p_c)
                 ent_bar = float(-np.sum(p_bar * np.log(np.clip(p_bar, 1e-12, 1.0))))
+                mean_conf = float(np.mean(np.max(np.clip(p_c, 1e-12, 1.0), axis=1)))
 
                 d = _drift_vec(p_id, p_c)
                 rec = {
@@ -1000,6 +1016,7 @@ def loso_cross_subject_evaluation(
                     "pen_marginal": 0.0,
                     "mean_entropy": float(np.mean(ent)),
                     "entropy_bar": float(ent_bar),
+                    "mean_confidence": float(mean_conf),
                     "drift_best": float(np.mean(d)),
                     "drift_best_std": float(np.std(d)),
                     "drift_best_q90": float(np.quantile(d, 0.90)),
@@ -1013,6 +1030,89 @@ def loso_cross_subject_evaluation(
                 }
                 rec["objective"] = float(rec["objective_base"])
                 rec["score"] = float(rec["objective_base"])
+
+                if use_stack and feats_c is not None and lda_c is not None:
+                    try:
+                        keep = _select_keep_indices(
+                            p_c,
+                            class_order=class_labels,
+                            pseudo_confidence=float(oea_pseudo_confidence),
+                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                            pseudo_balance=bool(oea_pseudo_balance),
+                        )
+                        rec["n_keep"] = int(keep.size)
+                    except Exception:
+                        rec["n_keep"] = 0
+                    rec["n_best_total"] = int(p_c.shape[0])
+                    rec["n_full_total"] = int(p_c.shape[0])
+
+                    try:
+                        ev = _evidence_nll(
+                            proba=p_c,
+                            feats=np.asarray(feats_c, dtype=np.float64),
+                            lda_evidence=lda_ev,
+                            class_order=class_labels,
+                            pseudo_confidence=float(oea_pseudo_confidence),
+                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                            pseudo_balance=bool(oea_pseudo_balance),
+                            reliable_metric=str(oea_zo_reliable_metric),
+                            reliable_threshold=float(oea_zo_reliable_threshold),
+                            reliable_alpha=float(oea_zo_reliable_alpha),
+                        )
+                        rec["evidence_nll_best"] = float(ev)
+                        rec["evidence_nll_full"] = float(ev)
+                    except Exception:
+                        rec["evidence_nll_best"] = float("nan")
+                        rec["evidence_nll_full"] = float("nan")
+
+                    try:
+                        pm, pm_stats = _probe_mixup(
+                            proba=p_c,
+                            feats=np.asarray(feats_c, dtype=np.float64),
+                            lda=lda_c,
+                            class_order=class_labels,
+                            seed_local=int(seed_local),
+                            pseudo_confidence=float(oea_pseudo_confidence),
+                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                            pseudo_balance=bool(oea_pseudo_balance),
+                        )
+                        rec["probe_mixup_best"] = float(pm)
+                        rec["probe_mixup_full"] = float(pm)
+                        rec["probe_mixup_pairs_best"] = int(pm_stats.n_pairs)
+                        rec["probe_mixup_pairs_full"] = int(pm_stats.n_pairs)
+                        rec["probe_mixup_keep_best"] = int(pm_stats.n_keep)
+                        rec["probe_mixup_keep_full"] = int(pm_stats.n_keep)
+                        rec["probe_mixup_frac_intra_best"] = float(pm_stats.frac_intra)
+                        rec["probe_mixup_frac_intra_full"] = float(pm_stats.frac_intra)
+                    except Exception:
+                        rec["probe_mixup_best"] = float("nan")
+                        rec["probe_mixup_full"] = float("nan")
+
+                    try:
+                        pmh, pmh_stats = _probe_mixup(
+                            proba=p_c,
+                            feats=np.asarray(feats_c, dtype=np.float64),
+                            lda=lda_c,
+                            class_order=class_labels,
+                            seed_local=int(seed_local),
+                            pseudo_confidence=float(oea_pseudo_confidence),
+                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                            pseudo_balance=bool(oea_pseudo_balance),
+                            mode="hard_major",
+                            beta_alpha=0.4,
+                        )
+                        rec["probe_mixup_hard_best"] = float(pmh)
+                        rec["probe_mixup_hard_full"] = float(pmh)
+                        rec["probe_mixup_hard_pairs_best"] = int(pmh_stats.n_pairs)
+                        rec["probe_mixup_hard_pairs_full"] = int(pmh_stats.n_pairs)
+                        rec["probe_mixup_hard_keep_best"] = int(pmh_stats.n_keep)
+                        rec["probe_mixup_hard_keep_full"] = int(pmh_stats.n_keep)
+                        rec["probe_mixup_hard_frac_intra_best"] = float(pmh_stats.frac_intra)
+                        rec["probe_mixup_hard_frac_intra_full"] = float(pmh_stats.frac_intra)
+                    except Exception:
+                        rec["probe_mixup_hard_best"] = float("nan")
+                        rec["probe_mixup_hard_full"] = float("nan")
+
                 return rec
 
             if use_ridge or use_guard:
@@ -1034,12 +1134,53 @@ def loso_cross_subject_evaluation(
                     if len(inner_train) < 2:
                         continue
                     inner_bundle = _get_stack_bundle(inner_train)
+                    seed_pseudo_base = int(oea_zo_calib_seed) + int(test_subject) * 997 + int(pseudo_t) * 10007
+
+                    z_tr_ea_inner = np.concatenate([subject_data[int(s)].X for s in inner_train], axis=0)
+                    y_tr_inner = np.concatenate([subject_data[int(s)].y for s in inner_train], axis=0)
+                    z_tr_rpa_inner = np.concatenate([subject_data_rpa[int(s)].X for s in inner_train], axis=0)
 
                     # Anchor (EA) predictions on the pseudo-target.
                     z_p_ea = subject_data[int(pseudo_t)].X
                     y_p = subject_data[int(pseudo_t)].y
                     m_ea = inner_bundle["ea"]["model"]
                     m_fbcsp = inner_bundle["fbcsp"]["model"]
+                    m_rpa = inner_bundle["rpa"]["model"]
+
+                    ev_ea_inner = None
+                    ev_rpa_inner = None
+                    ev_fbcsp_inner = None
+                    if use_stack:
+                        try:
+                            ev_ea_inner = _compute_lda_evidence_params(
+                                model=m_ea,
+                                X_train=z_tr_ea_inner,
+                                y_train=y_tr_inner,
+                                class_order=class_labels,
+                                ridge=float(si_ridge),
+                            )
+                        except Exception:
+                            ev_ea_inner = None
+                        try:
+                            ev_fbcsp_inner = _compute_lda_evidence_params(
+                                model=m_fbcsp,
+                                X_train=z_tr_ea_inner,
+                                y_train=y_tr_inner,
+                                class_order=class_labels,
+                                ridge=float(si_ridge),
+                            )
+                        except Exception:
+                            ev_fbcsp_inner = None
+                        try:
+                            ev_rpa_inner = _compute_lda_evidence_params(
+                                model=m_rpa,
+                                X_train=z_tr_rpa_inner,
+                                y_train=y_tr_inner,
+                                class_order=class_labels,
+                                ridge=float(si_ridge),
+                            )
+                        except Exception:
+                            ev_rpa_inner = None
                     p_id = _reorder_proba_columns(m_ea.predict_proba(z_p_ea), m_ea.classes_, list(class_labels))
                     acc_id = float(accuracy_score(y_p, np.asarray(m_ea.predict(z_p_ea))))
 
@@ -1050,11 +1191,26 @@ def loso_cross_subject_evaluation(
                         )
                         acc_fbcsp = float(accuracy_score(y_p, np.asarray(m_fbcsp.predict(z_p_ea))))
                         improve_fbcsp = float(acc_fbcsp - acc_id)
-                        rec_fbcsp = _record_for_candidate(p_id=p_id, p_c=p_fbcsp)
-                        rec_fbcsp["cand_family"] = "fbcsp"
-                        feats_fbcsp, _ = candidate_features_from_record(
-                            rec_fbcsp, n_classes=len(class_labels), include_pbar=True
+                        feats_fbcsp_c = _features_before_lda(model=m_fbcsp, X=z_p_ea) if use_stack else None
+                        rec_fbcsp = _record_for_candidate(
+                            p_id=p_id,
+                            p_c=p_fbcsp,
+                            feats_c=feats_fbcsp_c,
+                            lda_c=(m_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
+                            lda_ev=ev_fbcsp_inner,
+                            seed_local=seed_pseudo_base + 11,
                         )
+                        rec_fbcsp["cand_family"] = "fbcsp"
+                        if use_stack:
+                            feats_fbcsp, names = stacked_candidate_features_from_record(
+                                rec_fbcsp, n_classes=len(class_labels), include_pbar=True
+                            )
+                        else:
+                            feats_fbcsp, names = candidate_features_from_record(
+                                rec_fbcsp, n_classes=len(class_labels), include_pbar=True
+                            )
+                        if feat_names is None:
+                            feat_names = names
                         if use_ridge:
                             X_ridge_rows.append(feats_fbcsp)
                             y_ridge_rows.append(improve_fbcsp)
@@ -1067,13 +1223,27 @@ def loso_cross_subject_evaluation(
 
                     # RPA candidate.
                     z_p_rpa = subject_data_rpa[int(pseudo_t)].X
-                    m_rpa = inner_bundle["rpa"]["model"]
                     p_rpa = _reorder_proba_columns(m_rpa.predict_proba(z_p_rpa), m_rpa.classes_, list(class_labels))
                     acc_rpa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_rpa))))
                     improve_rpa = float(acc_rpa - acc_id)
-                    rec_rpa = _record_for_candidate(p_id=p_id, p_c=p_rpa)
+                    feats_rpa_c = _features_before_lda(model=m_rpa, X=z_p_rpa) if use_stack else None
+                    rec_rpa = _record_for_candidate(
+                        p_id=p_id,
+                        p_c=p_rpa,
+                        feats_c=feats_rpa_c,
+                        lda_c=(m_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                        lda_ev=ev_rpa_inner,
+                        seed_local=seed_pseudo_base + 22,
+                    )
                     rec_rpa["cand_family"] = "rpa"
-                    feats_rpa, names = candidate_features_from_record(rec_rpa, n_classes=len(class_labels), include_pbar=True)
+                    if use_stack:
+                        feats_rpa, names = stacked_candidate_features_from_record(
+                            rec_rpa, n_classes=len(class_labels), include_pbar=True
+                        )
+                    else:
+                        feats_rpa, names = candidate_features_from_record(
+                            rec_rpa, n_classes=len(class_labels), include_pbar=True
+                        )
                     if feat_names is None:
                         feat_names = names
                     if use_ridge:
@@ -1086,11 +1256,9 @@ def loso_cross_subject_evaluation(
 
                     # TSA candidate (built on the RPA/LEA view).
                     try:
-                        z_tr_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in inner_train], axis=0)
-                        y_tr = np.concatenate([subject_data[int(s)].y for s in inner_train], axis=0)
                         q_tsa = _compute_tsa_target_rotation(
-                            z_train=z_tr_rpa,
-                            y_train=y_tr,
+                            z_train=z_tr_rpa_inner,
+                            y_train=y_tr_inner,
                             z_target=z_p_rpa,
                             model=m_rpa,
                             class_order=class_labels,
@@ -1109,11 +1277,26 @@ def loso_cross_subject_evaluation(
                         )
                         acc_tsa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_tsa))))
                         improve_tsa = float(acc_tsa - acc_id)
-                        rec_tsa = _record_for_candidate(p_id=p_id, p_c=p_tsa)
-                        rec_tsa["cand_family"] = "tsa"
-                        feats_tsa, _ = candidate_features_from_record(
-                            rec_tsa, n_classes=len(class_labels), include_pbar=True
+                        feats_tsa_c = _features_before_lda(model=m_rpa, X=z_p_tsa) if use_stack else None
+                        rec_tsa = _record_for_candidate(
+                            p_id=p_id,
+                            p_c=p_tsa,
+                            feats_c=feats_tsa_c,
+                            lda_c=(m_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                            lda_ev=ev_rpa_inner,
+                            seed_local=seed_pseudo_base + 33,
                         )
+                        rec_tsa["cand_family"] = "tsa"
+                        if use_stack:
+                            feats_tsa, names = stacked_candidate_features_from_record(
+                                rec_tsa, n_classes=len(class_labels), include_pbar=True
+                            )
+                        else:
+                            feats_tsa, names = candidate_features_from_record(
+                                rec_tsa, n_classes=len(class_labels), include_pbar=True
+                            )
+                        if feat_names is None:
+                            feat_names = names
                         if use_ridge:
                             X_ridge_rows.append(feats_tsa)
                             y_ridge_rows.append(improve_tsa)
@@ -1133,14 +1316,46 @@ def loso_cross_subject_evaluation(
                         p_A = _reorder_proba_columns(m_A.predict_proba(z_p_A), m_A.classes_, list(class_labels))
                         acc_A = float(accuracy_score(y_p, np.asarray(m_A.predict(z_p_A))))
                         improve_A = float(acc_A - acc_id)
-                        rec_A = _record_for_candidate(p_id=p_id, p_c=p_A)
+                        ev_A_inner = None
+                        if use_stack:
+                            try:
+                                z_tr_A_inner = apply_spatial_transform(A, z_tr_ea_inner)
+                                ev_A_inner = _compute_lda_evidence_params(
+                                    model=m_A,
+                                    X_train=z_tr_A_inner,
+                                    y_train=y_tr_inner,
+                                    class_order=class_labels,
+                                    ridge=float(si_ridge),
+                                )
+                            except Exception:
+                                ev_A_inner = None
+
+                        rank_val = int(info.get("rank", 0))
+                        lam_val = float(info.get("lambda", 0.0))
+                        lam_bin = int(np.round(lam_val * 1000.0))
+                        feats_A_c = _features_before_lda(model=m_A, X=z_p_A) if use_stack else None
+                        rec_A = _record_for_candidate(
+                            p_id=p_id,
+                            p_c=p_A,
+                            feats_c=feats_A_c,
+                            lda_c=(m_A.pipeline.named_steps["lda"] if use_stack else None),
+                            lda_ev=ev_A_inner,
+                            seed_local=seed_pseudo_base + 1000 + 31 * rank_val + lam_bin,
+                        )
                         rec_A["cand_family"] = "chan"
                         rec_A["cand_key"] = cand_key
                         rec_A["cand_rank"] = float(info.get("rank", float("nan")))
                         rec_A["cand_lambda"] = float(info.get("lambda", float("nan")))
-                        feats_A, _ = candidate_features_from_record(
-                            rec_A, n_classes=len(class_labels), include_pbar=True
-                        )
+                        if use_stack:
+                            feats_A, names = stacked_candidate_features_from_record(
+                                rec_A, n_classes=len(class_labels), include_pbar=True
+                            )
+                        else:
+                            feats_A, names = candidate_features_from_record(
+                                rec_A, n_classes=len(class_labels), include_pbar=True
+                            )
+                        if feat_names is None:
+                            feat_names = names
                         if use_ridge:
                             X_ridge_rows.append(feats_A)
                             y_ridge_rows.append(improve_A)
@@ -1193,8 +1408,45 @@ def loso_cross_subject_evaluation(
             y_test = subject_data[int(test_subject)].y
             X_test_rpa = subject_data_rpa[int(test_subject)].X
 
+            z_tr_ea_outer = np.concatenate([subject_data[int(s)].X for s in train_subjects], axis=0)
+            y_tr_outer = np.concatenate([subject_data[int(s)].y for s in train_subjects], axis=0)
+            z_tr_rpa_outer = np.concatenate([subject_data_rpa[int(s)].X for s in train_subjects], axis=0)
+
+            ev_ea_outer = None
+            ev_rpa_outer = None
+            ev_fbcsp_outer = None
+            if use_stack:
+                try:
+                    ev_ea_outer = _compute_lda_evidence_params(
+                        model=model_ea,
+                        X_train=z_tr_ea_outer,
+                        y_train=y_tr_outer,
+                        class_order=class_labels,
+                        ridge=float(si_ridge),
+                    )
+                except Exception:
+                    ev_ea_outer = None
+                try:
+                    ev_rpa_outer = _compute_lda_evidence_params(
+                        model=model_rpa,
+                        X_train=z_tr_rpa_outer,
+                        y_train=y_tr_outer,
+                        class_order=class_labels,
+                        ridge=float(si_ridge),
+                    )
+                except Exception:
+                    ev_rpa_outer = None
+
             p_id_t = _reorder_proba_columns(model_ea.predict_proba(X_test_ea), model_ea.classes_, list(class_labels))
-            rec_id = _record_for_candidate(p_id=p_id_t, p_c=p_id_t)
+            feats_id_t = _features_before_lda(model=model_ea, X=X_test_ea) if use_stack else None
+            rec_id = _record_for_candidate(
+                p_id=p_id_t,
+                p_c=p_id_t,
+                feats_c=feats_id_t,
+                lda_c=(model_ea.pipeline.named_steps["lda"] if use_stack else None),
+                lda_ev=ev_ea_outer,
+                seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 1,
+            )
             rec_id["kind"] = "identity"
             rec_id["cand_family"] = "ea"
             records: list[dict] = [rec_id]
@@ -1202,10 +1454,29 @@ def loso_cross_subject_evaluation(
             # EA-FBCSP candidate.
             try:
                 model_fbcsp = outer_bundle["fbcsp"]["model"]
+                if use_stack and ev_fbcsp_outer is None:
+                    try:
+                        ev_fbcsp_outer = _compute_lda_evidence_params(
+                            model=model_fbcsp,
+                            X_train=z_tr_ea_outer,
+                            y_train=y_tr_outer,
+                            class_order=class_labels,
+                            ridge=float(si_ridge),
+                        )
+                    except Exception:
+                        ev_fbcsp_outer = None
                 p_fbcsp_t = _reorder_proba_columns(
                     model_fbcsp.predict_proba(X_test_ea), model_fbcsp.classes_, list(class_labels)
                 )
-                rec_fbcsp_t = _record_for_candidate(p_id=p_id_t, p_c=p_fbcsp_t)
+                feats_fbcsp_t = _features_before_lda(model=model_fbcsp, X=X_test_ea) if use_stack else None
+                rec_fbcsp_t = _record_for_candidate(
+                    p_id=p_id_t,
+                    p_c=p_fbcsp_t,
+                    feats_c=feats_fbcsp_t,
+                    lda_c=(model_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
+                    lda_ev=ev_fbcsp_outer,
+                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 2,
+                )
                 rec_fbcsp_t["cand_family"] = "fbcsp"
                 records.append(rec_fbcsp_t)
             except Exception:
@@ -1213,17 +1484,23 @@ def loso_cross_subject_evaluation(
 
             # RPA candidate.
             p_rpa_t = _reorder_proba_columns(model_rpa.predict_proba(X_test_rpa), model_rpa.classes_, list(class_labels))
-            rec_rpa_t = _record_for_candidate(p_id=p_id_t, p_c=p_rpa_t)
+            feats_rpa_t = _features_before_lda(model=model_rpa, X=X_test_rpa) if use_stack else None
+            rec_rpa_t = _record_for_candidate(
+                p_id=p_id_t,
+                p_c=p_rpa_t,
+                feats_c=feats_rpa_t,
+                lda_c=(model_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                lda_ev=ev_rpa_outer,
+                seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 3,
+            )
             rec_rpa_t["cand_family"] = "rpa"
             records.append(rec_rpa_t)
 
             # TSA candidate.
             try:
-                z_tr_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in train_subjects], axis=0)
-                y_tr = np.concatenate([subject_data[int(s)].y for s in train_subjects], axis=0)
                 q_tsa = _compute_tsa_target_rotation(
-                    z_train=z_tr_rpa,
-                    y_train=y_tr,
+                    z_train=z_tr_rpa_outer,
+                    y_train=y_tr_outer,
                     z_target=X_test_rpa,
                     model=model_rpa,
                     class_order=class_labels,
@@ -1240,7 +1517,15 @@ def loso_cross_subject_evaluation(
                 p_tsa_t = _reorder_proba_columns(
                     model_rpa.predict_proba(X_test_tsa), model_rpa.classes_, list(class_labels)
                 )
-                rec_tsa_t = _record_for_candidate(p_id=p_id_t, p_c=p_tsa_t)
+                feats_tsa_t = _features_before_lda(model=model_rpa, X=X_test_tsa) if use_stack else None
+                rec_tsa_t = _record_for_candidate(
+                    p_id=p_id_t,
+                    p_c=p_tsa_t,
+                    feats_c=feats_tsa_t,
+                    lda_c=(model_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                    lda_ev=ev_rpa_outer,
+                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 4,
+                )
                 rec_tsa_t["cand_family"] = "tsa"
                 rec_tsa_t["tsa_q_blend"] = float(oea_q_blend)
                 records.append(rec_tsa_t)
@@ -1248,12 +1533,42 @@ def loso_cross_subject_evaluation(
                 X_test_tsa = None
 
             # Channel projector candidates.
+            ev_chan_outer: dict = {}
             for cand_key, info in chan_outer.items():
                 A = info["A"]
                 m_A = info["model"]
                 X_test_A = apply_spatial_transform(A, X_test_ea)
                 p_A_t = _reorder_proba_columns(m_A.predict_proba(X_test_A), m_A.classes_, list(class_labels))
-                rec = _record_for_candidate(p_id=p_id_t, p_c=p_A_t)
+                ev_A_outer = None
+                if use_stack:
+                    if cand_key in ev_chan_outer:
+                        ev_A_outer = ev_chan_outer[cand_key]
+                    else:
+                        try:
+                            z_tr_A_outer = apply_spatial_transform(A, z_tr_ea_outer)
+                            ev_A_outer = _compute_lda_evidence_params(
+                                model=m_A,
+                                X_train=z_tr_A_outer,
+                                y_train=y_tr_outer,
+                                class_order=class_labels,
+                                ridge=float(si_ridge),
+                            )
+                        except Exception:
+                            ev_A_outer = None
+                        ev_chan_outer[cand_key] = ev_A_outer
+
+                rank_val = int(info.get("rank", 0))
+                lam_val = float(info.get("lambda", 0.0))
+                lam_bin = int(np.round(lam_val * 1000.0))
+                feats_A_t = _features_before_lda(model=m_A, X=X_test_A) if use_stack else None
+                rec = _record_for_candidate(
+                    p_id=p_id_t,
+                    p_c=p_A_t,
+                    feats_c=feats_A_t,
+                    lda_c=(m_A.pipeline.named_steps["lda"] if use_stack else None),
+                    lda_ev=ev_A_outer,
+                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 1000 + 31 * rank_val + lam_bin,
+                )
                 rec["cand_family"] = "chan"
                 rec["cand_key"] = cand_key
                 rec["cand_rank"] = float(info.get("rank", float("nan")))
@@ -1261,7 +1576,7 @@ def loso_cross_subject_evaluation(
                 records.append(rec)
 
             selected = rec_id
-            if selector == "calibrated_ridge_guard" and cert is not None and guard is not None:
+            if selector == "calibrated_stack_ridge_guard" and cert is not None and guard is not None:
                 selected = select_by_guarded_predicted_improvement(
                     records,
                     cert=cert,
@@ -1271,6 +1586,28 @@ def loso_cross_subject_evaluation(
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
+                    feature_set="stacked",
+                )
+            elif selector == "calibrated_ridge_guard" and cert is not None and guard is not None:
+                selected = select_by_guarded_predicted_improvement(
+                    records,
+                    cert=cert,
+                    guard=guard,
+                    n_classes=len(class_labels),
+                    threshold=float(oea_zo_calib_guard_threshold),
+                    drift_mode=str(oea_zo_drift_mode),
+                    drift_gamma=float(oea_zo_drift_gamma),
+                    drift_delta=float(oea_zo_drift_delta),
+                )
+            elif selector == "calibrated_stack_ridge" and cert is not None:
+                selected = select_by_predicted_improvement(
+                    records,
+                    cert=cert,
+                    n_classes=len(class_labels),
+                    drift_mode=str(oea_zo_drift_mode),
+                    drift_gamma=float(oea_zo_drift_gamma),
+                    drift_delta=float(oea_zo_drift_delta),
+                    feature_set="stacked",
                 )
             elif selector == "calibrated_ridge" and cert is not None:
                 selected = select_by_predicted_improvement(
