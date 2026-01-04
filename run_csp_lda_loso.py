@@ -518,6 +518,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-calib-per-family",
+        action="store_true",
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: train separate calibrated ridge/guard models per candidate family "
+            "(e.g., fbcsp/rpa/tsa/chan) on pseudo-target subjects, and use the family-specific models for selection "
+            "when available (falls back to the global model otherwise)."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -841,6 +850,7 @@ def main() -> None:
                 tsa_gate_str += f", tsa_min_pred={float(args.stack_safe_tsa_min_pred_improve)}"
             if float(args.stack_safe_tsa_drift_delta) > 0.0:
                 tsa_gate_str += f", tsa_drift_delta={float(args.stack_safe_tsa_drift_delta)}"
+            per_family_str = ", per_family_calib=1" if bool(args.stack_calib_per_family) else ""
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -850,7 +860,7 @@ def main() -> None:
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
                 f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}{tsa_gate_str}; "
-                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str})."
             )
         elif method == "ea-mm-safe":
             alignment = "ea_mm_safe"
@@ -1275,6 +1285,7 @@ def main() -> None:
                 stack_safe_tsa_guard_threshold=float(args.stack_safe_tsa_guard_threshold),
                 stack_safe_tsa_min_pred_improve=float(args.stack_safe_tsa_min_pred_improve),
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
+                stack_calib_per_family=bool(args.stack_calib_per_family),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),

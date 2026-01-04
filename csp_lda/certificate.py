@@ -829,6 +829,9 @@ def select_by_guarded_predicted_improvement(
     *,
     cert: RidgeCertificate,
     guard: LogisticGuard,
+    cert_by_family: dict[str, RidgeCertificate] | None = None,
+    guard_by_family: dict[str, LogisticGuard] | None = None,
+    family_key: str = "cand_family",
     n_classes: int,
     threshold: float = 0.5,
     drift_mode: str = "none",
@@ -855,12 +858,20 @@ def select_by_guarded_predicted_improvement(
         if str(rec.get("kind", "")) == "identity":
             identity = rec
 
+        fam = str(rec.get(family_key, "")).strip().lower()
+        cert_eff = cert_by_family.get(fam) if (cert_by_family is not None) else None
+        guard_eff = guard_by_family.get(fam) if (guard_by_family is not None) else None
+        if cert_eff is None:
+            cert_eff = cert
+        if guard_eff is None:
+            guard_eff = guard
+
         if feature_set == "stacked":
             feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         else:
             feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
-        p_pos = float(guard.predict_pos_proba(feats)[0])
-        pred_improve = float(cert.predict_accuracy(feats)[0])
+        p_pos = float(guard_eff.predict_pos_proba(feats)[0])
+        pred_improve = float(cert_eff.predict_accuracy(feats)[0])
         # Record for diagnostics / analysis.
         rec["guard_p_pos"] = float(p_pos)
         rec["ridge_pred_improve"] = float(pred_improve)

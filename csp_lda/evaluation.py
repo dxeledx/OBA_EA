@@ -298,6 +298,7 @@ def loso_cross_subject_evaluation(
     stack_safe_tsa_guard_threshold: float = -1.0,
     stack_safe_tsa_min_pred_improve: float = 0.0,
     stack_safe_tsa_drift_delta: float = 0.0,
+    stack_calib_per_family: bool = False,
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -523,6 +524,8 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_tsa_min_pred_improve must be >= 0.")
     if float(stack_safe_tsa_drift_delta) < 0.0:
         raise ValueError("stack_safe_tsa_drift_delta must be >= 0.")
+    if not isinstance(stack_calib_per_family, (bool, np.bool_)):
+        raise ValueError("stack_calib_per_family must be a bool.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -990,6 +993,8 @@ def loso_cross_subject_evaluation(
             # Per-fold calibration on pseudo-target subjects (source-only).
             cert = None
             guard = None
+            cert_by_family: dict[str, RidgeCertificate] = {}
+            guard_by_family: dict[str, LogisticGuard] = {}
             ridge_train_spearman = float("nan")
             ridge_train_pearson = float("nan")
             guard_train_auc = float("nan")
@@ -1145,7 +1150,29 @@ def loso_cross_subject_evaluation(
                 X_guard_rows: List[np.ndarray] = []
                 y_guard_rows: List[int] = []
                 improve_guard_rows: List[float] = []
+                X_ridge_by_family: dict[str, list[np.ndarray]] = {}
+                y_ridge_by_family: dict[str, list[float]] = {}
+                X_guard_by_family: dict[str, list[np.ndarray]] = {}
+                y_guard_by_family: dict[str, list[int]] = {}
                 feat_names: tuple[str, ...] | None = None
+
+                def _add_calib_sample(*, fam: str, feats: np.ndarray, improve: float) -> None:
+                    fam = str(fam).strip().lower() or "unknown"
+                    improve = float(improve)
+                    if use_ridge:
+                        X_ridge_rows.append(feats)
+                        y_ridge_rows.append(improve)
+                        if bool(stack_calib_per_family):
+                            X_ridge_by_family.setdefault(fam, []).append(feats)
+                            y_ridge_by_family.setdefault(fam, []).append(improve)
+                    if use_guard:
+                        yb = 1 if improve >= float(oea_zo_calib_guard_margin) else 0
+                        X_guard_rows.append(feats)
+                        y_guard_rows.append(int(yb))
+                        improve_guard_rows.append(improve)
+                        if bool(stack_calib_per_family):
+                            X_guard_by_family.setdefault(fam, []).append(feats)
+                            y_guard_by_family.setdefault(fam, []).append(int(yb))
 
                 for pseudo_t in calib_subjects:
                     inner_train = [s for s in train_subjects if s != pseudo_t]
@@ -1229,13 +1256,7 @@ def loso_cross_subject_evaluation(
                             )
                         if feat_names is None:
                             feat_names = names
-                        if use_ridge:
-                            X_ridge_rows.append(feats_fbcsp)
-                            y_ridge_rows.append(improve_fbcsp)
-                        if use_guard:
-                            X_guard_rows.append(feats_fbcsp)
-                            y_guard_rows.append(1 if improve_fbcsp >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_fbcsp)
+                        _add_calib_sample(fam="fbcsp", feats=feats_fbcsp, improve=improve_fbcsp)
                     except Exception:
                         pass
 
@@ -1264,13 +1285,7 @@ def loso_cross_subject_evaluation(
                         )
                     if feat_names is None:
                         feat_names = names
-                    if use_ridge:
-                        X_ridge_rows.append(feats_rpa)
-                        y_ridge_rows.append(improve_rpa)
-                    if use_guard:
-                        X_guard_rows.append(feats_rpa)
-                        y_guard_rows.append(1 if improve_rpa >= float(oea_zo_calib_guard_margin) else 0)
-                        improve_guard_rows.append(improve_rpa)
+                    _add_calib_sample(fam="rpa", feats=feats_rpa, improve=improve_rpa)
 
                     # TSA candidate (built on the RPA/LEA view).
                     try:
@@ -1315,13 +1330,7 @@ def loso_cross_subject_evaluation(
                             )
                         if feat_names is None:
                             feat_names = names
-                        if use_ridge:
-                            X_ridge_rows.append(feats_tsa)
-                            y_ridge_rows.append(improve_tsa)
-                        if use_guard:
-                            X_guard_rows.append(feats_tsa)
-                            y_guard_rows.append(1 if improve_tsa >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_tsa)
+                        _add_calib_sample(fam="tsa", feats=feats_tsa, improve=improve_tsa)
                     except Exception:
                         pass
 
@@ -1374,13 +1383,7 @@ def loso_cross_subject_evaluation(
                             )
                         if feat_names is None:
                             feat_names = names
-                        if use_ridge:
-                            X_ridge_rows.append(feats_A)
-                            y_ridge_rows.append(improve_A)
-                        if use_guard:
-                            X_guard_rows.append(feats_A)
-                            y_guard_rows.append(1 if improve_A >= float(oea_zo_calib_guard_margin) else 0)
-                            improve_guard_rows.append(improve_A)
+                        _add_calib_sample(fam="chan", feats=feats_A, improve=improve_A)
 
                 if use_ridge and X_ridge_rows and feat_names is not None:
                     X_ridge = np.vstack(X_ridge_rows)
@@ -1420,6 +1423,45 @@ def loso_cross_subject_evaluation(
                                 )
                         except Exception:
                             pass
+
+                # Optional: per-family calibrated models (fallback to global cert/guard if missing).
+                if bool(stack_calib_per_family) and feat_names is not None:
+                    if use_ridge:
+                        for fam, X_list in X_ridge_by_family.items():
+                            if not X_list:
+                                continue
+                            try:
+                                X_f = np.vstack(X_list)
+                                y_f = np.asarray(y_ridge_by_family.get(fam, []), dtype=np.float64)
+                                if X_f.shape[0] != y_f.shape[0] or X_f.shape[0] < 2:
+                                    continue
+                                cert_by_family[str(fam)] = train_ridge_certificate(
+                                    X_f,
+                                    y_f,
+                                    feature_names=feat_names,
+                                    alpha=float(oea_zo_calib_ridge_alpha),
+                                )
+                            except Exception:
+                                continue
+                    if use_guard:
+                        for fam, X_list in X_guard_by_family.items():
+                            if not X_list:
+                                continue
+                            try:
+                                X_f = np.vstack(X_list)
+                                y_f = np.asarray(y_guard_by_family.get(fam, []), dtype=int)
+                                if X_f.shape[0] != y_f.shape[0] or X_f.shape[0] < 4:
+                                    continue
+                                if np.unique(y_f).size < 2:
+                                    continue
+                                guard_by_family[str(fam)] = train_logistic_guard(
+                                    X_f,
+                                    y_f,
+                                    feature_names=feat_names,
+                                    c=float(oea_zo_calib_guard_c),
+                                )
+                            except Exception:
+                                continue
 
             # Build target-subject candidate records (unlabeled).
             X_test_ea = subject_data[int(test_subject)].X
@@ -1467,6 +1509,9 @@ def loso_cross_subject_evaluation(
             )
             rec_id["kind"] = "identity"
             rec_id["cand_family"] = "ea"
+            if bool(do_diag):
+                y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_id_t, axis=1)], dtype=object)
+                rec_id["accuracy"] = float(accuracy_score(y_test, y_hat))
             records: list[dict] = [rec_id]
 
             # EA-FBCSP candidate.
@@ -1496,6 +1541,9 @@ def loso_cross_subject_evaluation(
                     seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 2,
                 )
                 rec_fbcsp_t["cand_family"] = "fbcsp"
+                if bool(do_diag):
+                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_fbcsp_t, axis=1)], dtype=object)
+                    rec_fbcsp_t["accuracy"] = float(accuracy_score(y_test, y_hat))
                 records.append(rec_fbcsp_t)
             except Exception:
                 model_fbcsp = None
@@ -1512,6 +1560,9 @@ def loso_cross_subject_evaluation(
                 seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 3,
             )
             rec_rpa_t["cand_family"] = "rpa"
+            if bool(do_diag):
+                y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_rpa_t, axis=1)], dtype=object)
+                rec_rpa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
             records.append(rec_rpa_t)
 
             # TSA candidate.
@@ -1546,6 +1597,9 @@ def loso_cross_subject_evaluation(
                 )
                 rec_tsa_t["cand_family"] = "tsa"
                 rec_tsa_t["tsa_q_blend"] = float(oea_q_blend)
+                if bool(do_diag):
+                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_tsa_t, axis=1)], dtype=object)
+                    rec_tsa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
                 records.append(rec_tsa_t)
             except Exception:
                 X_test_tsa = None
@@ -1591,6 +1645,9 @@ def loso_cross_subject_evaluation(
                 rec["cand_key"] = cand_key
                 rec["cand_rank"] = float(info.get("rank", float("nan")))
                 rec["cand_lambda"] = float(info.get("lambda", float("nan")))
+                if bool(do_diag):
+                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_A_t, axis=1)], dtype=object)
+                    rec["accuracy"] = float(accuracy_score(y_test, y_hat))
                 records.append(rec)
 
             selected = rec_id
@@ -1599,6 +1656,8 @@ def loso_cross_subject_evaluation(
                     records,
                     cert=cert,
                     guard=guard,
+                    cert_by_family=(cert_by_family if bool(stack_calib_per_family) else None),
+                    guard_by_family=(guard_by_family if bool(stack_calib_per_family) else None),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     drift_mode=str(oea_zo_drift_mode),
@@ -1611,6 +1670,8 @@ def loso_cross_subject_evaluation(
                     records,
                     cert=cert,
                     guard=guard,
+                    cert_by_family=(cert_by_family if bool(stack_calib_per_family) else None),
+                    guard_by_family=(guard_by_family if bool(stack_calib_per_family) else None),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     drift_mode=str(oea_zo_drift_mode),
@@ -1923,6 +1984,65 @@ def loso_cross_subject_evaluation(
                         "stack_multi_guard_train_pearson": float(guard_train_pearson),
                     }
                 )
+
+            # Candidate-level diagnostics (analysis-only; uses test labels).
+            # Mirrors the EA-ZO diagnostics layout so we can reuse analysis scripts.
+            if bool(do_diag) and diagnostics_dir is not None:
+                diag_dir = (
+                    Path(diagnostics_dir)
+                    / "diagnostics"
+                    / str(diagnostics_tag)
+                    / f"subject_{int(test_subject):02d}"
+                )
+                diag_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    sel_idx = int(records.index(selected))
+                except Exception:
+                    sel_idx = -1
+
+                rows = []
+                for idx, rec in enumerate(records):
+                    row = {
+                        "idx": int(idx),
+                        "is_selected": int(idx == sel_idx),
+                        "kind": str(rec.get("kind", "")),
+                        "cand_family": str(rec.get("cand_family", "")),
+                        "cand_key": str(rec.get("cand_key", "")),
+                        "cand_rank": float(rec.get("cand_rank", float("nan"))),
+                        "cand_lambda": float(rec.get("cand_lambda", float("nan"))),
+                        "objective": float(rec.get("objective", float("nan"))),
+                        "score": float(rec.get("score", float("nan"))),
+                        "objective_base": float(rec.get("objective_base", float("nan"))),
+                        "mean_entropy": float(rec.get("mean_entropy", float("nan"))),
+                        "mean_confidence": float(rec.get("mean_confidence", float("nan"))),
+                        "entropy_bar": float(rec.get("entropy_bar", float("nan"))),
+                        "drift_best": float(rec.get("drift_best", float("nan"))),
+                        "drift_best_std": float(rec.get("drift_best_std", float("nan"))),
+                        "drift_best_q90": float(rec.get("drift_best_q90", float("nan"))),
+                        "drift_best_q95": float(rec.get("drift_best_q95", float("nan"))),
+                        "drift_best_max": float(rec.get("drift_best_max", float("nan"))),
+                        "drift_best_tail_frac": float(rec.get("drift_best_tail_frac", float("nan"))),
+                        "evidence_nll_best": float(rec.get("evidence_nll_best", float("nan"))),
+                        "evidence_nll_full": float(rec.get("evidence_nll_full", float("nan"))),
+                        "probe_mixup_best": float(rec.get("probe_mixup_best", float("nan"))),
+                        "probe_mixup_full": float(rec.get("probe_mixup_full", float("nan"))),
+                        "probe_mixup_hard_best": float(rec.get("probe_mixup_hard_best", float("nan"))),
+                        "probe_mixup_hard_full": float(rec.get("probe_mixup_hard_full", float("nan"))),
+                        "ridge_pred_improve": float(rec.get("ridge_pred_improve", float("nan"))),
+                        "guard_p_pos": float(rec.get("guard_p_pos", float("nan"))),
+                        "accuracy": float(rec.get("accuracy", float("nan"))),
+                    }
+
+                    p_bar = np.asarray(rec.get("p_bar_full", []), dtype=np.float64).reshape(-1)
+                    for k, name in enumerate(class_labels):
+                        row[f"pbar_{name}"] = float(p_bar[k]) if k < p_bar.shape[0] else float("nan")
+                    q_bar = np.asarray(rec.get("q_bar", []), dtype=np.float64).reshape(-1)
+                    for k, name in enumerate(class_labels):
+                        row[f"qbar_{name}"] = float(q_bar[k]) if k < q_bar.shape[0] else float("nan")
+
+                    rows.append(row)
+
+                pd.DataFrame(rows).to_csv(diag_dir / "candidates.csv", index=False)
         elif alignment == "ea_si":
             # Train on EA-whitened data with a subject-invariant feature projector (Route B),
             # then evaluate directly (no test-time Q_t optimization).
