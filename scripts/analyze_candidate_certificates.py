@@ -36,17 +36,38 @@ def _load_method_acc(results_txt: Path, method: str) -> pd.Series:
     m = pat.search(txt)
     if not m:
         raise RuntimeError(f"Method block not found: {method} in {results_txt}")
-    block = m.group(1).strip().splitlines()
-    header = block[0].split()
+    # Robust parsing: the results table may include empty string columns (e.g., *_block_reason),
+    # so whitespace splitting can drop fields and misalign later columns.
+    # We only need `subject` and `accuracy`, which are stable positional columns.
+    lines = m.group(1).strip().splitlines()
+    if not lines:
+        raise RuntimeError(f"Empty method block for {method} in {results_txt}")
+    header = lines[0].split()
+    try:
+        subj_idx = header.index("subject")
+        acc_idx = header.index("accuracy")
+    except ValueError:
+        # Fall back to known layout: subject is col0; accuracy is col3 for our printed tables.
+        subj_idx = 0
+        acc_idx = 3
+
     rows = []
-    for line in block[1:]:
+    for line in lines[1:]:
         line = line.strip()
         if not line:
             continue
-        rows.append(line.split())
-    df = pd.DataFrame(rows, columns=header)
-    df["subject"] = df["subject"].astype(int)
-    df["accuracy"] = df["accuracy"].astype(float)
+        toks = line.split()
+        if len(toks) <= max(subj_idx, acc_idx):
+            continue
+        try:
+            subj = int(toks[subj_idx])
+            acc = float(toks[acc_idx])
+        except Exception:
+            continue
+        rows.append((subj, acc))
+    if not rows:
+        raise RuntimeError(f"Could not parse subject/accuracy rows for {method} in {results_txt}")
+    df = pd.DataFrame(rows, columns=["subject", "accuracy"])
     return df.set_index("subject")["accuracy"]
 
 
