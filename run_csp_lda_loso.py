@@ -462,6 +462,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-safe-fbcsp-guard-threshold",
+        type=float,
+        default=-1.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: additional (family-specific) guard threshold for the FBCSP candidate. "
+            "If set >=0, the effective FBCSP threshold is max(--oea-zo-calib-guard-threshold, this). "
+            "Use this to treat FBCSP as a higher-risk candidate family."
+        ),
+    )
+    p.add_argument(
+        "--stack-safe-fbcsp-min-pred-improve",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: require the FBCSP candidate's ridge-predicted improvement "
+            "to be at least this value before it can be selected (>=0)."
+        ),
+    )
+    p.add_argument(
+        "--stack-safe-fbcsp-drift-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: additional hard drift guard (mean KL(p_anchor||p_fbcsp) <= delta) "
+            "applied only to the FBCSP candidate. 0 disables."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -771,6 +799,13 @@ def main() -> None:
             alignment = "ea_stack_multi_safe"
             ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
             lambdas_str = str(args.si_chan_lambdas).strip() or str(args.si_subject_lambda)
+            fbcsp_gate_str = ""
+            if float(args.stack_safe_fbcsp_guard_threshold) >= 0.0:
+                fbcsp_gate_str += f", fbcsp_guard_thr={float(args.stack_safe_fbcsp_guard_threshold)}"
+            if float(args.stack_safe_fbcsp_min_pred_improve) > 0.0:
+                fbcsp_gate_str += f", fbcsp_min_pred={float(args.stack_safe_fbcsp_min_pred_improve)}"
+            if float(args.stack_safe_fbcsp_drift_delta) > 0.0:
+                fbcsp_gate_str += f", fbcsp_drift_delta={float(args.stack_safe_fbcsp_drift_delta)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -779,7 +814,7 @@ def main() -> None:
                 f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
-                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}; "
+                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy})."
             )
         elif method == "ea-mm-safe":
@@ -1199,6 +1234,9 @@ def main() -> None:
                 mm_safe_mdm_guard_threshold=float(args.mm_safe_mdm_guard_threshold),
                 mm_safe_mdm_min_pred_improve=float(args.mm_safe_mdm_min_pred_improve),
                 mm_safe_mdm_drift_delta=float(args.mm_safe_mdm_drift_delta),
+                stack_safe_fbcsp_guard_threshold=float(args.stack_safe_fbcsp_guard_threshold),
+                stack_safe_fbcsp_min_pred_improve=float(args.stack_safe_fbcsp_min_pred_improve),
+                stack_safe_fbcsp_drift_delta=float(args.stack_safe_fbcsp_drift_delta),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),

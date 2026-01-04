@@ -292,6 +292,9 @@ def loso_cross_subject_evaluation(
     mm_safe_mdm_guard_threshold: float = -1.0,
     mm_safe_mdm_min_pred_improve: float = 0.0,
     mm_safe_mdm_drift_delta: float = 0.0,
+    stack_safe_fbcsp_guard_threshold: float = -1.0,
+    stack_safe_fbcsp_min_pred_improve: float = 0.0,
+    stack_safe_fbcsp_drift_delta: float = 0.0,
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -505,6 +508,12 @@ def loso_cross_subject_evaluation(
         raise ValueError("mm_safe_mdm_min_pred_improve must be >= 0.")
     if float(mm_safe_mdm_drift_delta) < 0.0:
         raise ValueError("mm_safe_mdm_drift_delta must be >= 0.")
+    if float(stack_safe_fbcsp_guard_threshold) >= 0.0 and not (0.0 <= float(stack_safe_fbcsp_guard_threshold) <= 1.0):
+        raise ValueError("stack_safe_fbcsp_guard_threshold must be in [0,1] (or <0 to disable).")
+    if float(stack_safe_fbcsp_min_pred_improve) < 0.0:
+        raise ValueError("stack_safe_fbcsp_min_pred_improve must be >= 0.")
+    if float(stack_safe_fbcsp_drift_delta) < 0.0:
+        raise ValueError("stack_safe_fbcsp_drift_delta must be >= 0.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -1633,6 +1642,94 @@ def loso_cross_subject_evaluation(
                 best = min(records, key=lambda r: float(r.get("score", r.get("objective_base", 0.0))))
                 selected = best
 
+            # Family-specific high-risk gate: treat FBCSP as risky and enforce stricter acceptance rules.
+            pre_family = str(selected.get("cand_family", "ea"))
+            pre_guard_pos = float(selected.get("guard_p_pos", float("nan")))
+            pre_ridge_pred = float(selected.get("ridge_pred_improve", float("nan")))
+            pre_drift = float(selected.get("drift_best", float("nan")))
+            fbcsp_blocked = 0
+            fbcsp_block_reason = ""
+            fbcsp_gate_active = (
+                float(stack_safe_fbcsp_guard_threshold) >= 0.0
+                or float(stack_safe_fbcsp_min_pred_improve) > 0.0
+                or float(stack_safe_fbcsp_drift_delta) > 0.0
+            )
+            if (
+                fbcsp_gate_active
+                and pre_family == "fbcsp"
+                and str(selected.get("kind", "")) != "identity"
+                and selector in {"calibrated_ridge_guard", "calibrated_stack_ridge_guard"}
+            ):
+                base_thr = float(oea_zo_calib_guard_threshold)
+                fbcsp_thr = (
+                    max(base_thr, float(stack_safe_fbcsp_guard_threshold))
+                    if float(stack_safe_fbcsp_guard_threshold) >= 0.0
+                    else base_thr
+                )
+                reasons: list[str] = []
+                if np.isfinite(pre_guard_pos) and float(pre_guard_pos) < float(fbcsp_thr):
+                    reasons.append("guard")
+                if float(stack_safe_fbcsp_min_pred_improve) > 0.0 and (
+                    not np.isfinite(pre_ridge_pred)
+                    or float(pre_ridge_pred) < float(stack_safe_fbcsp_min_pred_improve)
+                ):
+                    reasons.append("min_pred")
+                if float(stack_safe_fbcsp_drift_delta) > 0.0 and (
+                    not np.isfinite(pre_drift) or float(pre_drift) > float(stack_safe_fbcsp_drift_delta)
+                ):
+                    reasons.append("drift")
+
+                if reasons:
+                    fbcsp_blocked = 1
+                    fbcsp_block_reason = ",".join(reasons)
+
+                    # Re-select among the remaining candidates using already-computed ridge/guard scores.
+                    best_alt: dict | None = None
+                    best_alt_score = -float("inf")
+                    for rec in records:
+                        if str(rec.get("kind", "")) == "identity":
+                            continue
+                        p_pos = float(rec.get("guard_p_pos", float("nan")))
+                        if not np.isfinite(p_pos) or float(p_pos) < float(base_thr):
+                            continue
+
+                        fam = str(rec.get("cand_family", ""))
+                        if fam == "fbcsp":
+                            if float(stack_safe_fbcsp_guard_threshold) >= 0.0 and float(p_pos) < float(fbcsp_thr):
+                                continue
+                            pred = float(rec.get("ridge_pred_improve", float("nan")))
+                            if float(stack_safe_fbcsp_min_pred_improve) > 0.0 and (
+                                not np.isfinite(pred) or float(pred) < float(stack_safe_fbcsp_min_pred_improve)
+                            ):
+                                continue
+                            drift = float(rec.get("drift_best", 0.0))
+                            if float(stack_safe_fbcsp_drift_delta) > 0.0 and float(drift) > float(
+                                stack_safe_fbcsp_drift_delta
+                            ):
+                                continue
+
+                        drift = float(rec.get("drift_best", 0.0))
+                        if str(oea_zo_drift_mode) == "hard" and float(oea_zo_drift_delta) > 0.0 and float(
+                            drift
+                        ) > float(oea_zo_drift_delta):
+                            continue
+
+                        pred = float(rec.get("ridge_pred_improve", float("nan")))
+                        if not np.isfinite(pred):
+                            continue
+                        score = float(pred)
+                        if str(oea_zo_drift_mode) == "penalty" and float(oea_zo_drift_gamma) > 0.0:
+                            score = float(score) - float(oea_zo_drift_gamma) * float(drift)
+
+                        if float(score) > float(best_alt_score):
+                            best_alt_score = float(score)
+                            best_alt = rec
+
+                    if best_alt is not None and float(best_alt_score) > 0.0:
+                        selected = best_alt
+                    else:
+                        selected = rec_id
+
             if (
                 float(oea_zo_fallback_min_marginal_entropy) > 0.0
                 and str(selected.get("kind", "")) != "identity"
@@ -1692,6 +1789,12 @@ def loso_cross_subject_evaluation(
                         "stack_multi_family": str(sel_family),
                         "stack_multi_guard_pos": float(sel_guard_pos),
                         "stack_multi_ridge_pred_improve": float(sel_ridge_pred),
+                        "stack_multi_pre_family": str(pre_family),
+                        "stack_multi_pre_guard_pos": float(pre_guard_pos),
+                        "stack_multi_pre_ridge_pred_improve": float(pre_ridge_pred),
+                        "stack_multi_pre_drift_best": float(pre_drift),
+                        "stack_multi_fbcsp_blocked": int(fbcsp_blocked),
+                        "stack_multi_fbcsp_block_reason": str(fbcsp_block_reason),
                         "stack_multi_acc_anchor": float(acc_id_t),
                         "stack_multi_acc_selected": float(acc_sel_t),
                         "stack_multi_improve": float(improve_t),
