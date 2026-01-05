@@ -299,6 +299,8 @@ def loso_cross_subject_evaluation(
     stack_safe_tsa_min_pred_improve: float = 0.0,
     stack_safe_tsa_drift_delta: float = 0.0,
     stack_calib_per_family: bool = False,
+    stack_calib_per_family_mode: str = "hard",
+    stack_calib_per_family_shrinkage: float = 20.0,
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -526,6 +528,10 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_tsa_drift_delta must be >= 0.")
     if not isinstance(stack_calib_per_family, (bool, np.bool_)):
         raise ValueError("stack_calib_per_family must be a bool.")
+    if str(stack_calib_per_family_mode) not in {"hard", "blend"}:
+        raise ValueError("stack_calib_per_family_mode must be one of: 'hard', 'blend'.")
+    if float(stack_calib_per_family_shrinkage) < 0.0:
+        raise ValueError("stack_calib_per_family_shrinkage must be >= 0.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -995,6 +1001,7 @@ def loso_cross_subject_evaluation(
             guard = None
             cert_by_family: dict[str, RidgeCertificate] = {}
             guard_by_family: dict[str, LogisticGuard] = {}
+            family_counts: dict[str, int] = {}
             ridge_train_spearman = float("nan")
             ridge_train_pearson = float("nan")
             guard_train_auc = float("nan")
@@ -1435,6 +1442,7 @@ def loso_cross_subject_evaluation(
                                 y_f = np.asarray(y_ridge_by_family.get(fam, []), dtype=np.float64)
                                 if X_f.shape[0] != y_f.shape[0] or X_f.shape[0] < 2:
                                     continue
+                                family_counts[str(fam)] = int(X_f.shape[0])
                                 cert_by_family[str(fam)] = train_ridge_certificate(
                                     X_f,
                                     y_f,
@@ -1658,6 +1666,9 @@ def loso_cross_subject_evaluation(
                     guard=guard,
                     cert_by_family=(cert_by_family if bool(stack_calib_per_family) else None),
                     guard_by_family=(guard_by_family if bool(stack_calib_per_family) else None),
+                    family_counts=(family_counts if bool(stack_calib_per_family) else None),
+                    family_blend_mode=str(stack_calib_per_family_mode),
+                    family_shrinkage=float(stack_calib_per_family_shrinkage),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     drift_mode=str(oea_zo_drift_mode),
@@ -1672,6 +1683,9 @@ def loso_cross_subject_evaluation(
                     guard=guard,
                     cert_by_family=(cert_by_family if bool(stack_calib_per_family) else None),
                     guard_by_family=(guard_by_family if bool(stack_calib_per_family) else None),
+                    family_counts=(family_counts if bool(stack_calib_per_family) else None),
+                    family_blend_mode=str(stack_calib_per_family_mode),
+                    family_shrinkage=float(stack_calib_per_family_shrinkage),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     drift_mode=str(oea_zo_drift_mode),
@@ -2030,6 +2044,11 @@ def loso_cross_subject_evaluation(
                         "probe_mixup_hard_full": float(rec.get("probe_mixup_hard_full", float("nan"))),
                         "ridge_pred_improve": float(rec.get("ridge_pred_improve", float("nan"))),
                         "guard_p_pos": float(rec.get("guard_p_pos", float("nan"))),
+                        "ridge_pred_improve_global": float(rec.get("ridge_pred_improve_global", float("nan"))),
+                        "guard_p_pos_global": float(rec.get("guard_p_pos_global", float("nan"))),
+                        "ridge_pred_improve_family": float(rec.get("ridge_pred_improve_family", float("nan"))),
+                        "guard_p_pos_family": float(rec.get("guard_p_pos_family", float("nan"))),
+                        "family_blend_w": float(rec.get("family_blend_w", float("nan"))),
                         "accuracy": float(rec.get("accuracy", float("nan"))),
                     }
 

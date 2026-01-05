@@ -527,6 +527,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-calib-per-family-mode",
+        choices=["hard", "blend"],
+        default="hard",
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: how to use per-family calibrated models. "
+            "'hard' uses the per-family model whenever available; "
+            "'blend' uses shrinkage/partial-pooling: prediction = (1-w)*global + w*family with w=n/(n+K). "
+            "Effective only when --stack-calib-per-family is enabled."
+        ),
+    )
+    p.add_argument(
+        "--stack-calib-per-family-shrinkage",
+        type=float,
+        default=20.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: shrinkage K used by --stack-calib-per-family-mode blend "
+            "(w = n / (n + K)). Larger K => more conservative (closer to global). Must be >= 0."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -850,7 +870,9 @@ def main() -> None:
                 tsa_gate_str += f", tsa_min_pred={float(args.stack_safe_tsa_min_pred_improve)}"
             if float(args.stack_safe_tsa_drift_delta) > 0.0:
                 tsa_gate_str += f", tsa_drift_delta={float(args.stack_safe_tsa_drift_delta)}"
-            per_family_str = ", per_family_calib=1" if bool(args.stack_calib_per_family) else ""
+            per_family_str = ""
+            if bool(args.stack_calib_per_family):
+                per_family_str = f", per_family_calib=1(mode={args.stack_calib_per_family_mode},K={args.stack_calib_per_family_shrinkage})"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -1286,6 +1308,8 @@ def main() -> None:
                 stack_safe_tsa_min_pred_improve=float(args.stack_safe_tsa_min_pred_improve),
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
                 stack_calib_per_family=bool(args.stack_calib_per_family),
+                stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
+                stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),

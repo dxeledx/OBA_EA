@@ -832,6 +832,9 @@ def select_by_guarded_predicted_improvement(
     cert_by_family: dict[str, RidgeCertificate] | None = None,
     guard_by_family: dict[str, LogisticGuard] | None = None,
     family_key: str = "cand_family",
+    family_counts: dict[str, int] | None = None,
+    family_blend_mode: str = "hard",
+    family_shrinkage: float = 20.0,
     n_classes: int,
     threshold: float = 0.5,
     drift_mode: str = "none",
@@ -849,6 +852,10 @@ def select_by_guarded_predicted_improvement(
 
     if not (0.0 <= float(threshold) <= 1.0):
         raise ValueError("threshold must be in [0,1].")
+    if str(family_blend_mode) not in {"hard", "blend"}:
+        raise ValueError("family_blend_mode must be one of: 'hard', 'blend'.")
+    if float(family_shrinkage) < 0.0:
+        raise ValueError("family_shrinkage must be >= 0.")
 
     best: dict | None = None
     best_score = -float("inf")
@@ -858,21 +865,50 @@ def select_by_guarded_predicted_improvement(
         if str(rec.get("kind", "")) == "identity":
             identity = rec
 
-        fam = str(rec.get(family_key, "")).strip().lower()
-        cert_eff = cert_by_family.get(fam) if (cert_by_family is not None) else None
-        guard_eff = guard_by_family.get(fam) if (guard_by_family is not None) else None
-        if cert_eff is None:
-            cert_eff = cert
-        if guard_eff is None:
-            guard_eff = guard
-
         if feature_set == "stacked":
             feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         else:
             feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
-        p_pos = float(guard_eff.predict_pos_proba(feats)[0])
-        pred_improve = float(cert_eff.predict_accuracy(feats)[0])
+
+        fam = str(rec.get(family_key, "")).strip().lower()
+        cert_f = cert_by_family.get(fam) if (cert_by_family is not None) else None
+        guard_f = guard_by_family.get(fam) if (guard_by_family is not None) else None
+
+        p_pos_g = float(guard.predict_pos_proba(feats)[0])
+        pred_g = float(cert.predict_accuracy(feats)[0])
+        p_pos_f = float(guard_f.predict_pos_proba(feats)[0]) if guard_f is not None else float("nan")
+        pred_f = float(cert_f.predict_accuracy(feats)[0]) if cert_f is not None else float("nan")
+
+        # Default: use the global model.
+        p_pos = float(p_pos_g)
+        pred_improve = float(pred_g)
+        w = float("nan")
+
+        # Per-family usage (optional).
+        if (cert_f is not None) or (guard_f is not None):
+            if str(family_blend_mode) == "hard":
+                if np.isfinite(p_pos_f):
+                    p_pos = float(p_pos_f)
+                if np.isfinite(pred_f):
+                    pred_improve = float(pred_f)
+            else:
+                n = int(family_counts.get(fam, 0)) if (family_counts is not None) else 0
+                if float(family_shrinkage) <= 0.0:
+                    w = 1.0
+                else:
+                    w = float(n) / float(n + float(family_shrinkage))
+
+                if np.isfinite(p_pos_f):
+                    p_pos = float((1.0 - w) * float(p_pos_g) + w * float(p_pos_f))
+                if np.isfinite(pred_f):
+                    pred_improve = float((1.0 - w) * float(pred_g) + w * float(pred_f))
+
         # Record for diagnostics / analysis.
+        rec["guard_p_pos_global"] = float(p_pos_g)
+        rec["ridge_pred_improve_global"] = float(pred_g)
+        rec["guard_p_pos_family"] = float(p_pos_f) if np.isfinite(p_pos_f) else float("nan")
+        rec["ridge_pred_improve_family"] = float(pred_f) if np.isfinite(pred_f) else float("nan")
+        rec["family_blend_w"] = float(w) if np.isfinite(w) else float("nan")
         rec["guard_p_pos"] = float(p_pos)
         rec["ridge_pred_improve"] = float(pred_improve)
 
