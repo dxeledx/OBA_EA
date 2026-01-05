@@ -221,8 +221,15 @@ def main() -> None:
             title=f"{args.prefix}: guard_p_pos vs true Δacc",
             xlabel="guard_p_pos",
         )
+    if "bandit_score" in cand.columns:
+        _plot_pred_vs_true(
+            cand,
+            pred_col="bandit_score",
+            out=out_dir / f"{args.prefix}_bandit_vs_true.png",
+            title=f"{args.prefix}: bandit_score vs true Δacc",
+            xlabel="bandit_score",
+        )
 
 
 if __name__ == "__main__":
     main()
-

@@ -35,6 +35,7 @@ from .certificate import (
     stacked_candidate_features_from_record,
     select_by_dev_nll,
     select_by_evidence_nll,
+    select_by_guarded_bandit_policy,
     select_by_guarded_predicted_improvement,
     select_by_guarded_objective,
     select_by_iwcv_nll,
@@ -44,6 +45,7 @@ from .certificate import (
     select_by_probe_mixup_hard,
     train_logistic_guard,
     train_ridge_certificate,
+    train_softmax_bandit_policy,
 )
 from .metrics import compute_metrics, summarize_results
 from .proba import reorder_proba_columns as _reorder_proba_columns
@@ -436,11 +438,12 @@ def loso_cross_subject_evaluation(
         "calibrated_ridge_guard",
         "calibrated_stack_ridge",
         "calibrated_stack_ridge_guard",
+        "calibrated_stack_bandit_guard",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'calibrated_stack_ridge_guard', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'calibrated_stack_ridge_guard', 'calibrated_stack_bandit_guard', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -979,14 +982,25 @@ def loso_cross_subject_evaluation(
 
             class_labels = tuple([str(c) for c in class_order])
             selector = str(oea_zo_selector)
-            use_stack = selector in {"calibrated_stack_ridge", "calibrated_stack_ridge_guard"}
+            use_stack = selector in {
+                "calibrated_stack_ridge",
+                "calibrated_stack_ridge_guard",
+                "calibrated_stack_bandit_guard",
+            }
             use_ridge = selector in {
                 "calibrated_ridge",
                 "calibrated_ridge_guard",
                 "calibrated_stack_ridge",
                 "calibrated_stack_ridge_guard",
+                "calibrated_stack_bandit_guard",
             }
-            use_guard = selector in {"calibrated_guard", "calibrated_ridge_guard", "calibrated_stack_ridge_guard"}
+            use_guard = selector in {
+                "calibrated_guard",
+                "calibrated_ridge_guard",
+                "calibrated_stack_ridge_guard",
+                "calibrated_stack_bandit_guard",
+            }
+            use_bandit = selector in {"calibrated_stack_bandit_guard"}
 
             outer_bundle = _get_stack_bundle(train_subjects)
             model_ea = outer_bundle["ea"]["model"]
@@ -999,6 +1013,7 @@ def loso_cross_subject_evaluation(
             # Per-fold calibration on pseudo-target subjects (source-only).
             cert = None
             guard = None
+            bandit_policy = None
             cert_by_family: dict[str, RidgeCertificate] = {}
             guard_by_family: dict[str, LogisticGuard] = {}
             family_counts: dict[str, int] = {}
@@ -1162,6 +1177,9 @@ def loso_cross_subject_evaluation(
                 X_guard_by_family: dict[str, list[np.ndarray]] = {}
                 y_guard_by_family: dict[str, list[int]] = {}
                 feat_names: tuple[str, ...] | None = None
+                X_bandit_rows: list[np.ndarray] = []
+                r_bandit_rows: list[float] = []
+                g_bandit_rows: list[int] = []
 
                 def _add_calib_sample(*, fam: str, feats: np.ndarray, improve: float) -> None:
                     fam = str(fam).strip().lower() or "unknown"
@@ -1180,6 +1198,13 @@ def loso_cross_subject_evaluation(
                         if bool(stack_calib_per_family):
                             X_guard_by_family.setdefault(fam, []).append(feats)
                             y_guard_by_family.setdefault(fam, []).append(int(yb))
+
+                def _add_bandit_sample(*, gid: int, feats: np.ndarray, reward: float) -> None:
+                    if not use_bandit:
+                        return
+                    X_bandit_rows.append(np.asarray(feats, dtype=np.float64))
+                    r_bandit_rows.append(float(reward))
+                    g_bandit_rows.append(int(gid))
 
                 for pseudo_t in calib_subjects:
                     inner_train = [s for s in train_subjects if s != pseudo_t]
@@ -1236,6 +1261,34 @@ def loso_cross_subject_evaluation(
                     p_id = _reorder_proba_columns(m_ea.predict_proba(z_p_ea), m_ea.classes_, list(class_labels))
                     acc_id = float(accuracy_score(y_p, np.asarray(m_ea.predict(z_p_ea))))
 
+                    # Identity action for bandit training (reward=0).
+                    if use_bandit:
+                        try:
+                            feats_id_c = _features_before_lda(model=m_ea, X=z_p_ea) if use_stack else None
+                            rec_id_c = _record_for_candidate(
+                                p_id=p_id,
+                                p_c=p_id,
+                                feats_c=feats_id_c,
+                                lda_c=(m_ea.pipeline.named_steps["lda"] if use_stack else None),
+                                lda_ev=ev_ea_inner,
+                                seed_local=seed_pseudo_base + 1,
+                            )
+                            rec_id_c["kind"] = "identity"
+                            rec_id_c["cand_family"] = "ea"
+                            if use_stack:
+                                feats_id, names = stacked_candidate_features_from_record(
+                                    rec_id_c, n_classes=len(class_labels), include_pbar=True
+                                )
+                            else:
+                                feats_id, names = candidate_features_from_record(
+                                    rec_id_c, n_classes=len(class_labels), include_pbar=True
+                                )
+                            if feat_names is None:
+                                feat_names = names
+                            _add_bandit_sample(gid=int(pseudo_t), feats=feats_id, reward=0.0)
+                        except Exception:
+                            pass
+
                     # EA-FBCSP candidate (EA view).
                     try:
                         p_fbcsp = _reorder_proba_columns(
@@ -1264,6 +1317,7 @@ def loso_cross_subject_evaluation(
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="fbcsp", feats=feats_fbcsp, improve=improve_fbcsp)
+                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_fbcsp, reward=improve_fbcsp)
                     except Exception:
                         pass
 
@@ -1293,6 +1347,7 @@ def loso_cross_subject_evaluation(
                     if feat_names is None:
                         feat_names = names
                     _add_calib_sample(fam="rpa", feats=feats_rpa, improve=improve_rpa)
+                    _add_bandit_sample(gid=int(pseudo_t), feats=feats_rpa, reward=improve_rpa)
 
                     # TSA candidate (built on the RPA/LEA view).
                     try:
@@ -1338,6 +1393,7 @@ def loso_cross_subject_evaluation(
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="tsa", feats=feats_tsa, improve=improve_tsa)
+                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_tsa, reward=improve_tsa)
                     except Exception:
                         pass
 
@@ -1391,6 +1447,7 @@ def loso_cross_subject_evaluation(
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="chan", feats=feats_A, improve=improve_A)
+                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_A, reward=improve_A)
 
                 if use_ridge and X_ridge_rows and feat_names is not None:
                     X_ridge = np.vstack(X_ridge_rows)
@@ -1470,6 +1527,25 @@ def loso_cross_subject_evaluation(
                                 )
                             except Exception:
                                 continue
+
+                # Optional: bandit policy on stacked features (full-information pseudo-target rewards).
+                if use_bandit and X_bandit_rows and feat_names is not None:
+                    try:
+                        X_b = np.vstack(X_bandit_rows)
+                        r_b = np.asarray(r_bandit_rows, dtype=np.float64).reshape(-1)
+                        g_b = np.asarray(g_bandit_rows, dtype=int).reshape(-1)
+                        bandit_policy = train_softmax_bandit_policy(
+                            X_b,
+                            rewards=r_b,
+                            group_ids=g_b,
+                            feature_names=feat_names,
+                            l2=float(oea_zo_calib_ridge_alpha),
+                            lr=0.1,
+                            iters=300,
+                            seed=int(oea_zo_calib_seed) + int(test_subject) * 997 + 17,
+                        )
+                    except Exception:
+                        bandit_policy = None
 
             # Build target-subject candidate records (unlabeled).
             X_test_ea = subject_data[int(test_subject)].X
@@ -1659,7 +1735,30 @@ def loso_cross_subject_evaluation(
                 records.append(rec)
 
             selected = rec_id
-            if selector == "calibrated_stack_ridge_guard" and cert is not None and guard is not None:
+            if selector == "calibrated_stack_bandit_guard" and bandit_policy is not None and guard is not None:
+                # For diagnostics/safety gates we still compute ridge-predicted improvements when available.
+                if cert is not None:
+                    try:
+                        for rec in records:
+                            feats, _ = stacked_candidate_features_from_record(
+                                rec, n_classes=len(class_labels), include_pbar=True
+                            )
+                            rec["ridge_pred_improve"] = float(cert.predict_accuracy(feats)[0])
+                    except Exception:
+                        pass
+
+                selected = select_by_guarded_bandit_policy(
+                    records,
+                    policy=bandit_policy,
+                    guard=guard,
+                    n_classes=len(class_labels),
+                    threshold=float(oea_zo_calib_guard_threshold),
+                    drift_mode=str(oea_zo_drift_mode),
+                    drift_gamma=float(oea_zo_drift_gamma),
+                    drift_delta=float(oea_zo_drift_delta),
+                    feature_set="stacked",
+                )
+            elif selector == "calibrated_stack_ridge_guard" and cert is not None and guard is not None:
                 selected = select_by_guarded_predicted_improvement(
                     records,
                     cert=cert,
@@ -1744,7 +1843,11 @@ def loso_cross_subject_evaluation(
                 fbcsp_gate_active
                 and pre_family == "fbcsp"
                 and str(selected.get("kind", "")) != "identity"
-                and selector in {"calibrated_ridge_guard", "calibrated_stack_ridge_guard"}
+                and selector in {
+                    "calibrated_ridge_guard",
+                    "calibrated_stack_ridge_guard",
+                    "calibrated_stack_bandit_guard",
+                }
             ):
                 base_thr = float(oea_zo_calib_guard_threshold)
                 fbcsp_thr = (
@@ -1826,7 +1929,11 @@ def loso_cross_subject_evaluation(
                 tsa_gate_active
                 and str(selected.get("cand_family", "")) == "tsa"
                 and str(selected.get("kind", "")) != "identity"
-                and selector in {"calibrated_ridge_guard", "calibrated_stack_ridge_guard"}
+                and selector in {
+                    "calibrated_ridge_guard",
+                    "calibrated_stack_ridge_guard",
+                    "calibrated_stack_bandit_guard",
+                }
             ):
                 base_thr = float(oea_zo_calib_guard_threshold)
                 tsa_thr = (
@@ -2044,6 +2151,7 @@ def loso_cross_subject_evaluation(
                         "probe_mixup_hard_full": float(rec.get("probe_mixup_hard_full", float("nan"))),
                         "ridge_pred_improve": float(rec.get("ridge_pred_improve", float("nan"))),
                         "guard_p_pos": float(rec.get("guard_p_pos", float("nan"))),
+                        "bandit_score": float(rec.get("bandit_score", float("nan"))),
                         "ridge_pred_improve_global": float(rec.get("ridge_pred_improve_global", float("nan"))),
                         "guard_p_pos_global": float(rec.get("guard_p_pos_global", float("nan"))),
                         "ridge_pred_improve_family": float(rec.get("ridge_pred_improve_family", float("nan"))),

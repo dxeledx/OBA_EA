@@ -371,6 +371,7 @@ def parse_args() -> argparse.Namespace:
             "calibrated_ridge_guard",
             "calibrated_stack_ridge",
             "calibrated_stack_ridge_guard",
+            "calibrated_stack_bandit_guard",
             "oracle",
         ],
         default="objective",
@@ -388,6 +389,8 @@ def parse_args() -> argparse.Namespace:
             "calibrated_ridge_guard uses the learned guard to filter candidates, then selects by ridge-predicted improvement; "
             "calibrated_stack_ridge learns a ridge regressor on stacked certificate features (objective+evidence+probe+drift) to predict improvement; "
             "calibrated_stack_ridge_guard uses a guard + ridge on stacked certificate features; "
+            "calibrated_stack_bandit_guard trains a softmax contextual bandit policy on stacked certificate features (full-information Δacc on pseudo-targets) "
+            "to select a candidate, with the same guard/fallback safety; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
     )

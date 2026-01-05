@@ -53,6 +53,36 @@ class LogisticGuard:
         return proba[:, 1]
 
 
+@dataclass(frozen=True)
+class SoftmaxBanditPolicy:
+    """Linear softmax contextual bandit policy for candidate selection.
+
+    Given a candidate feature vector x, assigns a score s(x)=θᵀ·z where z is the standardized feature.
+    Training uses pseudo-target subjects with full-information rewards (Δacc per candidate) and maximizes
+    the expected reward under the softmax distribution over candidates in each pseudo-target set.
+    """
+
+    scaler: StandardScaler
+    theta: np.ndarray  # (d,)
+    feature_names: tuple[str, ...]
+
+    def score(self, features: np.ndarray) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float64)
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+        z = self.scaler.transform(features)
+        return np.asarray(z @ self.theta.reshape(-1, 1), dtype=np.float64).reshape(-1)
+
+    def action_probs(self, features: np.ndarray) -> np.ndarray:
+        s = self.score(features).reshape(-1)
+        if s.size == 0:
+            return np.asarray([], dtype=np.float64)
+        s = s - float(np.max(s))
+        p = np.exp(s)
+        p = p / float(np.sum(p))
+        return np.asarray(p, dtype=np.float64)
+
+
 def _safe_float(x) -> float:
     try:
         v = float(x)
@@ -714,6 +744,86 @@ def train_logistic_guard(
     return LogisticGuard(model=model, feature_names=tuple(feature_names))
 
 
+def train_softmax_bandit_policy(
+    X: np.ndarray,
+    rewards: np.ndarray,
+    group_ids: np.ndarray,
+    *,
+    feature_names: Sequence[str],
+    l2: float = 1.0,
+    lr: float = 0.1,
+    iters: int = 300,
+    seed: int = 0,
+) -> SoftmaxBanditPolicy:
+    """Train a linear softmax policy to maximize expected reward over candidate sets.
+
+    Parameters
+    ----------
+    X:
+        Candidate features, shape (N, d).
+    rewards:
+        Reward per candidate (typically Δacc vs identity), shape (N,).
+    group_ids:
+        Integer group id per row (pseudo-target id), shape (N,).
+    l2:
+        L2 penalty on θ (>=0).
+    lr:
+        Learning rate (>0).
+    iters:
+        Gradient steps (>=1).
+    """
+
+    X = np.asarray(X, dtype=np.float64)
+    rewards = np.asarray(rewards, dtype=np.float64).reshape(-1)
+    group_ids = np.asarray(group_ids, dtype=int).reshape(-1)
+    if X.ndim != 2:
+        raise ValueError("X must be 2D.")
+    if X.shape[0] != rewards.shape[0] or X.shape[0] != group_ids.shape[0]:
+        raise ValueError("X/rewards/group_ids length mismatch.")
+    if float(l2) < 0.0:
+        raise ValueError("l2 must be >= 0.")
+    if float(lr) <= 0.0:
+        raise ValueError("lr must be > 0.")
+    if int(iters) < 1:
+        raise ValueError("iters must be >= 1.")
+
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+
+    uniq = np.unique(group_ids)
+    group_indices = [np.where(group_ids == g)[0] for g in uniq]
+    if any(idx.size < 1 for idx in group_indices):
+        raise ValueError("Each group must have at least 1 candidate.")
+
+    rng = np.random.RandomState(int(seed))
+    theta = rng.normal(scale=0.01, size=(Xs.shape[1],)).astype(np.float64)
+
+    n_groups = max(1, len(group_indices))
+    for _ in range(int(iters)):
+        grad = np.zeros_like(theta)
+        for idx in group_indices:
+            Xg = Xs[idx]  # (m,d)
+            rg = rewards[idx].reshape(-1)  # (m,)
+            s = Xg @ theta  # (m,)
+
+            # softmax
+            a = s - float(np.max(s))
+            Z = float(np.sum(np.exp(a)))
+            if not np.isfinite(Z) or Z <= 0.0:
+                continue
+            p = np.exp(a) / Z  # (m,)
+
+            exp_r = float(np.sum(p * rg))
+            centered = (rg - exp_r).reshape(-1, 1)
+            grad += np.sum((p.reshape(-1, 1) * centered) * Xg, axis=0)
+
+        if float(l2) > 0.0:
+            grad -= float(l2) * theta
+        theta = theta + float(lr) * grad / float(n_groups)
+
+    return SoftmaxBanditPolicy(scaler=scaler, theta=theta, feature_names=tuple(feature_names))
+
+
 def select_by_predicted_improvement(
     records: Iterable[dict],
     *,
@@ -934,6 +1044,71 @@ def select_by_guarded_predicted_improvement(
         raise ValueError("No candidates to select from.")
 
     return best
+
+
+def select_by_guarded_bandit_policy(
+    records: Iterable[dict],
+    *,
+    policy: SoftmaxBanditPolicy,
+    guard: LogisticGuard,
+    n_classes: int,
+    threshold: float = 0.5,
+    drift_mode: str = "none",
+    drift_gamma: float = 0.0,
+    drift_delta: float = 0.0,
+    feature_set: str = "base",
+) -> dict:
+    """Guarded selection: filter by guard, then pick the highest policy score.
+
+    Notes
+    -----
+    - Identity is always allowed (safe fallback).
+    - Drift guard/penalty can be applied similarly to other selectors.
+    """
+
+    if not (0.0 <= float(threshold) <= 1.0):
+        raise ValueError("threshold must be in [0,1].")
+
+    best: dict | None = None
+    best_score = -float("inf")
+    identity: dict | None = None
+
+    for rec in records:
+        if str(rec.get("kind", "")) == "identity":
+            identity = rec
+
+        if feature_set == "stacked":
+            feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        else:
+            feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+
+        p_pos = float(guard.predict_pos_proba(feats)[0])
+        score = float(policy.score(feats)[0])
+
+        # Record for diagnostics / analysis.
+        rec["guard_p_pos"] = float(p_pos)
+        rec["bandit_score"] = float(score)
+
+        if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
+            continue
+
+        drift = _safe_float(rec.get("drift_best", 0.0))
+        if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
+            continue
+        if drift_mode == "penalty" and float(drift_gamma) > 0.0:
+            score = float(score) - float(drift_gamma) * float(drift)
+
+        if float(score) > float(best_score):
+            best_score = float(score)
+            best = rec
+
+    if best is not None:
+        return best
+    if identity is not None:
+        return identity
+    for rec in records:
+        return rec
+    raise ValueError("No candidates to select from.")
 
 
 def select_by_evidence_nll(

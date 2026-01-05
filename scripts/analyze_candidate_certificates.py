@@ -155,6 +155,13 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             if gp_mask.any():
                 best_guard_acc = float(df.loc[gp[gp_mask].idxmax(), "accuracy"])
 
+        best_bandit_acc = float("nan")
+        if "bandit_score" in df.columns:
+            bs = df["bandit_score"].astype(float)
+            bs_mask = np.isfinite(bs.to_numpy())
+            if bs_mask.any():
+                best_bandit_acc = float(df.loc[bs[bs_mask].idxmax(), "accuracy"])
+
         acc = df["accuracy"].astype(float).to_numpy()
         rho_score = _spearman_pos(-score.to_numpy(), acc)
 
@@ -198,6 +205,11 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
             gp = df["guard_p_pos"].astype(float).to_numpy()
             rho_guard = _spearman_pos(gp, acc)
 
+        rho_bandit = float("nan")
+        if "bandit_score" in df.columns:
+            bs = df["bandit_score"].astype(float).to_numpy()
+            rho_bandit = _spearman_pos(bs, acc)
+
         sel_acc = float(method_acc.get(subj, float("nan")))
         # Results in *_results.txt are printed with limited decimals, so use a small tolerance.
         tol = 1e-6
@@ -226,6 +238,8 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "gap_ridge": oracle_acc - best_ridge_acc,
                 "best_guard_acc": best_guard_acc,
                 "gap_guard": oracle_acc - best_guard_acc,
+                "best_bandit_acc": best_bandit_acc,
+                "gap_bandit": oracle_acc - best_bandit_acc,
                 "rho_score": rho_score,
                 "rho_ev": rho_ev,
                 "rho_probe": rho_pm,
@@ -235,6 +249,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
                 "rho_dev": rho_dev,
                 "rho_ridge": rho_ridge,
                 "rho_guard": rho_guard,
+                "rho_bandit": rho_bandit,
                 "neg_transfer": float((sel_acc + tol) < id_acc),
             }
         )
@@ -259,6 +274,7 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "rho_dev_mean": float(table["rho_dev"].mean()) if "rho_dev" in table.columns else float("nan"),
         "rho_ridge_mean": float(table["rho_ridge"].mean()) if "rho_ridge" in table.columns else float("nan"),
         "rho_guard_mean": float(table["rho_guard"].mean()) if "rho_guard" in table.columns else float("nan"),
+        "rho_bandit_mean": float(table["rho_bandit"].mean()) if "rho_bandit" in table.columns else float("nan"),
         "best_score_mean": float(table["best_score_acc"].mean()),
         "best_ev_mean": float(table["best_ev_acc"].mean()),
         "best_probe_mean": float(table["best_probe_acc"].mean()),
@@ -270,6 +286,9 @@ def analyze_run(*, run_dir: Path, method: str) -> tuple[pd.DataFrame, dict]:
         "best_dev_mean": float(table["best_dev_acc"].mean()) if "best_dev_acc" in table.columns else float("nan"),
         "best_ridge_mean": float(table["best_ridge_acc"].mean()) if "best_ridge_acc" in table.columns else float("nan"),
         "best_guard_mean": float(table["best_guard_acc"].mean()) if "best_guard_acc" in table.columns else float("nan"),
+        "best_bandit_mean": float(table["best_bandit_acc"].mean())
+        if "best_bandit_acc" in table.columns
+        else float("nan"),
     }
     return table, summary
 
@@ -302,6 +321,7 @@ def main() -> None:
         "rho_dev_mean",
         "rho_ridge_mean",
         "rho_guard_mean",
+        "rho_bandit_mean",
         "best_score_mean",
         "best_ev_mean",
         "best_probe_mean",
@@ -311,6 +331,7 @@ def main() -> None:
         "best_dev_mean",
         "best_ridge_mean",
         "best_guard_mean",
+        "best_bandit_mean",
     ]:
         v = summary.get(k, float("nan"))
         print(f"{k}: {v:.6f}")
