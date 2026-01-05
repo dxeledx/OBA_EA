@@ -194,6 +194,10 @@ def main() -> None:
     cand = _load_candidates(Path(args.run_dir), method=str(args.method))
     summ = _per_subject_summary(cand)
 
+    def _has_finite(col: str) -> bool:
+        vals = pd.to_numeric(cand.get(col, np.nan), errors="coerce").to_numpy(dtype=float)
+        return bool(np.isfinite(vals).any())
+
     _plot_delta(
         summ,
         out=out_dir / f"{args.prefix}_delta.png",
@@ -205,7 +209,7 @@ def main() -> None:
         title=f"{args.prefix}: oracle gap (oracle − selected)",
     )
 
-    if "ridge_pred_improve" in cand.columns:
+    if "ridge_pred_improve" in cand.columns and _has_finite("ridge_pred_improve"):
         _plot_pred_vs_true(
             cand,
             pred_col="ridge_pred_improve",
@@ -213,7 +217,7 @@ def main() -> None:
             title=f"{args.prefix}: ridge_pred_improve vs true Δacc",
             xlabel="ridge_pred_improve",
         )
-    if "guard_p_pos" in cand.columns:
+    if "guard_p_pos" in cand.columns and _has_finite("guard_p_pos"):
         _plot_pred_vs_true(
             cand,
             pred_col="guard_p_pos",
@@ -221,7 +225,7 @@ def main() -> None:
             title=f"{args.prefix}: guard_p_pos vs true Δacc",
             xlabel="guard_p_pos",
         )
-    if "bandit_score" in cand.columns:
+    if "bandit_score" in cand.columns and _has_finite("bandit_score"):
         _plot_pred_vs_true(
             cand,
             pred_col="bandit_score",
