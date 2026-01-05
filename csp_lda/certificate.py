@@ -947,6 +947,7 @@ def select_by_guarded_predicted_improvement(
     family_shrinkage: float = 20.0,
     n_classes: int,
     threshold: float = 0.5,
+    anchor_guard_delta: float = 0.0,
     drift_mode: str = "none",
     drift_gamma: float = 0.0,
     drift_delta: float = 0.0,
@@ -956,20 +957,24 @@ def select_by_guarded_predicted_improvement(
 
     Selection rule:
     - keep candidates with P(pos_improve) >= threshold (identity is always allowed),
+    - optionally require P(pos_improve) >= P(pos_improve | identity) + anchor_guard_delta for non-identity,
     - apply optional drift hard/penalty,
     - choose the maximum predicted improvement; if <= 0, fall back to identity.
     """
 
     if not (0.0 <= float(threshold) <= 1.0):
         raise ValueError("threshold must be in [0,1].")
+    if float(anchor_guard_delta) < 0.0:
+        raise ValueError("anchor_guard_delta must be >= 0.")
     if str(family_blend_mode) not in {"hard", "blend"}:
         raise ValueError("family_blend_mode must be one of: 'hard', 'blend'.")
     if float(family_shrinkage) < 0.0:
         raise ValueError("family_shrinkage must be >= 0.")
 
-    best: dict | None = None
-    best_score = -float("inf")
+    # First pass: compute guard / ridge predictions for all candidates and cache them on records.
+    computed: list[dict] = []
     identity: dict | None = None
+    anchor_p_pos: float | None = None
 
     for rec in records:
         if str(rec.get("kind", "")) == "identity":
@@ -1022,8 +1027,26 @@ def select_by_guarded_predicted_improvement(
         rec["guard_p_pos"] = float(p_pos)
         rec["ridge_pred_improve"] = float(pred_improve)
 
-        if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
-            continue
+        computed.append(rec)
+        if str(rec.get("kind", "")) == "identity":
+            anchor_p_pos = float(p_pos)
+
+    best: dict | None = None
+    best_score = -float("inf")
+    thr_anchor = float("nan")
+    if float(anchor_guard_delta) > 0.0 and anchor_p_pos is not None and np.isfinite(anchor_p_pos):
+        thr_anchor = float(anchor_p_pos) + float(anchor_guard_delta)
+
+    for rec in computed:
+        p_pos = float(rec.get("guard_p_pos", float("nan")))
+        pred_improve = float(rec.get("ridge_pred_improve", float("nan")))
+        is_identity = str(rec.get("kind", "")) == "identity"
+
+        if not is_identity:
+            if not np.isfinite(p_pos) or float(p_pos) < float(threshold):
+                continue
+            if np.isfinite(thr_anchor) and float(p_pos) < float(thr_anchor):
+                continue
 
         drift = _safe_float(rec.get("drift_best", 0.0))
         if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
@@ -1053,6 +1076,7 @@ def select_by_guarded_bandit_policy(
     guard: LogisticGuard,
     n_classes: int,
     threshold: float = 0.5,
+    anchor_guard_delta: float = 0.0,
     drift_mode: str = "none",
     drift_gamma: float = 0.0,
     drift_delta: float = 0.0,
@@ -1068,10 +1092,13 @@ def select_by_guarded_bandit_policy(
 
     if not (0.0 <= float(threshold) <= 1.0):
         raise ValueError("threshold must be in [0,1].")
+    if float(anchor_guard_delta) < 0.0:
+        raise ValueError("anchor_guard_delta must be >= 0.")
 
-    best: dict | None = None
-    best_score = -float("inf")
+    # First pass: compute guard scores for all records so we can apply anchor-relative filtering robustly.
+    computed: list[dict] = []
     identity: dict | None = None
+    anchor_p_pos: float | None = None
 
     for rec in records:
         if str(rec.get("kind", "")) == "identity":
@@ -1088,9 +1115,27 @@ def select_by_guarded_bandit_policy(
         # Record for diagnostics / analysis.
         rec["guard_p_pos"] = float(p_pos)
         rec["bandit_score"] = float(score)
+        computed.append(rec)
+        if str(rec.get("kind", "")) == "identity":
+            anchor_p_pos = float(p_pos)
 
-        if p_pos < float(threshold) and str(rec.get("kind", "")) != "identity":
-            continue
+    thr_anchor = float("nan")
+    if float(anchor_guard_delta) > 0.0 and anchor_p_pos is not None and np.isfinite(anchor_p_pos):
+        thr_anchor = float(anchor_p_pos) + float(anchor_guard_delta)
+
+    best: dict | None = None
+    best_score = -float("inf")
+
+    for rec in computed:
+        p_pos = float(rec.get("guard_p_pos", float("nan")))
+        score = float(rec.get("bandit_score", float("nan")))
+        is_identity = str(rec.get("kind", "")) == "identity"
+
+        if not is_identity:
+            if not np.isfinite(p_pos) or float(p_pos) < float(threshold):
+                continue
+            if np.isfinite(thr_anchor) and float(p_pos) < float(thr_anchor):
+                continue
 
         drift = _safe_float(rec.get("drift_best", 0.0))
         if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):

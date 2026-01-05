@@ -521,6 +521,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-safe-anchor-guard-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: require a candidate's calibrated guard probability to exceed "
+            "the EA(anchor) guard probability by at least delta (P_pos(cand) >= P_pos(anchor) + delta), in addition to "
+            "--oea-zo-calib-guard-threshold. 0 disables."
+        ),
+    )
+    p.add_argument(
         "--stack-calib-per-family",
         action="store_true",
         help=(
@@ -876,6 +886,9 @@ def main() -> None:
             per_family_str = ""
             if bool(args.stack_calib_per_family):
                 per_family_str = f", per_family_calib=1(mode={args.stack_calib_per_family_mode},K={args.stack_calib_per_family_shrinkage})"
+            anchor_delta_str = ""
+            if float(args.stack_safe_anchor_guard_delta) > 0.0:
+                anchor_delta_str = f", anchor_guard_delta={float(args.stack_safe_anchor_guard_delta)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -885,7 +898,7 @@ def main() -> None:
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
                 f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}{tsa_gate_str}; "
-                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str})."
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{anchor_delta_str})."
             )
         elif method == "ea-mm-safe":
             alignment = "ea_mm_safe"
@@ -1310,6 +1323,7 @@ def main() -> None:
                 stack_safe_tsa_guard_threshold=float(args.stack_safe_tsa_guard_threshold),
                 stack_safe_tsa_min_pred_improve=float(args.stack_safe_tsa_min_pred_improve),
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
+                stack_safe_anchor_guard_delta=float(args.stack_safe_anchor_guard_delta),
                 stack_calib_per_family=bool(args.stack_calib_per_family),
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),

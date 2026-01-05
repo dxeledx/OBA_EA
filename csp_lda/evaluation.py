@@ -300,6 +300,7 @@ def loso_cross_subject_evaluation(
     stack_safe_tsa_guard_threshold: float = -1.0,
     stack_safe_tsa_min_pred_improve: float = 0.0,
     stack_safe_tsa_drift_delta: float = 0.0,
+    stack_safe_anchor_guard_delta: float = 0.0,
     stack_calib_per_family: bool = False,
     stack_calib_per_family_mode: str = "hard",
     stack_calib_per_family_shrinkage: float = 20.0,
@@ -529,6 +530,8 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_tsa_min_pred_improve must be >= 0.")
     if float(stack_safe_tsa_drift_delta) < 0.0:
         raise ValueError("stack_safe_tsa_drift_delta must be >= 0.")
+    if float(stack_safe_anchor_guard_delta) < 0.0:
+        raise ValueError("stack_safe_anchor_guard_delta must be >= 0.")
     if not isinstance(stack_calib_per_family, (bool, np.bool_)):
         raise ValueError("stack_calib_per_family must be a bool.")
     if str(stack_calib_per_family_mode) not in {"hard", "blend"}:
@@ -1753,6 +1756,7 @@ def loso_cross_subject_evaluation(
                     guard=guard,
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
+                    anchor_guard_delta=float(stack_safe_anchor_guard_delta),
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
@@ -1770,6 +1774,7 @@ def loso_cross_subject_evaluation(
                     family_shrinkage=float(stack_calib_per_family_shrinkage),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
+                    anchor_guard_delta=float(stack_safe_anchor_guard_delta),
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
@@ -1787,6 +1792,7 @@ def loso_cross_subject_evaluation(
                     family_shrinkage=float(stack_calib_per_family_shrinkage),
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
+                    anchor_guard_delta=float(stack_safe_anchor_guard_delta),
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
@@ -1830,6 +1836,11 @@ def loso_cross_subject_evaluation(
             pre_guard_pos = float(selected.get("guard_p_pos", float("nan")))
             pre_ridge_pred = float(selected.get("ridge_pred_improve", float("nan")))
             pre_drift = float(selected.get("drift_best", float("nan")))
+            anchor_guard_pos = float(rec_id.get("guard_p_pos", float("nan")))
+            base_thr = float(oea_zo_calib_guard_threshold)
+            anchor_thr = float(base_thr)
+            if float(stack_safe_anchor_guard_delta) > 0.0 and np.isfinite(anchor_guard_pos):
+                anchor_thr = max(float(anchor_thr), float(anchor_guard_pos) + float(stack_safe_anchor_guard_delta))
             fbcsp_blocked = 0
             fbcsp_block_reason = ""
             tsa_blocked = 0
@@ -1879,7 +1890,7 @@ def loso_cross_subject_evaluation(
                         if str(rec.get("kind", "")) == "identity":
                             continue
                         p_pos = float(rec.get("guard_p_pos", float("nan")))
-                        if not np.isfinite(p_pos) or float(p_pos) < float(base_thr):
+                        if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
                             continue
 
                         fam = str(rec.get("cand_family", ""))
@@ -1967,7 +1978,7 @@ def loso_cross_subject_evaluation(
                         if str(rec.get("kind", "")) == "identity":
                             continue
                         p_pos = float(rec.get("guard_p_pos", float("nan")))
-                        if not np.isfinite(p_pos) or float(p_pos) < float(base_thr):
+                        if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
                             continue
 
                         fam = str(rec.get("cand_family", ""))
