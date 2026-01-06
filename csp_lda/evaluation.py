@@ -301,6 +301,7 @@ def loso_cross_subject_evaluation(
     stack_safe_tsa_min_pred_improve: float = 0.0,
     stack_safe_tsa_drift_delta: float = 0.0,
     stack_safe_anchor_guard_delta: float = 0.0,
+    stack_safe_anchor_probe_hard_worsen: float = -1.0,
     stack_calib_per_family: bool = False,
     stack_calib_per_family_mode: str = "hard",
     stack_calib_per_family_shrinkage: float = 20.0,
@@ -532,6 +533,8 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_tsa_drift_delta must be >= 0.")
     if float(stack_safe_anchor_guard_delta) < 0.0:
         raise ValueError("stack_safe_anchor_guard_delta must be >= 0.")
+    if float(stack_safe_anchor_probe_hard_worsen) < -1.0 or (-1.0 < float(stack_safe_anchor_probe_hard_worsen) < 0.0):
+        raise ValueError("stack_safe_anchor_probe_hard_worsen must be -1 (disable) or >= 0.")
     if not isinstance(stack_calib_per_family, (bool, np.bool_)):
         raise ValueError("stack_calib_per_family must be a bool.")
     if str(stack_calib_per_family_mode) not in {"hard", "blend"}:
@@ -1757,6 +1760,7 @@ def loso_cross_subject_evaluation(
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     anchor_guard_delta=float(stack_safe_anchor_guard_delta),
+                    anchor_probe_hard_worsen=float(stack_safe_anchor_probe_hard_worsen),
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
@@ -1775,6 +1779,7 @@ def loso_cross_subject_evaluation(
                     n_classes=len(class_labels),
                     threshold=float(oea_zo_calib_guard_threshold),
                     anchor_guard_delta=float(stack_safe_anchor_guard_delta),
+                    anchor_probe_hard_worsen=float(stack_safe_anchor_probe_hard_worsen),
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
@@ -1837,10 +1842,14 @@ def loso_cross_subject_evaluation(
             pre_ridge_pred = float(selected.get("ridge_pred_improve", float("nan")))
             pre_drift = float(selected.get("drift_best", float("nan")))
             anchor_guard_pos = float(rec_id.get("guard_p_pos", float("nan")))
+            anchor_probe_hard = float(rec_id.get("probe_mixup_hard_best", float("nan")))
             base_thr = float(oea_zo_calib_guard_threshold)
             anchor_thr = float(base_thr)
             if float(stack_safe_anchor_guard_delta) > 0.0 and np.isfinite(anchor_guard_pos):
                 anchor_thr = max(float(anchor_thr), float(anchor_guard_pos) + float(stack_safe_anchor_guard_delta))
+            probe_thr = float("nan")
+            if float(stack_safe_anchor_probe_hard_worsen) >= 0.0 and np.isfinite(anchor_probe_hard):
+                probe_thr = float(anchor_probe_hard) + float(stack_safe_anchor_probe_hard_worsen)
             fbcsp_blocked = 0
             fbcsp_block_reason = ""
             tsa_blocked = 0
@@ -1892,6 +1901,10 @@ def loso_cross_subject_evaluation(
                         p_pos = float(rec.get("guard_p_pos", float("nan")))
                         if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
                             continue
+                        if np.isfinite(probe_thr):
+                            probe = float(rec.get("probe_mixup_hard_best", float("nan")))
+                            if not np.isfinite(probe) or float(probe) > float(probe_thr):
+                                continue
 
                         fam = str(rec.get("cand_family", ""))
                         if fam == "fbcsp":
@@ -1980,6 +1993,10 @@ def loso_cross_subject_evaluation(
                         p_pos = float(rec.get("guard_p_pos", float("nan")))
                         if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
                             continue
+                        if np.isfinite(probe_thr):
+                            probe = float(rec.get("probe_mixup_hard_best", float("nan")))
+                            if not np.isfinite(probe) or float(probe) > float(probe_thr):
+                                continue
 
                         fam = str(rec.get("cand_family", ""))
                         if fam == "fbcsp":

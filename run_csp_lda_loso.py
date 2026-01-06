@@ -531,6 +531,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-safe-anchor-probe-hard-worsen",
+        type=float,
+        default=-1.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: additional EA-anchor-relative gate using the MixVal-style "
+            "hard-major probe score h=probe_mixup_hard_best (smaller is better). If set >=0, require "
+            "h(cand) <= h(EA_anchor) + eps_worsen for non-identity candidates. -1 disables."
+        ),
+    )
+    p.add_argument(
         "--stack-calib-per-family",
         action="store_true",
         help=(
@@ -889,6 +899,9 @@ def main() -> None:
             anchor_delta_str = ""
             if float(args.stack_safe_anchor_guard_delta) > 0.0:
                 anchor_delta_str = f", anchor_guard_delta={float(args.stack_safe_anchor_guard_delta)}"
+            probe_gate_str = ""
+            if float(args.stack_safe_anchor_probe_hard_worsen) >= 0.0:
+                probe_gate_str = f", anchor_probe_hard_worsen={float(args.stack_safe_anchor_probe_hard_worsen)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -898,7 +911,7 @@ def main() -> None:
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
                 f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}{tsa_gate_str}; "
-                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{anchor_delta_str})."
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{anchor_delta_str}{probe_gate_str})."
             )
         elif method == "ea-mm-safe":
             alignment = "ea_mm_safe"
@@ -1324,6 +1337,7 @@ def main() -> None:
                 stack_safe_tsa_min_pred_improve=float(args.stack_safe_tsa_min_pred_improve),
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
                 stack_safe_anchor_guard_delta=float(args.stack_safe_anchor_guard_delta),
+                stack_safe_anchor_probe_hard_worsen=float(args.stack_safe_anchor_probe_hard_worsen),
                 stack_calib_per_family=bool(args.stack_calib_per_family),
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
