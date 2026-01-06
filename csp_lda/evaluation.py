@@ -1061,6 +1061,12 @@ def loso_cross_subject_evaluation(
                 mean_conf = float(np.mean(np.max(np.clip(p_c, 1e-12, 1.0), axis=1)))
 
                 d = _drift_vec(p_id, p_c)
+                try:
+                    y_id = np.asarray(np.argmax(p_id, axis=1), dtype=int).reshape(-1)
+                    y_c = np.asarray(np.argmax(p_c, axis=1), dtype=int).reshape(-1)
+                    pred_disagree = float(np.mean(y_id != y_c)) if y_id.shape == y_c.shape else 0.0
+                except Exception:
+                    pred_disagree = 0.0
                 rec = {
                     "kind": "candidate",
                     "objective_base": float(np.mean(ent)),
@@ -1068,6 +1074,7 @@ def loso_cross_subject_evaluation(
                     "mean_entropy": float(np.mean(ent)),
                     "entropy_bar": float(ent_bar),
                     "mean_confidence": float(mean_conf),
+                    "pred_disagree": float(pred_disagree),
                     "drift_best": float(np.mean(d)),
                     "drift_best_std": float(np.std(d)),
                     "drift_best_q90": float(np.quantile(d, 0.90)),
@@ -2165,6 +2172,7 @@ def loso_cross_subject_evaluation(
                         "mean_entropy": float(rec.get("mean_entropy", float("nan"))),
                         "mean_confidence": float(rec.get("mean_confidence", float("nan"))),
                         "entropy_bar": float(rec.get("entropy_bar", float("nan"))),
+                        "pred_disagree": float(rec.get("pred_disagree", float("nan"))),
                         "drift_best": float(rec.get("drift_best", float("nan"))),
                         "drift_best_std": float(rec.get("drift_best_std", float("nan"))),
                         "drift_best_q90": float(rec.get("drift_best_q90", float("nan"))),

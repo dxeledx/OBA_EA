@@ -135,6 +135,7 @@ def candidate_features_from_record(
     drift_best_q95 = _safe_float(rec.get("drift_best_q95", 0.0))
     drift_best_max = _safe_float(rec.get("drift_best_max", 0.0))
     drift_best_tail_frac = _safe_float(rec.get("drift_best_tail_frac", 0.0))
+    pred_disagree = _safe_float(rec.get("pred_disagree", 0.0))
 
     q_bar = np.asarray(rec.get("q_bar", np.zeros(n_classes)), dtype=np.float64).reshape(-1)
     if q_bar.shape[0] != n_classes:
@@ -147,6 +148,7 @@ def candidate_features_from_record(
         _safe_float(rec.get("objective_base", 0.0)),
         _safe_float(rec.get("pen_marginal", 0.0)),
         drift_best,
+        pred_disagree,
         drift_best_std,
         drift_best_q90,
         drift_best_q95,
@@ -165,6 +167,7 @@ def candidate_features_from_record(
         "objective_base",
         "pen_marginal",
         "drift_best",
+        "pred_disagree",
         "drift_best_std",
         "drift_best_q90",
         "drift_best_q95",
