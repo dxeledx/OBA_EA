@@ -536,8 +536,10 @@ def parse_args() -> argparse.Namespace:
         default=-1.0,
         help=(
             "For method=ea-stack-multi-safe-csp-lda only: additional EA-anchor-relative gate using the MixVal-style "
-            "hard-major probe score h=probe_mixup_hard_best (smaller is better). If set >=0, require "
-            "h(cand) <= h(EA_anchor) + eps_worsen for non-identity candidates. -1 disables."
+            "hard-major probe score h=probe_mixup_hard_best (smaller is better). "
+            "If set > -1, require h(cand) <= h(EA_anchor) + eps for non-identity candidates. "
+            "This supports two modes: eps>=0 is 'do-not-worsen' (tolerance), eps<0 is 'min-improve' "
+            "(require improvement by |eps|). Use -1 to disable."
         ),
     )
     p.add_argument(
@@ -900,7 +902,7 @@ def main() -> None:
             if float(args.stack_safe_anchor_guard_delta) > 0.0:
                 anchor_delta_str = f", anchor_guard_delta={float(args.stack_safe_anchor_guard_delta)}"
             probe_gate_str = ""
-            if float(args.stack_safe_anchor_probe_hard_worsen) >= 0.0:
+            if float(args.stack_safe_anchor_probe_hard_worsen) > -1.0:
                 probe_gate_str = f", anchor_probe_hard_worsen={float(args.stack_safe_anchor_probe_hard_worsen)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "

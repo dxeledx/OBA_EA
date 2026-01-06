@@ -533,8 +533,8 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_tsa_drift_delta must be >= 0.")
     if float(stack_safe_anchor_guard_delta) < 0.0:
         raise ValueError("stack_safe_anchor_guard_delta must be >= 0.")
-    if float(stack_safe_anchor_probe_hard_worsen) < -1.0 or (-1.0 < float(stack_safe_anchor_probe_hard_worsen) < 0.0):
-        raise ValueError("stack_safe_anchor_probe_hard_worsen must be -1 (disable) or >= 0.")
+    if float(stack_safe_anchor_probe_hard_worsen) < -1.0:
+        raise ValueError("stack_safe_anchor_probe_hard_worsen must be -1 (disable) or > -1.")
     if not isinstance(stack_calib_per_family, (bool, np.bool_)):
         raise ValueError("stack_calib_per_family must be a bool.")
     if str(stack_calib_per_family_mode) not in {"hard", "blend"}:
@@ -1855,7 +1855,10 @@ def loso_cross_subject_evaluation(
             if float(stack_safe_anchor_guard_delta) > 0.0 and np.isfinite(anchor_guard_pos):
                 anchor_thr = max(float(anchor_thr), float(anchor_guard_pos) + float(stack_safe_anchor_guard_delta))
             probe_thr = float("nan")
-            if float(stack_safe_anchor_probe_hard_worsen) >= 0.0 and np.isfinite(anchor_probe_hard):
+            if float(stack_safe_anchor_probe_hard_worsen) > -1.0 and np.isfinite(anchor_probe_hard):
+                # Allow both modes:
+                # - eps >= 0: do-not-worsen   => h(c) <= h(EA) + eps
+                # - eps <  0: min-improve     => h(c) <= h(EA) + eps  (i.e., h(c) <= h(EA) - |eps|)
                 probe_thr = float(anchor_probe_hard) + float(stack_safe_anchor_probe_hard_worsen)
             fbcsp_blocked = 0
             fbcsp_block_reason = ""

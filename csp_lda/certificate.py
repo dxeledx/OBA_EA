@@ -135,7 +135,6 @@ def candidate_features_from_record(
     drift_best_q95 = _safe_float(rec.get("drift_best_q95", 0.0))
     drift_best_max = _safe_float(rec.get("drift_best_max", 0.0))
     drift_best_tail_frac = _safe_float(rec.get("drift_best_tail_frac", 0.0))
-    pred_disagree = _safe_float(rec.get("pred_disagree", 0.0))
 
     q_bar = np.asarray(rec.get("q_bar", np.zeros(n_classes)), dtype=np.float64).reshape(-1)
     if q_bar.shape[0] != n_classes:
@@ -148,7 +147,6 @@ def candidate_features_from_record(
         _safe_float(rec.get("objective_base", 0.0)),
         _safe_float(rec.get("pen_marginal", 0.0)),
         drift_best,
-        pred_disagree,
         drift_best_std,
         drift_best_q90,
         drift_best_q95,
@@ -167,7 +165,6 @@ def candidate_features_from_record(
         "objective_base",
         "pen_marginal",
         "drift_best",
-        "pred_disagree",
         "drift_best_std",
         "drift_best_q90",
         "drift_best_q95",
@@ -970,8 +967,8 @@ def select_by_guarded_predicted_improvement(
         raise ValueError("threshold must be in [0,1].")
     if float(anchor_guard_delta) < 0.0:
         raise ValueError("anchor_guard_delta must be >= 0.")
-    if float(anchor_probe_hard_worsen) < -1.0 or (-1.0 < float(anchor_probe_hard_worsen) < 0.0):
-        raise ValueError("anchor_probe_hard_worsen must be -1 (disable) or >= 0.")
+    if float(anchor_probe_hard_worsen) < -1.0:
+        raise ValueError("anchor_probe_hard_worsen must be -1 (disable) or > -1.")
     if str(family_blend_mode) not in {"hard", "blend"}:
         raise ValueError("family_blend_mode must be one of: 'hard', 'blend'.")
     if float(family_shrinkage) < 0.0:
@@ -1048,7 +1045,7 @@ def select_by_guarded_predicted_improvement(
     if float(anchor_guard_delta) > 0.0 and anchor_p_pos is not None and np.isfinite(anchor_p_pos):
         thr_anchor = float(anchor_p_pos) + float(anchor_guard_delta)
     thr_probe = float("nan")
-    if float(anchor_probe_hard_worsen) >= 0.0 and anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
+    if float(anchor_probe_hard_worsen) > -1.0 and anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
         thr_probe = float(anchor_probe_hard) + float(anchor_probe_hard_worsen)
 
     for rec in computed:
@@ -1113,8 +1110,8 @@ def select_by_guarded_bandit_policy(
         raise ValueError("threshold must be in [0,1].")
     if float(anchor_guard_delta) < 0.0:
         raise ValueError("anchor_guard_delta must be >= 0.")
-    if float(anchor_probe_hard_worsen) < -1.0 or (-1.0 < float(anchor_probe_hard_worsen) < 0.0):
-        raise ValueError("anchor_probe_hard_worsen must be -1 (disable) or >= 0.")
+    if float(anchor_probe_hard_worsen) < -1.0:
+        raise ValueError("anchor_probe_hard_worsen must be -1 (disable) or > -1.")
 
     # First pass: compute guard scores for all records so we can apply anchor-relative filtering robustly.
     computed: list[dict] = []
@@ -1149,7 +1146,7 @@ def select_by_guarded_bandit_policy(
     if float(anchor_guard_delta) > 0.0 and anchor_p_pos is not None and np.isfinite(anchor_p_pos):
         thr_anchor = float(anchor_p_pos) + float(anchor_guard_delta)
     thr_probe = float("nan")
-    if float(anchor_probe_hard_worsen) >= 0.0 and anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
+    if float(anchor_probe_hard_worsen) > -1.0 and anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
         thr_probe = float(anchor_probe_hard) + float(anchor_probe_hard_worsen)
 
     best: dict | None = None
