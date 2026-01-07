@@ -1080,15 +1080,18 @@ def select_by_guarded_predicted_improvement(
         pred_improve = float(rec.get("ridge_pred_improve", float("nan")))
         is_identity = str(rec.get("kind", "")) == "identity"
 
-        if not is_identity:
-            if not np.isfinite(p_pos) or float(p_pos) < float(threshold):
+        # Never rank identity (EA) as an eligible candidate; keep it only as the anchor/fallback.
+        if is_identity:
+            continue
+
+        if not np.isfinite(p_pos) or float(p_pos) < float(threshold):
+            continue
+        if np.isfinite(thr_anchor) and float(p_pos) < float(thr_anchor):
+            continue
+        if np.isfinite(thr_probe):
+            probe = float(rec.get("probe_mixup_hard_best", float("nan")))
+            if not np.isfinite(probe) or float(probe) > float(thr_probe):
                 continue
-            if np.isfinite(thr_anchor) and float(p_pos) < float(thr_anchor):
-                continue
-            if np.isfinite(thr_probe):
-                probe = float(rec.get("probe_mixup_hard_best", float("nan")))
-                if not np.isfinite(probe) or float(probe) > float(thr_probe):
-                    continue
 
         drift = _safe_float(rec.get("drift_best", 0.0))
         if drift_mode == "hard" and float(drift_delta) > 0.0 and float(drift) > float(drift_delta):
