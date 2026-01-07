@@ -440,6 +440,7 @@ def loso_cross_subject_evaluation(
         "calibrated_ridge_guard",
         "calibrated_stack_ridge",
         "calibrated_stack_ridge_guard",
+        "calibrated_stack_ridge_guard_borda",
         "calibrated_stack_bandit_guard",
         "oracle",
     }:
@@ -991,6 +992,7 @@ def loso_cross_subject_evaluation(
             use_stack = selector in {
                 "calibrated_stack_ridge",
                 "calibrated_stack_ridge_guard",
+                "calibrated_stack_ridge_guard_borda",
                 "calibrated_stack_bandit_guard",
             }
             use_ridge = selector in {
@@ -998,12 +1000,14 @@ def loso_cross_subject_evaluation(
                 "calibrated_ridge_guard",
                 "calibrated_stack_ridge",
                 "calibrated_stack_ridge_guard",
+                "calibrated_stack_ridge_guard_borda",
                 "calibrated_stack_bandit_guard",
             }
             use_guard = selector in {
                 "calibrated_guard",
                 "calibrated_ridge_guard",
                 "calibrated_stack_ridge_guard",
+                "calibrated_stack_ridge_guard_borda",
                 "calibrated_stack_bandit_guard",
             }
             use_bandit = selector in {"calibrated_stack_bandit_guard"}
@@ -1792,6 +1796,26 @@ def loso_cross_subject_evaluation(
                     drift_delta=float(oea_zo_drift_delta),
                     feature_set="stacked",
                 )
+            elif selector == "calibrated_stack_ridge_guard_borda" and cert is not None and guard is not None:
+                selected = select_by_guarded_predicted_improvement(
+                    records,
+                    cert=cert,
+                    guard=guard,
+                    cert_by_family=(cert_by_family if bool(stack_calib_per_family) else None),
+                    guard_by_family=(guard_by_family if bool(stack_calib_per_family) else None),
+                    family_counts=(family_counts if bool(stack_calib_per_family) else None),
+                    family_blend_mode=str(stack_calib_per_family_mode),
+                    family_shrinkage=float(stack_calib_per_family_shrinkage),
+                    n_classes=len(class_labels),
+                    threshold=float(oea_zo_calib_guard_threshold),
+                    anchor_guard_delta=float(stack_safe_anchor_guard_delta),
+                    anchor_probe_hard_worsen=float(stack_safe_anchor_probe_hard_worsen),
+                    drift_mode=str(oea_zo_drift_mode),
+                    drift_gamma=float(oea_zo_drift_gamma),
+                    drift_delta=float(oea_zo_drift_delta),
+                    feature_set="stacked",
+                    score_mode="borda_ridge_probe",
+                )
             elif selector == "calibrated_ridge_guard" and cert is not None and guard is not None:
                 selected = select_by_guarded_predicted_improvement(
                     records,
@@ -1876,6 +1900,7 @@ def loso_cross_subject_evaluation(
                 and selector in {
                     "calibrated_ridge_guard",
                     "calibrated_stack_ridge_guard",
+                    "calibrated_stack_ridge_guard_borda",
                     "calibrated_stack_bandit_guard",
                 }
             ):
@@ -1966,6 +1991,7 @@ def loso_cross_subject_evaluation(
                 and selector in {
                     "calibrated_ridge_guard",
                     "calibrated_stack_ridge_guard",
+                    "calibrated_stack_ridge_guard_borda",
                     "calibrated_stack_bandit_guard",
                 }
             ):

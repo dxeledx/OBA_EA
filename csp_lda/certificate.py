@@ -953,6 +953,7 @@ def select_by_guarded_predicted_improvement(
     drift_gamma: float = 0.0,
     drift_delta: float = 0.0,
     feature_set: str = "base",
+    score_mode: str = "ridge",
 ) -> dict:
     """Guarded selection: reject likely negative-transfer candidates, then pick by ridge prediction.
 
@@ -973,6 +974,8 @@ def select_by_guarded_predicted_improvement(
         raise ValueError("family_blend_mode must be one of: 'hard', 'blend'.")
     if float(family_shrinkage) < 0.0:
         raise ValueError("family_shrinkage must be >= 0.")
+    if str(score_mode) not in {"ridge", "borda_ridge_probe"}:
+        raise ValueError("score_mode must be one of: 'ridge', 'borda_ridge_probe'.")
 
     # First pass: compute guard / ridge predictions for all candidates and cache them on records.
     computed: list[dict] = []
@@ -1048,6 +1051,30 @@ def select_by_guarded_predicted_improvement(
     if float(anchor_probe_hard_worsen) > -1.0 and anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
         thr_probe = float(anchor_probe_hard) + float(anchor_probe_hard_worsen)
 
+    def _rank_desc_min(values: np.ndarray) -> np.ndarray:
+        v = np.asarray(values, dtype=np.float64).reshape(-1)
+        if v.size == 0:
+            return np.asarray([], dtype=np.float64)
+        v = np.where(np.isfinite(v), v, -np.inf)
+        order = np.argsort(-v, kind="mergesort")
+        ranks_sorted = (np.arange(v.size, dtype=np.float64) + 1.0).copy()
+        # Tie handling: assign min rank for equal values.
+        sv = v[order]
+        start = 0
+        while start < sv.size:
+            end = start + 1
+            while end < sv.size and sv[end] == sv[start]:
+                end += 1
+            ranks_sorted[start:end] = ranks_sorted[start]
+            start = end
+        ranks = np.empty_like(ranks_sorted)
+        ranks[order] = ranks_sorted
+        return ranks
+
+    eligible_recs: list[dict] = []
+    eligible_pred: list[float] = []
+    eligible_probe_imp: list[float] = []
+
     for rec in computed:
         p_pos = float(rec.get("guard_p_pos", float("nan")))
         pred_improve = float(rec.get("ridge_pred_improve", float("nan")))
@@ -1069,12 +1096,55 @@ def select_by_guarded_predicted_improvement(
         if drift_mode == "penalty" and float(drift_gamma) > 0.0:
             pred_improve = float(pred_improve) - float(drift_gamma) * float(drift)
 
-        if pred_improve > best_score:
-            best_score = float(pred_improve)
-            best = rec
+        eligible_recs.append(rec)
+        eligible_pred.append(float(pred_improve))
+        if anchor_probe_hard is not None and np.isfinite(anchor_probe_hard):
+            probe_imp = float(anchor_probe_hard) - float(rec.get("probe_mixup_hard_best", float("nan")))
+        else:
+            probe_imp = float("nan")
+        eligible_probe_imp.append(float(probe_imp))
 
-    # Safety: if the best predicted improvement is non-positive, fall back to identity.
-    if best is None or best_score <= 0.0:
+    # No eligible candidate => safe fallback to identity.
+    if not eligible_recs:
+        if identity is not None:
+            return identity
+        for rec in records:
+            return rec
+        raise ValueError("No candidates to select from.")
+
+    # Default score: ridge predicted improvement (legacy behavior).
+    if str(score_mode) == "ridge" or not np.isfinite(_safe_float_or(anchor_probe_hard, float("nan"))):
+        best = None
+        best_score = -float("inf")
+        for rec, pred_improve in zip(eligible_recs, eligible_pred):
+            if float(pred_improve) > float(best_score):
+                best_score = float(pred_improve)
+                best = rec
+
+        # Safety: if the best predicted improvement is non-positive, fall back to identity.
+        if best is None or float(best_score) <= 0.0:
+            if identity is not None:
+                return identity
+            for rec in records:
+                return rec
+            raise ValueError("No candidates to select from.")
+
+        return best
+
+    # Borda aggregation: combine ridge_pred_improve and probe_improve ranks.
+    pred_arr = np.asarray(eligible_pred, dtype=np.float64)
+    probe_arr = np.asarray(eligible_probe_imp, dtype=np.float64)
+    ranks_pred = _rank_desc_min(pred_arr)
+    ranks_probe = _rank_desc_min(probe_arr)
+    score = ranks_pred + ranks_probe  # smaller is better
+
+    best_idx = int(np.argmin(score))
+    best = eligible_recs[best_idx]
+    best_pred = float(pred_arr[best_idx])
+    best_probe = float(probe_arr[best_idx])
+
+    # Safety fallback: if both signals indicate non-positive improvement, return identity.
+    if float(max(best_pred, best_probe)) <= 0.0:
         if identity is not None:
             return identity
         for rec in records:
