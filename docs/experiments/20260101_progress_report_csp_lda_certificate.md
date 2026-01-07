@@ -10,12 +10,12 @@
 
 **关键结论**：
 - Anchor `ea-csp-lda`：mean acc **0.5320**，worst‑subject **0.2569**。
-- 当前最好的 **CSP+LDA‑only** 方法：`ea-si-chan-multi-safe-csp-lda`
-  - mean acc **0.5463**（**+1.43% abs** vs EA）
-  - worst‑subject **0.2604**（略高于 EA）
+- 当前最好的 **CSP+LDA family** 方法：`ea-stack-multi-safe-csp-lda`（multi-family candidate stack + calibrated guard + fallback）
+  - mean acc **0.5498**（**+1.77% abs** vs EA）
+  - worst‑subject **0.2569**（与 EA 持平）
   - `neg_transfer_rate_vs_ea = 0.0`
-  - `accept_rate = 5/9 = 0.5556`
-  - **证书有效性（跨被试）**：Spearman(`pred_improve`, `true_improve`) = **0.3667**
+  - `accept_rate = 6/9 = 0.6667`
+  - **证书有效性（跨被试）**：Spearman(`cert_improve`, `true_improve`) = **0.45**
 - （扩展，不算“CSP+LDA‑only”）`ea-mm-safe`：mean acc **0.5475**（+1.54% abs），但 candidate 中包含一次 MDM 选择。
 
 ---
@@ -167,7 +167,42 @@ Outputs：
 
 ---
 
-## 6) 下一次实验记录模板（从现在开始按这个写）
+## 6) Round‑5（成功）— multi-family stack + Borda 选择器修复：把“证书可用”变成“提升更大且 0 负迁移”
+
+> 完整记录：`docs/experiments/20260107_loso4_borda_selector_fix.md:1`
+
+### 6.1 上一次失败分析（post‑mortem）
+第一次引入 Borda 组合（ridge + probe_hard）时，结果几乎等同于 ridge+fallback：
+- mean acc **0.5413**（+0.93% vs EA）
+- `neg_transfer_rate_vs_ea = 0.1111`（S8 掉点）
+
+根因：Borda 排名把 **EA(identity)** 也作为候选一起排名，tie‑break 会让 identity 误胜，导致 Borda “形同虚设”。
+
+### 6.2 本次准备怎么做（只动一个杠杆）
+只修复选择逻辑：Borda 的排名集合只包含 **non‑identity candidates**，EA 只作为 anchor/fallback。
+
+### 6.3 怎么做的（命令 + 输出）
+Outputs：
+- `outputs/20260107/4class/loso4_actionset_stack_familyblend_k20_probe_minimp001_borda_fix_v1/`
+
+图（per‑subject Δacc / oracle gap / family 选择轨迹）：
+- `docs/experiments/figures/20260107_loso4_borda_fix/loso4_borda_fix_delta.png`
+- `docs/experiments/figures/20260107_loso4_borda_fix/loso4_borda_fix_oracle_gap.png`
+- `docs/experiments/figures/20260107_loso4_borda_fix/loso4_borda_fix_family.png`
+
+### 6.4 最终结果（主表指标 + 证据链）
+主表（`20260107_method_comparison.csv`）：
+- `ea-csp-lda` mean acc **0.5320**
+- `ea-stack-multi-safe-csp-lda` mean acc **0.5498**（**+1.77% abs**）
+- `neg_transfer_rate_vs_ea = 0.0`
+- `accept_rate = 0.6667`
+- oracle gap（平均）：`gap_sel_mean = 0.0135`（候选集里“能涨的”更容易被选到）
+
+结论：在保持同协议 + 同候选集 + 同 safety gates 的前提下，仅修复 Borda 选择器就把 mean 从 **0.5413 → 0.5498**，并把负迁移压到 **0**，说明这轮的主要瓶颈确实在 **“证书/选择规则是否正确执行”**。
+
+---
+
+## 7) 下一次实验记录模板（从现在开始按这个写）
 
 每次新实验笔记建议固定为四段（对应你要求的“先分析失败→再计划→再执行→再结果”）：
 
