@@ -546,6 +546,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-safe-min-pred-improve",
+        type=float,
+        default=0.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: global gate applied to all non-identity candidates. "
+            "Require the (blended) ridge-predicted improvement to be at least this value before a candidate can be selected (>=0)."
+        ),
+    )
+    p.add_argument(
         "--stack-calib-per-family",
         action="store_true",
         help=(
@@ -918,6 +927,9 @@ def main() -> None:
             probe_gate_str = ""
             if float(args.stack_safe_anchor_probe_hard_worsen) > -1.0:
                 probe_gate_str = f", anchor_probe_hard_worsen={float(args.stack_safe_anchor_probe_hard_worsen)}"
+            global_min_pred_str = ""
+            if float(args.stack_safe_min_pred_improve) > 0.0:
+                global_min_pred_str = f", min_pred={float(args.stack_safe_min_pred_improve)}"
             feat_set_str = f", feat_set={str(args.stack_feature_set)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
@@ -927,7 +939,7 @@ def main() -> None:
                 f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
-                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}{tsa_gate_str}; "
+                f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{global_min_pred_str}{fbcsp_gate_str}{tsa_gate_str}; "
                 f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{feat_set_str}{anchor_delta_str}{probe_gate_str})."
             )
         elif method == "ea-mm-safe":
@@ -1355,6 +1367,7 @@ def main() -> None:
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
                 stack_safe_anchor_guard_delta=float(args.stack_safe_anchor_guard_delta),
                 stack_safe_anchor_probe_hard_worsen=float(args.stack_safe_anchor_probe_hard_worsen),
+                stack_safe_min_pred_improve=float(args.stack_safe_min_pred_improve),
                 stack_calib_per_family=bool(args.stack_calib_per_family),
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
