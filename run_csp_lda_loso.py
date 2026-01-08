@@ -575,6 +575,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-feature-set",
+        type=str,
+        default="stacked",
+        choices=["stacked", "stacked_delta"],
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: feature representation used by calibrated stack selectors. "
+            "'stacked' uses absolute unlabeled features; "
+            "'stacked_delta' uses anchor-relative (candidate - EA) features for all non-meta features."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -907,6 +918,7 @@ def main() -> None:
             probe_gate_str = ""
             if float(args.stack_safe_anchor_probe_hard_worsen) > -1.0:
                 probe_gate_str = f", anchor_probe_hard_worsen={float(args.stack_safe_anchor_probe_hard_worsen)}"
+            feat_set_str = f", feat_set={str(args.stack_feature_set)}"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
                 "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
@@ -916,7 +928,7 @@ def main() -> None:
                 f"guard_thr={args.oea_zo_calib_guard_threshold}, guard_margin={args.oea_zo_calib_guard_margin}, "
                 f"max_subjects={args.oea_zo_calib_max_subjects}, seed={args.oea_zo_calib_seed}; "
                 f"drift_mode={args.oea_zo_drift_mode}, drift_delta={args.oea_zo_drift_delta}{fbcsp_gate_str}{tsa_gate_str}; "
-                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{anchor_delta_str}{probe_gate_str})."
+                f"fallback_Hbar<{args.oea_zo_fallback_min_marginal_entropy}{per_family_str}{feat_set_str}{anchor_delta_str}{probe_gate_str})."
             )
         elif method == "ea-mm-safe":
             alignment = "ea_mm_safe"
@@ -1346,6 +1358,7 @@ def main() -> None:
                 stack_calib_per_family=bool(args.stack_calib_per_family),
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
+                stack_feature_set=str(args.stack_feature_set),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),

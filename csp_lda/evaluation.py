@@ -33,6 +33,7 @@ from .subject_invariant import (
 from .certificate import (
     candidate_features_from_record,
     stacked_candidate_features_from_record,
+    stacked_candidate_features_delta_from_records,
     select_by_dev_nll,
     select_by_evidence_nll,
     select_by_guarded_bandit_policy,
@@ -305,6 +306,7 @@ def loso_cross_subject_evaluation(
     stack_calib_per_family: bool = False,
     stack_calib_per_family_mode: str = "hard",
     stack_calib_per_family_shrinkage: float = 20.0,
+    stack_feature_set: str = "stacked",
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -542,6 +544,8 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_calib_per_family_mode must be one of: 'hard', 'blend'.")
     if float(stack_calib_per_family_shrinkage) < 0.0:
         raise ValueError("stack_calib_per_family_shrinkage must be >= 0.")
+    if str(stack_feature_set) not in {"stacked", "stacked_delta"}:
+        raise ValueError("stack_feature_set must be one of: 'stacked', 'stacked_delta'.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -1278,8 +1282,9 @@ def loso_cross_subject_evaluation(
                     p_id = _reorder_proba_columns(m_ea.predict_proba(z_p_ea), m_ea.classes_, list(class_labels))
                     acc_id = float(accuracy_score(y_p, np.asarray(m_ea.predict(z_p_ea))))
 
-                    # Identity action for bandit training (reward=0).
-                    if use_bandit:
+                    # Identity (EA anchor) record: used as the reference for anchor-relative (delta) features.
+                    rec_id_c = None
+                    if use_stack or use_bandit or str(stack_feature_set) == "stacked_delta":
                         try:
                             feats_id_c = _features_before_lda(model=m_ea, X=z_p_ea) if use_stack else None
                             rec_id_c = _record_for_candidate(
@@ -1292,14 +1297,27 @@ def loso_cross_subject_evaluation(
                             )
                             rec_id_c["kind"] = "identity"
                             rec_id_c["cand_family"] = "ea"
-                            if use_stack:
-                                feats_id, names = stacked_candidate_features_from_record(
-                                    rec_id_c, n_classes=len(class_labels), include_pbar=True
-                                )
-                            else:
-                                feats_id, names = candidate_features_from_record(
-                                    rec_id_c, n_classes=len(class_labels), include_pbar=True
-                                )
+                        except Exception:
+                            rec_id_c = None
+
+                    def _feats_for_stack(rec: dict) -> tuple[np.ndarray, tuple[str, ...]]:
+                        if not use_stack:
+                            return candidate_features_from_record(rec, n_classes=len(class_labels), include_pbar=True)
+                        if str(stack_feature_set) == "stacked_delta":
+                            if rec_id_c is None:
+                                raise RuntimeError("stack_feature_set=stacked_delta requires a valid identity record.")
+                            return stacked_candidate_features_delta_from_records(
+                                rec,
+                                anchor=rec_id_c,
+                                n_classes=len(class_labels),
+                                include_pbar=True,
+                            )
+                        return stacked_candidate_features_from_record(rec, n_classes=len(class_labels), include_pbar=True)
+
+                    # Identity action for bandit training (reward=0).
+                    if use_bandit and rec_id_c is not None:
+                        try:
+                            feats_id, names = _feats_for_stack(rec_id_c)
                             if feat_names is None:
                                 feat_names = names
                             _add_bandit_sample(gid=int(pseudo_t), feats=feats_id, reward=0.0)
@@ -1323,14 +1341,7 @@ def loso_cross_subject_evaluation(
                             seed_local=seed_pseudo_base + 11,
                         )
                         rec_fbcsp["cand_family"] = "fbcsp"
-                        if use_stack:
-                            feats_fbcsp, names = stacked_candidate_features_from_record(
-                                rec_fbcsp, n_classes=len(class_labels), include_pbar=True
-                            )
-                        else:
-                            feats_fbcsp, names = candidate_features_from_record(
-                                rec_fbcsp, n_classes=len(class_labels), include_pbar=True
-                            )
+                        feats_fbcsp, names = _feats_for_stack(rec_fbcsp)
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="fbcsp", feats=feats_fbcsp, improve=improve_fbcsp)
@@ -1353,14 +1364,7 @@ def loso_cross_subject_evaluation(
                         seed_local=seed_pseudo_base + 22,
                     )
                     rec_rpa["cand_family"] = "rpa"
-                    if use_stack:
-                        feats_rpa, names = stacked_candidate_features_from_record(
-                            rec_rpa, n_classes=len(class_labels), include_pbar=True
-                        )
-                    else:
-                        feats_rpa, names = candidate_features_from_record(
-                            rec_rpa, n_classes=len(class_labels), include_pbar=True
-                        )
+                    feats_rpa, names = _feats_for_stack(rec_rpa)
                     if feat_names is None:
                         feat_names = names
                     _add_calib_sample(fam="rpa", feats=feats_rpa, improve=improve_rpa)
@@ -1399,14 +1403,7 @@ def loso_cross_subject_evaluation(
                             seed_local=seed_pseudo_base + 33,
                         )
                         rec_tsa["cand_family"] = "tsa"
-                        if use_stack:
-                            feats_tsa, names = stacked_candidate_features_from_record(
-                                rec_tsa, n_classes=len(class_labels), include_pbar=True
-                            )
-                        else:
-                            feats_tsa, names = candidate_features_from_record(
-                                rec_tsa, n_classes=len(class_labels), include_pbar=True
-                            )
+                        feats_tsa, names = _feats_for_stack(rec_tsa)
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="tsa", feats=feats_tsa, improve=improve_tsa)
@@ -1453,14 +1450,7 @@ def loso_cross_subject_evaluation(
                         rec_A["cand_key"] = cand_key
                         rec_A["cand_rank"] = float(info.get("rank", float("nan")))
                         rec_A["cand_lambda"] = float(info.get("lambda", float("nan")))
-                        if use_stack:
-                            feats_A, names = stacked_candidate_features_from_record(
-                                rec_A, n_classes=len(class_labels), include_pbar=True
-                            )
-                        else:
-                            feats_A, names = candidate_features_from_record(
-                                rec_A, n_classes=len(class_labels), include_pbar=True
-                            )
+                        feats_A, names = _feats_for_stack(rec_A)
                         if feat_names is None:
                             feat_names = names
                         _add_calib_sample(fam="chan", feats=feats_A, improve=improve_A)
@@ -1757,9 +1747,17 @@ def loso_cross_subject_evaluation(
                 if cert is not None:
                     try:
                         for rec in records:
-                            feats, _ = stacked_candidate_features_from_record(
-                                rec, n_classes=len(class_labels), include_pbar=True
-                            )
+                            if str(stack_feature_set) == "stacked_delta":
+                                feats, _ = stacked_candidate_features_delta_from_records(
+                                    rec,
+                                    anchor=rec_id,
+                                    n_classes=len(class_labels),
+                                    include_pbar=True,
+                                )
+                            else:
+                                feats, _ = stacked_candidate_features_from_record(
+                                    rec, n_classes=len(class_labels), include_pbar=True
+                                )
                             rec["ridge_pred_improve"] = float(cert.predict_accuracy(feats)[0])
                     except Exception:
                         pass
@@ -1775,7 +1773,7 @@ def loso_cross_subject_evaluation(
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
-                    feature_set="stacked",
+                    feature_set=str(stack_feature_set),
                 )
             elif selector == "calibrated_stack_ridge_guard" and cert is not None and guard is not None:
                 selected = select_by_guarded_predicted_improvement(
@@ -1794,7 +1792,7 @@ def loso_cross_subject_evaluation(
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
-                    feature_set="stacked",
+                    feature_set=str(stack_feature_set),
                 )
             elif selector == "calibrated_stack_ridge_guard_borda" and cert is not None and guard is not None:
                 selected = select_by_guarded_predicted_improvement(
@@ -1813,7 +1811,7 @@ def loso_cross_subject_evaluation(
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
-                    feature_set="stacked",
+                    feature_set=str(stack_feature_set),
                     score_mode="borda_ridge_probe",
                 )
             elif selector == "calibrated_ridge_guard" and cert is not None and guard is not None:
@@ -1841,7 +1839,7 @@ def loso_cross_subject_evaluation(
                     drift_mode=str(oea_zo_drift_mode),
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
-                    feature_set="stacked",
+                    feature_set=str(stack_feature_set),
                 )
             elif selector == "calibrated_ridge" and cert is not None:
                 selected = select_by_predicted_improvement(

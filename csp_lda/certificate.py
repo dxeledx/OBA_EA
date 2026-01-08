@@ -267,6 +267,41 @@ def stacked_candidate_features_from_record(
     return feats, names
 
 
+def stacked_candidate_features_delta_from_records(
+    rec: dict,
+    *,
+    anchor: dict,
+    n_classes: int,
+    include_pbar: bool = True,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Anchor-relative stacked feature vector.
+
+    Computes Δ-features = features(rec) - features(anchor) for all non-meta features.
+
+    Meta features are kept absolute:
+    - cand_family_* one-hots
+    - cand_rank / cand_lambda
+
+    This is intended for calibrated selection where the target is Δacc over the EA anchor.
+    """
+
+    x, names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=include_pbar)
+    x0, names0 = stacked_candidate_features_from_record(anchor, n_classes=n_classes, include_pbar=include_pbar)
+    if names != names0:
+        raise ValueError("Anchor/record feature name mismatch.")
+
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    x0 = np.asarray(x0, dtype=np.float64).reshape(-1)
+    out = x.copy()
+    out_names = list(names)
+    for i, name in enumerate(names):
+        if name.startswith("cand_family_") or name in {"cand_rank", "cand_lambda"}:
+            continue
+        out[i] = float(x[i]) - float(x0[i])
+        out_names[i] = f"delta_{name}"
+    return out, tuple(out_names)
+
+
 def _csp_logvar_features(*, model: TrainedModel, X: np.ndarray) -> np.ndarray:
     """Compute CSP log-variance features with the already-fitted CSP filters."""
 
@@ -839,16 +874,28 @@ def select_by_predicted_improvement(
     Returns the selected record (dict).
     """
 
+    records = list(records)
     best: dict | None = None
     best_score = -float("inf")
     identity: dict | None = None
+    if feature_set == "stacked_delta":
+        for rec in records:
+            if str(rec.get("kind", "")) == "identity":
+                identity = rec
+                break
+        if identity is None:
+            raise ValueError("stacked_delta feature_set requires an identity (EA anchor) record.")
 
     for rec in records:
-        if str(rec.get("kind", "")) == "identity":
+        if str(rec.get("kind", "")) == "identity" and identity is None:
             identity = rec
 
         if feature_set == "stacked":
             feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        elif feature_set == "stacked_delta":
+            feats, _names = stacked_candidate_features_delta_from_records(
+                rec, anchor=identity, n_classes=n_classes, include_pbar=True
+            )
         else:
             feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
         pred_improve = float(cert.predict_accuracy(feats)[0])
@@ -977,18 +1024,31 @@ def select_by_guarded_predicted_improvement(
     if str(score_mode) not in {"ridge", "borda_ridge_probe"}:
         raise ValueError("score_mode must be one of: 'ridge', 'borda_ridge_probe'.")
 
+    records = list(records)
+    identity: dict | None = None
+    if feature_set == "stacked_delta":
+        for rec in records:
+            if str(rec.get("kind", "")) == "identity":
+                identity = rec
+                break
+        if identity is None:
+            raise ValueError("stacked_delta feature_set requires an identity (EA anchor) record.")
+
     # First pass: compute guard / ridge predictions for all candidates and cache them on records.
     computed: list[dict] = []
-    identity: dict | None = None
     anchor_p_pos: float | None = None
     anchor_probe_hard: float | None = None
 
     for rec in records:
-        if str(rec.get("kind", "")) == "identity":
+        if str(rec.get("kind", "")) == "identity" and identity is None:
             identity = rec
 
         if feature_set == "stacked":
             feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        elif feature_set == "stacked_delta":
+            feats, _names = stacked_candidate_features_delta_from_records(
+                rec, anchor=identity, n_classes=n_classes, include_pbar=True
+            )
         else:
             feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
 
@@ -1186,18 +1246,31 @@ def select_by_guarded_bandit_policy(
     if float(anchor_probe_hard_worsen) < -1.0:
         raise ValueError("anchor_probe_hard_worsen must be -1 (disable) or > -1.")
 
+    records = list(records)
+    identity: dict | None = None
+    if feature_set == "stacked_delta":
+        for rec in records:
+            if str(rec.get("kind", "")) == "identity":
+                identity = rec
+                break
+        if identity is None:
+            raise ValueError("stacked_delta feature_set requires an identity (EA anchor) record.")
+
     # First pass: compute guard scores for all records so we can apply anchor-relative filtering robustly.
     computed: list[dict] = []
-    identity: dict | None = None
     anchor_p_pos: float | None = None
     anchor_probe_hard: float | None = None
 
     for rec in records:
-        if str(rec.get("kind", "")) == "identity":
+        if str(rec.get("kind", "")) == "identity" and identity is None:
             identity = rec
 
         if feature_set == "stacked":
             feats, _names = stacked_candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
+        elif feature_set == "stacked_delta":
+            feats, _names = stacked_candidate_features_delta_from_records(
+                rec, anchor=identity, n_classes=n_classes, include_pbar=True
+            )
         else:
             feats, _names = candidate_features_from_record(rec, n_classes=n_classes, include_pbar=True)
 
