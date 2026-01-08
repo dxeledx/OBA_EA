@@ -118,6 +118,24 @@ def _format_pm_std(mean: float, std: float, *, digits: int) -> str:
     return f"{mean:.{digits}f}±{std:.{digits}f}"
 
 
+def _bootstrap_ci_mean(x: np.ndarray, *, iters: int = 20000, alpha: float = 0.05, seed: int = 0) -> tuple[float, float]:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 1:
+        return float("nan"), float("nan")
+    if x.size == 1:
+        return float(x[0]), float(x[0])
+    rng = np.random.default_rng(int(seed))
+    n = int(x.size)
+    means = np.empty(int(iters), dtype=float)
+    for i in range(int(iters)):
+        idx = rng.integers(0, n, size=n)
+        means[i] = float(np.mean(x[idx]))
+    lo = float(np.quantile(means, alpha / 2.0))
+    hi = float(np.quantile(means, 1.0 - alpha / 2.0))
+    return lo, hi
+
+
 @dataclass(frozen=True)
 class MethodSummary:
     method: str
@@ -129,6 +147,8 @@ class MethodSummary:
     std_kappa: float
     worst_kappa: float
     mean_delta_vs_baseline: float
+    delta_ci95_low: float
+    delta_ci95_high: float
     neg_transfer_rate_vs_baseline: float
     n_pos: int
     n_neg: int
@@ -205,6 +225,7 @@ def compute_table(
         a = acc.loc[m].to_numpy(dtype=float)
         k = kap.loc[m].to_numpy(dtype=float)
         delta = (acc.loc[m] - base_acc).to_numpy(dtype=float)
+        ci_low, ci_high = _bootstrap_ci_mean(delta)
         n_pos = int((delta > 0.0).sum())
         n_neg = int((delta < 0.0).sum())
         n_zero = int((delta == 0.0).sum())
@@ -219,6 +240,8 @@ def compute_table(
                 std_kappa=float(np.nanstd(k, ddof=1)),
                 worst_kappa=float(np.nanmin(k)),
                 mean_delta_vs_baseline=float(np.nanmean(delta)),
+                delta_ci95_low=float(ci_low),
+                delta_ci95_high=float(ci_high),
                 neg_transfer_rate_vs_baseline=float(n_neg / len(delta)) if len(delta) else float("nan"),
                 n_pos=n_pos,
                 n_neg=n_neg,
@@ -317,4 +340,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
