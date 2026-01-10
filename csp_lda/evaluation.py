@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import gc
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -60,6 +61,23 @@ from .zo import (
     _write_zo_diagnostics,
 )
 from .riemann import covariances_from_epochs
+
+
+def _maybe_malloc_trim() -> None:
+    """Best-effort RSS reduction (glibc): return freed heap pages to the OS.
+
+    This is important for long-running LOSO loops on large datasets where repeated
+    allocation/free patterns can otherwise keep RSS high and trigger OOM kills.
+    """
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        if hasattr(libc, "malloc_trim"):
+            libc.malloc_trim(0)
+    except Exception:
+        return
 
 
 def _compute_tsa_target_rotation(
@@ -308,6 +326,7 @@ def loso_cross_subject_evaluation(
     stack_calib_per_family_mode: str = "hard",
     stack_calib_per_family_shrinkage: float = 20.0,
     stack_feature_set: str = "stacked",
+    stack_candidate_families: Sequence[str] = ("ea", "fbcsp", "rpa", "tsa", "chan"),
     si_subject_lambda: float = 1.0,
     si_ridge: float = 1e-6,
     si_proj_dim: int = 0,
@@ -549,6 +568,15 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_calib_per_family_shrinkage must be >= 0.")
     if str(stack_feature_set) not in {"stacked", "stacked_delta"}:
         raise ValueError("stack_feature_set must be one of: 'stacked', 'stacked_delta'.")
+    stack_fams = {str(f).strip().lower() for f in stack_candidate_families if str(f).strip()}
+    if not stack_fams:
+        stack_fams = {"ea"}
+    allowed_stack_fams = {"ea", "fbcsp", "rpa", "tsa", "chan"}
+    if not stack_fams.issubset(allowed_stack_fams):
+        raise ValueError(f"stack_candidate_families must be subset of {sorted(allowed_stack_fams)}; got {sorted(stack_fams)}")
+    stack_fams.add("ea")
+    if "tsa" in stack_fams and "rpa" not in stack_fams:
+        raise ValueError("stack_candidate_families: 'tsa' requires 'rpa'.")
     if float(si_subject_lambda) < 0.0:
         raise ValueError("si_subject_lambda must be >= 0.")
     if float(si_ridge) <= 0.0:
@@ -603,16 +631,19 @@ def loso_cross_subject_evaluation(
             aligned[int(s)] = SubjectData(subject=int(s), X=X_aligned, y=sd.y)
         subject_data = aligned
     elif alignment == "ea_stack_multi_safe":
-        # For stacked candidate selection we need both EA (anchor) and LEA/RPA aligned views.
+        # For stacked candidate selection we always need EA(anchor). The LEA/RPA view is only required
+        # if a candidate family needs it (rpa/tsa).
+        need_rpa_view = ("rpa" in stack_fams) or ("tsa" in stack_fams)
         aligned_ea: Dict[int, SubjectData] = {}
         aligned_rpa: Dict[int, SubjectData] = {}
         for s, sd in subject_data.items():
             X_ea = EuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
-            X_rpa = LogEuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
             aligned_ea[int(s)] = SubjectData(subject=int(s), X=X_ea, y=sd.y)
-            aligned_rpa[int(s)] = SubjectData(subject=int(s), X=X_rpa, y=sd.y)
+            if need_rpa_view:
+                X_rpa = LogEuclideanAligner(eps=oea_eps, shrinkage=oea_shrinkage).fit_transform(sd.X)
+                aligned_rpa[int(s)] = SubjectData(subject=int(s), X=X_rpa, y=sd.y)
         subject_data = aligned_ea
-        subject_data_rpa = aligned_rpa
+        subject_data_rpa = aligned_rpa if need_rpa_view else None
 
     # Cache for expensive per-train-set computations (used by ea_si_chan_multi_safe).
     chan_bundle_cache: dict[tuple[int, ...], dict] = {}
@@ -691,8 +722,9 @@ def loso_cross_subject_evaluation(
     def _get_stack_bundle(train_subjects_subset: Sequence[int]) -> dict:
         """Return cached models for a given train-subject subset (used by ea_stack_multi_safe)."""
 
-        if subject_data_rpa is None:
-            raise RuntimeError("ea_stack_multi_safe requires precomputed subject_data_rpa.")
+        need_rpa_view = ("rpa" in stack_fams) or ("tsa" in stack_fams)
+        if need_rpa_view and subject_data_rpa is None:
+            raise RuntimeError("ea_stack_multi_safe requires precomputed subject_data_rpa when using rpa/tsa.")
 
         key = tuple(sorted(int(s) for s in train_subjects_subset))
         if key in stack_bundle_cache:
@@ -707,73 +739,79 @@ def loso_cross_subject_evaluation(
         )
         model_ea = fit_csp_lda(X_train_ea, y_train, n_components=n_components)
 
-        # EA-FBCSP view (EA time series + filterbank CSP+LDA).
-        # Keep consistent with the default fbcsp/ea_fbcsp branch in this file.
-        bands = [
-            (8.0, 12.0),
-            (10.0, 14.0),
-            (12.0, 16.0),
-            (14.0, 18.0),
-            (16.0, 20.0),
-            (18.0, 22.0),
-            (20.0, 24.0),
-            (22.0, 26.0),
-            (24.0, 28.0),
-            (26.0, 30.0),
-        ]
-        fb_n_components = max(2, min(4, int(n_components)))
-        model_fbcsp = fit_fbcsp_lda(
-            X_train_ea,
-            y_train,
-            bands=bands,
-            sfreq=float(sfreq),
-            n_components=fb_n_components,
-            filter_order=4,
-            multiclass_strategy="auto",
-            select_k=24,
-        )
-
-        # RPA/LEA view.
-        X_train_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in key], axis=0)
-        model_rpa = fit_csp_lda(X_train_rpa, y_train, n_components=n_components)
-
         bundle: dict = {
             "subjects": key,
             "ea": {"model": model_ea},
-            "fbcsp": {"model": model_fbcsp},
-            "rpa": {"model": model_rpa},
             "chan": {"candidates": {}},
         }
 
-        # Channel projector candidates (learned on EA view).
-        n_channels = int(X_train_ea.shape[1])
-        for r, lam in stack_chan_candidate_grid:
-            r = int(r)
-            lam = float(lam)
-            if r <= 0 or r >= n_channels:
-                continue
-            chan_params = ChannelProjectorParams(subject_lambda=float(lam), ridge=float(si_ridge), n_components=int(r))
-            A = learn_subject_invariant_channel_projector(
-                X=X_train_ea,
-                y=y_train,
-                subjects=subj_train,
-                class_order=tuple([str(c) for c in class_order]),
-                eps=float(oea_eps),
-                shrinkage=float(oea_shrinkage),
-                params=chan_params,
+        if "fbcsp" in stack_fams:
+            # EA-FBCSP view (EA time series + filterbank CSP+LDA).
+            # Keep consistent with the default fbcsp/ea_fbcsp branch in this file.
+            bands = [
+                (8.0, 12.0),
+                (10.0, 14.0),
+                (12.0, 16.0),
+                (14.0, 18.0),
+                (16.0, 20.0),
+                (18.0, 22.0),
+                (20.0, 24.0),
+                (22.0, 26.0),
+                (24.0, 28.0),
+                (26.0, 30.0),
+            ]
+            fb_n_components = max(2, min(4, int(n_components)))
+            model_fbcsp = fit_fbcsp_lda(
+                X_train_ea,
+                y_train,
+                bands=bands,
+                sfreq=float(sfreq),
+                n_components=fb_n_components,
+                filter_order=4,
+                multiclass_strategy="auto",
+                select_k=24,
             )
-            if np.allclose(A, np.eye(n_channels, dtype=np.float64), atol=1e-10):
-                continue
-            X_train_A = apply_spatial_transform(A, X_train_ea)
-            model_A = fit_csp_lda(X_train_A, y_train, n_components=n_components)
-            bundle["chan"]["candidates"][(int(r), float(lam))] = {
-                "A": A,
-                "model": model_A,
-                "rank": int(r),
-                "lambda": float(lam),
-            }
+            bundle["fbcsp"] = {"model": model_fbcsp}
+
+        if need_rpa_view:
+            X_train_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in key], axis=0)
+            model_rpa = fit_csp_lda(X_train_rpa, y_train, n_components=n_components)
+            bundle["rpa"] = {"model": model_rpa}
+
+        # Channel projector candidates (learned on EA view).
+        if "chan" in stack_fams:
+            n_channels = int(X_train_ea.shape[1])
+            for r, lam in stack_chan_candidate_grid:
+                r = int(r)
+                lam = float(lam)
+                if r <= 0 or r >= n_channels:
+                    continue
+                chan_params = ChannelProjectorParams(
+                    subject_lambda=float(lam), ridge=float(si_ridge), n_components=int(r)
+                )
+                A = learn_subject_invariant_channel_projector(
+                    X=X_train_ea,
+                    y=y_train,
+                    subjects=subj_train,
+                    class_order=tuple([str(c) for c in class_order]),
+                    eps=float(oea_eps),
+                    shrinkage=float(oea_shrinkage),
+                    params=chan_params,
+                )
+                if np.allclose(A, np.eye(n_channels, dtype=np.float64), atol=1e-10):
+                    continue
+                X_train_A = apply_spatial_transform(A, X_train_ea)
+                model_A = fit_csp_lda(X_train_A, y_train, n_components=n_components)
+                bundle["chan"]["candidates"][(int(r), float(lam))] = {
+                    "A": A,
+                    "model": model_A,
+                    "rank": int(r),
+                    "lambda": float(lam),
+                }
 
         stack_bundle_cache[key] = bundle
+        gc.collect()
+        _maybe_malloc_trim()
         return bundle
 
     for test_subject in subjects:
@@ -991,8 +1029,13 @@ def loso_cross_subject_evaluation(
             # - TSA (LEA-whitened + TSA target rotation)
             # - EA-SI-CHAN (rank-deficient channel projectors on EA-whitened data)
             # - EA-FBCSP (EA-whitened time series + filterbank CSP+LDA)
-            if subject_data_rpa is None:
-                raise RuntimeError("ea_stack_multi_safe requires subject_data_rpa.")
+            need_rpa_view = ("rpa" in stack_fams) or ("tsa" in stack_fams)
+            if need_rpa_view and subject_data_rpa is None:
+                raise RuntimeError("ea_stack_multi_safe requires subject_data_rpa when using rpa/tsa candidates.")
+            include_fbcsp = "fbcsp" in stack_fams
+            include_rpa = "rpa" in stack_fams
+            include_tsa = "tsa" in stack_fams
+            include_chan = "chan" in stack_fams
 
             class_labels = tuple([str(c) for c in class_order])
             selector = str(oea_zo_selector)
@@ -1021,8 +1064,8 @@ def loso_cross_subject_evaluation(
 
             outer_bundle = _get_stack_bundle(train_subjects)
             model_ea = outer_bundle["ea"]["model"]
-            model_rpa = outer_bundle["rpa"]["model"]
-            chan_outer: dict = dict(outer_bundle.get("chan", {}).get("candidates", {}))
+            model_rpa = (outer_bundle.get("rpa", {}).get("model") if need_rpa_view else None)
+            chan_outer: dict = dict(outer_bundle.get("chan", {}).get("candidates", {})) if include_chan else {}
             # For reporting only (n_train) and consistency with other branches.
             y_train = np.concatenate([subject_data[int(s)].y for s in train_subjects], axis=0)
             X_train = np.empty((0,) + tuple(subject_data[int(train_subjects[0])].X.shape[1:]), dtype=np.float64)
@@ -1230,23 +1273,59 @@ def loso_cross_subject_evaluation(
                     r_bandit_rows.append(float(reward))
                     g_bandit_rows.append(int(gid))
 
-                for pseudo_t in calib_subjects:
-                    inner_train = [s for s in train_subjects if s != pseudo_t]
-                    if len(inner_train) < 2:
-                        continue
-                    inner_bundle = _get_stack_bundle(inner_train)
-                    seed_pseudo_base = int(oea_zo_calib_seed) + int(test_subject) * 997 + int(pseudo_t) * 10007
+                # Calibration can be very expensive on large datasets if we refit models for each pseudo-target
+                # (leave-one-out over subjects). When `oea_zo_calib_max_subjects>0`, we instead use a single
+                # held-out calibration set of subjects and fit the calibration models once per fold.
+                calib_max = int(oea_zo_calib_max_subjects)
+                use_holdout_calib = calib_max > 0 and calib_max < len(train_subjects)
+                holdout_inner_train: list[int] | None = None
+                holdout_inner_bundle: dict | None = None
+                holdout_z_tr_ea: np.ndarray | None = None
+                holdout_y_tr: np.ndarray | None = None
+                holdout_z_tr_rpa: np.ndarray | None = None
+                if use_holdout_calib:
+                    holdout_inner_train = [int(s) for s in train_subjects if int(s) not in set(calib_subjects)]
+                    if len(holdout_inner_train) >= 2:
+                        holdout_inner_bundle = _get_stack_bundle(holdout_inner_train)
+                        holdout_z_tr_ea = np.concatenate([subject_data[int(s)].X for s in holdout_inner_train], axis=0)
+                        holdout_y_tr = np.concatenate([subject_data[int(s)].y for s in holdout_inner_train], axis=0)
+                        holdout_z_tr_rpa = (
+                            np.concatenate([subject_data_rpa[int(s)].X for s in holdout_inner_train], axis=0)
+                            if need_rpa_view and subject_data_rpa is not None
+                            else None
+                        )
+                    else:
+                        use_holdout_calib = False
 
-                    z_tr_ea_inner = np.concatenate([subject_data[int(s)].X for s in inner_train], axis=0)
-                    y_tr_inner = np.concatenate([subject_data[int(s)].y for s in inner_train], axis=0)
-                    z_tr_rpa_inner = np.concatenate([subject_data_rpa[int(s)].X for s in inner_train], axis=0)
+                for pseudo_t in calib_subjects:
+                    if use_holdout_calib:
+                        if holdout_inner_train is None or holdout_inner_bundle is None or holdout_z_tr_ea is None or holdout_y_tr is None:
+                            continue
+                        inner_train = holdout_inner_train
+                        inner_bundle = holdout_inner_bundle
+                        z_tr_ea_inner = holdout_z_tr_ea
+                        y_tr_inner = holdout_y_tr
+                        z_tr_rpa_inner = holdout_z_tr_rpa
+                    else:
+                        inner_train = [s for s in train_subjects if s != pseudo_t]
+                        if len(inner_train) < 2:
+                            continue
+                        inner_bundle = _get_stack_bundle(inner_train)
+                        z_tr_ea_inner = np.concatenate([subject_data[int(s)].X for s in inner_train], axis=0)
+                        y_tr_inner = np.concatenate([subject_data[int(s)].y for s in inner_train], axis=0)
+                        z_tr_rpa_inner = (
+                            np.concatenate([subject_data_rpa[int(s)].X for s in inner_train], axis=0)
+                            if need_rpa_view and subject_data_rpa is not None
+                            else None
+                        )
+                    seed_pseudo_base = int(oea_zo_calib_seed) + int(test_subject) * 997 + int(pseudo_t) * 10007
 
                     # Anchor (EA) predictions on the pseudo-target.
                     z_p_ea = subject_data[int(pseudo_t)].X
                     y_p = subject_data[int(pseudo_t)].y
                     m_ea = inner_bundle["ea"]["model"]
-                    m_fbcsp = inner_bundle["fbcsp"]["model"]
-                    m_rpa = inner_bundle["rpa"]["model"]
+                    m_fbcsp = (inner_bundle.get("fbcsp", {}).get("model") if include_fbcsp else None)
+                    m_rpa = (inner_bundle.get("rpa", {}).get("model") if need_rpa_view else None)
 
                     ev_ea_inner = None
                     ev_rpa_inner = None
@@ -1262,26 +1341,28 @@ def loso_cross_subject_evaluation(
                             )
                         except Exception:
                             ev_ea_inner = None
-                        try:
-                            ev_fbcsp_inner = _compute_lda_evidence_params(
-                                model=m_fbcsp,
-                                X_train=z_tr_ea_inner,
-                                y_train=y_tr_inner,
-                                class_order=class_labels,
-                                ridge=float(si_ridge),
-                            )
-                        except Exception:
-                            ev_fbcsp_inner = None
-                        try:
-                            ev_rpa_inner = _compute_lda_evidence_params(
-                                model=m_rpa,
-                                X_train=z_tr_rpa_inner,
-                                y_train=y_tr_inner,
-                                class_order=class_labels,
-                                ridge=float(si_ridge),
-                            )
-                        except Exception:
-                            ev_rpa_inner = None
+                        if m_fbcsp is not None:
+                            try:
+                                ev_fbcsp_inner = _compute_lda_evidence_params(
+                                    model=m_fbcsp,
+                                    X_train=z_tr_ea_inner,
+                                    y_train=y_tr_inner,
+                                    class_order=class_labels,
+                                    ridge=float(si_ridge),
+                                )
+                            except Exception:
+                                ev_fbcsp_inner = None
+                        if m_rpa is not None and z_tr_rpa_inner is not None:
+                            try:
+                                ev_rpa_inner = _compute_lda_evidence_params(
+                                    model=m_rpa,
+                                    X_train=z_tr_rpa_inner,
+                                    y_train=y_tr_inner,
+                                    class_order=class_labels,
+                                    ridge=float(si_ridge),
+                                )
+                            except Exception:
+                                ev_rpa_inner = None
                     p_id = _reorder_proba_columns(m_ea.predict_proba(z_p_ea), m_ea.classes_, list(class_labels))
                     acc_id = float(accuracy_score(y_p, np.asarray(m_ea.predict(z_p_ea))))
 
@@ -1328,136 +1409,140 @@ def loso_cross_subject_evaluation(
                             pass
 
                     # EA-FBCSP candidate (EA view).
-                    try:
-                        p_fbcsp = _reorder_proba_columns(
-                            m_fbcsp.predict_proba(z_p_ea), m_fbcsp.classes_, list(class_labels)
-                        )
-                        acc_fbcsp = float(accuracy_score(y_p, np.asarray(m_fbcsp.predict(z_p_ea))))
-                        improve_fbcsp = float(acc_fbcsp - acc_id)
-                        feats_fbcsp_c = _features_before_lda(model=m_fbcsp, X=z_p_ea) if use_stack else None
-                        rec_fbcsp = _record_for_candidate(
-                            p_id=p_id,
-                            p_c=p_fbcsp,
-                            feats_c=feats_fbcsp_c,
-                            lda_c=(m_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
-                            lda_ev=ev_fbcsp_inner,
-                            seed_local=seed_pseudo_base + 11,
-                        )
-                        rec_fbcsp["cand_family"] = "fbcsp"
-                        feats_fbcsp, names = _feats_for_stack(rec_fbcsp)
-                        if feat_names is None:
-                            feat_names = names
-                        _add_calib_sample(fam="fbcsp", feats=feats_fbcsp, improve=improve_fbcsp)
-                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_fbcsp, reward=improve_fbcsp)
-                    except Exception:
-                        pass
+                    if m_fbcsp is not None:
+                        try:
+                            p_fbcsp = _reorder_proba_columns(
+                                m_fbcsp.predict_proba(z_p_ea), m_fbcsp.classes_, list(class_labels)
+                            )
+                            acc_fbcsp = float(accuracy_score(y_p, np.asarray(m_fbcsp.predict(z_p_ea))))
+                            improve_fbcsp = float(acc_fbcsp - acc_id)
+                            feats_fbcsp_c = _features_before_lda(model=m_fbcsp, X=z_p_ea) if use_stack else None
+                            rec_fbcsp = _record_for_candidate(
+                                p_id=p_id,
+                                p_c=p_fbcsp,
+                                feats_c=feats_fbcsp_c,
+                                lda_c=(m_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
+                                lda_ev=ev_fbcsp_inner,
+                                seed_local=seed_pseudo_base + 11,
+                            )
+                            rec_fbcsp["cand_family"] = "fbcsp"
+                            feats_fbcsp, names = _feats_for_stack(rec_fbcsp)
+                            if feat_names is None:
+                                feat_names = names
+                            _add_calib_sample(fam="fbcsp", feats=feats_fbcsp, improve=improve_fbcsp)
+                            _add_bandit_sample(gid=int(pseudo_t), feats=feats_fbcsp, reward=improve_fbcsp)
+                        except Exception:
+                            pass
 
                     # RPA candidate.
-                    z_p_rpa = subject_data_rpa[int(pseudo_t)].X
-                    p_rpa = _reorder_proba_columns(m_rpa.predict_proba(z_p_rpa), m_rpa.classes_, list(class_labels))
-                    acc_rpa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_rpa))))
-                    improve_rpa = float(acc_rpa - acc_id)
-                    feats_rpa_c = _features_before_lda(model=m_rpa, X=z_p_rpa) if use_stack else None
-                    rec_rpa = _record_for_candidate(
-                        p_id=p_id,
-                        p_c=p_rpa,
-                        feats_c=feats_rpa_c,
-                        lda_c=(m_rpa.pipeline.named_steps["lda"] if use_stack else None),
-                        lda_ev=ev_rpa_inner,
-                        seed_local=seed_pseudo_base + 22,
-                    )
-                    rec_rpa["cand_family"] = "rpa"
-                    feats_rpa, names = _feats_for_stack(rec_rpa)
-                    if feat_names is None:
-                        feat_names = names
-                    _add_calib_sample(fam="rpa", feats=feats_rpa, improve=improve_rpa)
-                    _add_bandit_sample(gid=int(pseudo_t), feats=feats_rpa, reward=improve_rpa)
-
-                    # TSA candidate (built on the RPA/LEA view).
-                    try:
-                        q_tsa = _compute_tsa_target_rotation(
-                            z_train=z_tr_rpa_inner,
-                            y_train=y_tr_inner,
-                            z_target=z_p_rpa,
-                            model=m_rpa,
-                            class_order=class_labels,
-                            pseudo_mode=str(oea_pseudo_mode),
-                            pseudo_iters=int(max(0, oea_pseudo_iters)),
-                            q_blend=float(oea_q_blend),
-                            pseudo_confidence=float(oea_pseudo_confidence),
-                            pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
-                            pseudo_balance=bool(oea_pseudo_balance),
-                            eps=float(oea_eps),
-                            shrinkage=float(oea_shrinkage),
-                        )
-                        z_p_tsa = apply_spatial_transform(q_tsa, z_p_rpa)
-                        p_tsa = _reorder_proba_columns(
-                            m_rpa.predict_proba(z_p_tsa), m_rpa.classes_, list(class_labels)
-                        )
-                        acc_tsa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_tsa))))
-                        improve_tsa = float(acc_tsa - acc_id)
-                        feats_tsa_c = _features_before_lda(model=m_rpa, X=z_p_tsa) if use_stack else None
-                        rec_tsa = _record_for_candidate(
+                    if include_rpa and m_rpa is not None and subject_data_rpa is not None:
+                        z_p_rpa = subject_data_rpa[int(pseudo_t)].X
+                        p_rpa = _reorder_proba_columns(m_rpa.predict_proba(z_p_rpa), m_rpa.classes_, list(class_labels))
+                        acc_rpa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_rpa))))
+                        improve_rpa = float(acc_rpa - acc_id)
+                        feats_rpa_c = _features_before_lda(model=m_rpa, X=z_p_rpa) if use_stack else None
+                        rec_rpa = _record_for_candidate(
                             p_id=p_id,
-                            p_c=p_tsa,
-                            feats_c=feats_tsa_c,
+                            p_c=p_rpa,
+                            feats_c=feats_rpa_c,
                             lda_c=(m_rpa.pipeline.named_steps["lda"] if use_stack else None),
                             lda_ev=ev_rpa_inner,
-                            seed_local=seed_pseudo_base + 33,
+                            seed_local=seed_pseudo_base + 22,
                         )
-                        rec_tsa["cand_family"] = "tsa"
-                        feats_tsa, names = _feats_for_stack(rec_tsa)
+                        rec_rpa["cand_family"] = "rpa"
+                        feats_rpa, names = _feats_for_stack(rec_rpa)
                         if feat_names is None:
                             feat_names = names
-                        _add_calib_sample(fam="tsa", feats=feats_tsa, improve=improve_tsa)
-                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_tsa, reward=improve_tsa)
-                    except Exception:
-                        pass
+                        _add_calib_sample(fam="rpa", feats=feats_rpa, improve=improve_rpa)
+                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_rpa, reward=improve_rpa)
+
+                        # TSA candidate (built on the RPA/LEA view).
+                        if include_tsa and z_tr_rpa_inner is not None:
+                            try:
+                                q_tsa = _compute_tsa_target_rotation(
+                                    z_train=z_tr_rpa_inner,
+                                    y_train=y_tr_inner,
+                                    z_target=z_p_rpa,
+                                    model=m_rpa,
+                                    class_order=class_labels,
+                                    pseudo_mode=str(oea_pseudo_mode),
+                                    pseudo_iters=int(max(0, oea_pseudo_iters)),
+                                    q_blend=float(oea_q_blend),
+                                    pseudo_confidence=float(oea_pseudo_confidence),
+                                    pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                                    pseudo_balance=bool(oea_pseudo_balance),
+                                    eps=float(oea_eps),
+                                    shrinkage=float(oea_shrinkage),
+                                )
+                                z_p_tsa = apply_spatial_transform(q_tsa, z_p_rpa)
+                                p_tsa = _reorder_proba_columns(
+                                    m_rpa.predict_proba(z_p_tsa), m_rpa.classes_, list(class_labels)
+                                )
+                                acc_tsa = float(accuracy_score(y_p, np.asarray(m_rpa.predict(z_p_tsa))))
+                                improve_tsa = float(acc_tsa - acc_id)
+                                feats_tsa_c = _features_before_lda(model=m_rpa, X=z_p_tsa) if use_stack else None
+                                rec_tsa = _record_for_candidate(
+                                    p_id=p_id,
+                                    p_c=p_tsa,
+                                    feats_c=feats_tsa_c,
+                                    lda_c=(m_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                                    lda_ev=ev_rpa_inner,
+                                    seed_local=seed_pseudo_base + 33,
+                                )
+                                rec_tsa["cand_family"] = "tsa"
+                                feats_tsa, names = _feats_for_stack(rec_tsa)
+                                if feat_names is None:
+                                    feat_names = names
+                                _add_calib_sample(fam="tsa", feats=feats_tsa, improve=improve_tsa)
+                                _add_bandit_sample(gid=int(pseudo_t), feats=feats_tsa, reward=improve_tsa)
+                            except Exception:
+                                pass
 
                     # Channel projector candidates (EA view).
-                    cand_inner_chan: dict = dict(inner_bundle.get("chan", {}).get("candidates", {}))
-                    for cand_key, info in cand_inner_chan.items():
-                        A = info["A"]
-                        m_A = info["model"]
-                        z_p_A = apply_spatial_transform(A, z_p_ea)
-                        p_A = _reorder_proba_columns(m_A.predict_proba(z_p_A), m_A.classes_, list(class_labels))
-                        acc_A = float(accuracy_score(y_p, np.asarray(m_A.predict(z_p_A))))
-                        improve_A = float(acc_A - acc_id)
-                        ev_A_inner = None
-                        if use_stack:
-                            try:
-                                z_tr_A_inner = apply_spatial_transform(A, z_tr_ea_inner)
-                                ev_A_inner = _compute_lda_evidence_params(
-                                    model=m_A,
-                                    X_train=z_tr_A_inner,
-                                    y_train=y_tr_inner,
-                                    class_order=class_labels,
-                                    ridge=float(si_ridge),
-                                )
-                            except Exception:
-                                ev_A_inner = None
+                    if include_chan:
+                        cand_inner_chan: dict = dict(inner_bundle.get("chan", {}).get("candidates", {}))
+                        for cand_key, info in cand_inner_chan.items():
+                            A = info["A"]
+                            m_A = info["model"]
+                            z_p_A = apply_spatial_transform(A, z_p_ea)
+                            p_A = _reorder_proba_columns(m_A.predict_proba(z_p_A), m_A.classes_, list(class_labels))
+                            acc_A = float(accuracy_score(y_p, np.asarray(m_A.predict(z_p_A))))
+                            improve_A = float(acc_A - acc_id)
+                            ev_A_inner = None
+                            if use_stack:
+                                try:
+                                    z_tr_A_inner = apply_spatial_transform(A, z_tr_ea_inner)
+                                    ev_A_inner = _compute_lda_evidence_params(
+                                        model=m_A,
+                                        X_train=z_tr_A_inner,
+                                        y_train=y_tr_inner,
+                                        class_order=class_labels,
+                                        ridge=float(si_ridge),
+                                    )
+                                except Exception:
+                                    ev_A_inner = None
 
-                        rank_val = int(info.get("rank", 0))
-                        lam_val = float(info.get("lambda", 0.0))
-                        lam_bin = int(np.round(lam_val * 1000.0))
-                        feats_A_c = _features_before_lda(model=m_A, X=z_p_A) if use_stack else None
-                        rec_A = _record_for_candidate(
-                            p_id=p_id,
-                            p_c=p_A,
-                            feats_c=feats_A_c,
-                            lda_c=(m_A.pipeline.named_steps["lda"] if use_stack else None),
-                            lda_ev=ev_A_inner,
-                            seed_local=seed_pseudo_base + 1000 + 31 * rank_val + lam_bin,
-                        )
-                        rec_A["cand_family"] = "chan"
-                        rec_A["cand_key"] = cand_key
-                        rec_A["cand_rank"] = float(info.get("rank", float("nan")))
-                        rec_A["cand_lambda"] = float(info.get("lambda", float("nan")))
-                        feats_A, names = _feats_for_stack(rec_A)
-                        if feat_names is None:
-                            feat_names = names
-                        _add_calib_sample(fam="chan", feats=feats_A, improve=improve_A)
-                        _add_bandit_sample(gid=int(pseudo_t), feats=feats_A, reward=improve_A)
+                            rank_val = int(info.get("rank", 0))
+                            lam_val = float(info.get("lambda", 0.0))
+                            lam_bin = int(np.round(lam_val * 1000.0))
+                            feats_A_c = _features_before_lda(model=m_A, X=z_p_A) if use_stack else None
+                            rec_A = _record_for_candidate(
+                                p_id=p_id,
+                                p_c=p_A,
+                                feats_c=feats_A_c,
+                                lda_c=(m_A.pipeline.named_steps["lda"] if use_stack else None),
+                                lda_ev=ev_A_inner,
+                                seed_local=seed_pseudo_base + 1000 + 31 * rank_val + lam_bin,
+                            )
+                            rec_A["cand_family"] = "chan"
+                            rec_A["cand_key"] = cand_key
+                            rec_A["cand_rank"] = float(info.get("rank", float("nan")))
+                            rec_A["cand_lambda"] = float(info.get("lambda", float("nan")))
+                            feats_A, names = _feats_for_stack(rec_A)
+                            if feat_names is None:
+                                feat_names = names
+                            _add_calib_sample(fam="chan", feats=feats_A, improve=improve_A)
+                            _add_bandit_sample(gid=int(pseudo_t), feats=feats_A, reward=improve_A)
 
                 if use_ridge and X_ridge_rows and feat_names is not None:
                     X_ridge = np.vstack(X_ridge_rows)
@@ -1560,11 +1645,17 @@ def loso_cross_subject_evaluation(
             # Build target-subject candidate records (unlabeled).
             X_test_ea = subject_data[int(test_subject)].X
             y_test = subject_data[int(test_subject)].y
-            X_test_rpa = subject_data_rpa[int(test_subject)].X
+            X_test_rpa = (
+                subject_data_rpa[int(test_subject)].X if need_rpa_view and subject_data_rpa is not None else None
+            )
 
             z_tr_ea_outer = np.concatenate([subject_data[int(s)].X for s in train_subjects], axis=0)
             y_tr_outer = np.concatenate([subject_data[int(s)].y for s in train_subjects], axis=0)
-            z_tr_rpa_outer = np.concatenate([subject_data_rpa[int(s)].X for s in train_subjects], axis=0)
+            z_tr_rpa_outer = (
+                np.concatenate([subject_data_rpa[int(s)].X for s in train_subjects], axis=0)
+                if need_rpa_view and subject_data_rpa is not None
+                else None
+            )
 
             ev_ea_outer = None
             ev_rpa_outer = None
@@ -1580,16 +1671,17 @@ def loso_cross_subject_evaluation(
                     )
                 except Exception:
                     ev_ea_outer = None
-                try:
-                    ev_rpa_outer = _compute_lda_evidence_params(
-                        model=model_rpa,
-                        X_train=z_tr_rpa_outer,
-                        y_train=y_tr_outer,
-                        class_order=class_labels,
-                        ridge=float(si_ridge),
-                    )
-                except Exception:
-                    ev_rpa_outer = None
+                if model_rpa is not None and z_tr_rpa_outer is not None:
+                    try:
+                        ev_rpa_outer = _compute_lda_evidence_params(
+                            model=model_rpa,
+                            X_train=z_tr_rpa_outer,
+                            y_train=y_tr_outer,
+                            class_order=class_labels,
+                            ridge=float(si_ridge),
+                        )
+                    except Exception:
+                        ev_rpa_outer = None
 
             p_id_t = _reorder_proba_columns(model_ea.predict_proba(X_test_ea), model_ea.classes_, list(class_labels))
             feats_id_t = _features_before_lda(model=model_ea, X=X_test_ea) if use_stack else None
@@ -1609,98 +1701,110 @@ def loso_cross_subject_evaluation(
             records: list[dict] = [rec_id]
 
             # EA-FBCSP candidate.
-            try:
-                model_fbcsp = outer_bundle["fbcsp"]["model"]
-                if use_stack and ev_fbcsp_outer is None:
-                    try:
-                        ev_fbcsp_outer = _compute_lda_evidence_params(
-                            model=model_fbcsp,
-                            X_train=z_tr_ea_outer,
-                            y_train=y_tr_outer,
-                            class_order=class_labels,
-                            ridge=float(si_ridge),
-                        )
-                    except Exception:
-                        ev_fbcsp_outer = None
-                p_fbcsp_t = _reorder_proba_columns(
-                    model_fbcsp.predict_proba(X_test_ea), model_fbcsp.classes_, list(class_labels)
-                )
-                feats_fbcsp_t = _features_before_lda(model=model_fbcsp, X=X_test_ea) if use_stack else None
-                rec_fbcsp_t = _record_for_candidate(
-                    p_id=p_id_t,
-                    p_c=p_fbcsp_t,
-                    feats_c=feats_fbcsp_t,
-                    lda_c=(model_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
-                    lda_ev=ev_fbcsp_outer,
-                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 2,
-                )
-                rec_fbcsp_t["cand_family"] = "fbcsp"
-                if bool(do_diag):
-                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_fbcsp_t, axis=1)], dtype=object)
-                    rec_fbcsp_t["accuracy"] = float(accuracy_score(y_test, y_hat))
-                records.append(rec_fbcsp_t)
-            except Exception:
-                model_fbcsp = None
+            model_fbcsp = None
+            if include_fbcsp:
+                try:
+                    model_fbcsp = outer_bundle["fbcsp"]["model"]
+                    if use_stack and ev_fbcsp_outer is None:
+                        try:
+                            ev_fbcsp_outer = _compute_lda_evidence_params(
+                                model=model_fbcsp,
+                                X_train=z_tr_ea_outer,
+                                y_train=y_tr_outer,
+                                class_order=class_labels,
+                                ridge=float(si_ridge),
+                            )
+                        except Exception:
+                            ev_fbcsp_outer = None
+                    p_fbcsp_t = _reorder_proba_columns(
+                        model_fbcsp.predict_proba(X_test_ea), model_fbcsp.classes_, list(class_labels)
+                    )
+                    feats_fbcsp_t = _features_before_lda(model=model_fbcsp, X=X_test_ea) if use_stack else None
+                    rec_fbcsp_t = _record_for_candidate(
+                        p_id=p_id_t,
+                        p_c=p_fbcsp_t,
+                        feats_c=feats_fbcsp_t,
+                        lda_c=(model_fbcsp.pipeline.named_steps["lda"] if use_stack else None),
+                        lda_ev=ev_fbcsp_outer,
+                        seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 2,
+                    )
+                    rec_fbcsp_t["cand_family"] = "fbcsp"
+                    if bool(do_diag):
+                        y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_fbcsp_t, axis=1)], dtype=object)
+                        rec_fbcsp_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                    records.append(rec_fbcsp_t)
+                except Exception:
+                    model_fbcsp = None
 
             # RPA candidate.
-            p_rpa_t = _reorder_proba_columns(model_rpa.predict_proba(X_test_rpa), model_rpa.classes_, list(class_labels))
-            feats_rpa_t = _features_before_lda(model=model_rpa, X=X_test_rpa) if use_stack else None
-            rec_rpa_t = _record_for_candidate(
-                p_id=p_id_t,
-                p_c=p_rpa_t,
-                feats_c=feats_rpa_t,
-                lda_c=(model_rpa.pipeline.named_steps["lda"] if use_stack else None),
-                lda_ev=ev_rpa_outer,
-                seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 3,
-            )
-            rec_rpa_t["cand_family"] = "rpa"
-            if bool(do_diag):
-                y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_rpa_t, axis=1)], dtype=object)
-                rec_rpa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
-            records.append(rec_rpa_t)
-
-            # TSA candidate.
-            try:
-                q_tsa = _compute_tsa_target_rotation(
-                    z_train=z_tr_rpa_outer,
-                    y_train=y_tr_outer,
-                    z_target=X_test_rpa,
-                    model=model_rpa,
-                    class_order=class_labels,
-                    pseudo_mode=str(oea_pseudo_mode),
-                    pseudo_iters=int(max(0, oea_pseudo_iters)),
-                    q_blend=float(oea_q_blend),
-                    pseudo_confidence=float(oea_pseudo_confidence),
-                    pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
-                    pseudo_balance=bool(oea_pseudo_balance),
-                    eps=float(oea_eps),
-                    shrinkage=float(oea_shrinkage),
+            if include_rpa and model_rpa is not None and X_test_rpa is not None:
+                p_rpa_t = _reorder_proba_columns(
+                    model_rpa.predict_proba(X_test_rpa), model_rpa.classes_, list(class_labels)
                 )
-                X_test_tsa = apply_spatial_transform(q_tsa, X_test_rpa)
-                p_tsa_t = _reorder_proba_columns(
-                    model_rpa.predict_proba(X_test_tsa), model_rpa.classes_, list(class_labels)
-                )
-                feats_tsa_t = _features_before_lda(model=model_rpa, X=X_test_tsa) if use_stack else None
-                rec_tsa_t = _record_for_candidate(
+                feats_rpa_t = _features_before_lda(model=model_rpa, X=X_test_rpa) if use_stack else None
+                rec_rpa_t = _record_for_candidate(
                     p_id=p_id_t,
-                    p_c=p_tsa_t,
-                    feats_c=feats_tsa_t,
+                    p_c=p_rpa_t,
+                    feats_c=feats_rpa_t,
                     lda_c=(model_rpa.pipeline.named_steps["lda"] if use_stack else None),
                     lda_ev=ev_rpa_outer,
-                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 4,
+                    seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 3,
                 )
-                rec_tsa_t["cand_family"] = "tsa"
-                rec_tsa_t["tsa_q_blend"] = float(oea_q_blend)
+                rec_rpa_t["cand_family"] = "rpa"
                 if bool(do_diag):
-                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_tsa_t, axis=1)], dtype=object)
-                    rec_tsa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
-                records.append(rec_tsa_t)
-            except Exception:
-                X_test_tsa = None
+                    y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_rpa_t, axis=1)], dtype=object)
+                    rec_rpa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                records.append(rec_rpa_t)
+
+            # TSA candidate.
+            X_test_tsa = None
+            if (
+                include_tsa
+                and model_rpa is not None
+                and X_test_rpa is not None
+                and z_tr_rpa_outer is not None
+            ):
+                try:
+                    q_tsa = _compute_tsa_target_rotation(
+                        z_train=z_tr_rpa_outer,
+                        y_train=y_tr_outer,
+                        z_target=X_test_rpa,
+                        model=model_rpa,
+                        class_order=class_labels,
+                        pseudo_mode=str(oea_pseudo_mode),
+                        pseudo_iters=int(max(0, oea_pseudo_iters)),
+                        q_blend=float(oea_q_blend),
+                        pseudo_confidence=float(oea_pseudo_confidence),
+                        pseudo_topk_per_class=int(oea_pseudo_topk_per_class),
+                        pseudo_balance=bool(oea_pseudo_balance),
+                        eps=float(oea_eps),
+                        shrinkage=float(oea_shrinkage),
+                    )
+                    X_test_tsa = apply_spatial_transform(q_tsa, X_test_rpa)
+                    p_tsa_t = _reorder_proba_columns(
+                        model_rpa.predict_proba(X_test_tsa), model_rpa.classes_, list(class_labels)
+                    )
+                    feats_tsa_t = _features_before_lda(model=model_rpa, X=X_test_tsa) if use_stack else None
+                    rec_tsa_t = _record_for_candidate(
+                        p_id=p_id_t,
+                        p_c=p_tsa_t,
+                        feats_c=feats_tsa_t,
+                        lda_c=(model_rpa.pipeline.named_steps["lda"] if use_stack else None),
+                        lda_ev=ev_rpa_outer,
+                        seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 4,
+                    )
+                    rec_tsa_t["cand_family"] = "tsa"
+                    rec_tsa_t["tsa_q_blend"] = float(oea_q_blend)
+                    if bool(do_diag):
+                        y_hat = np.asarray([class_labels[int(i)] for i in np.argmax(p_tsa_t, axis=1)], dtype=object)
+                        rec_tsa_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                    records.append(rec_tsa_t)
+                except Exception:
+                    X_test_tsa = None
 
             # Channel projector candidates.
             ev_chan_outer: dict = {}
-            for cand_key, info in chan_outer.items():
+            for cand_key, info in (chan_outer.items() if include_chan else []):
                 A = info["A"]
                 m_A = info["model"]
                 X_test_A = apply_spatial_transform(A, X_test_ea)
@@ -5065,6 +5169,12 @@ def loso_cross_subject_evaluation(
         y_proba_all.append(y_proba)
         subj_all.append(np.full(shape=(int(len(y_test)),), fill_value=int(test_subject), dtype=int))
         trial_all.append(np.arange(int(len(y_test)), dtype=int))
+
+        # Heuristic memory pressure relief for large datasets (e.g., high-density MI):
+        # after each fold, force collection and (optionally) trim allocator arenas.
+        if int(len(y_train)) >= 5000 or int(subject_data_raw[int(test_subject)].X.shape[1]) >= 64:
+            gc.collect()
+            _maybe_malloc_trim()
 
     results_df = pd.DataFrame([asdict(r) for r in fold_rows]).sort_values("subject")
     if extra_rows is not None and extra_rows:

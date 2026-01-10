@@ -125,22 +125,49 @@ class MoabbMotorImageryLoader:
         if self.preprocess == "moabb":
             if self.paradigm is None:
                 raise RuntimeError("MOABB paradigm is not initialized.")
-            X, y, meta = self.paradigm.get_data(dataset=self.dataset, subjects=subjects)
+            # IMPORTANT (memory): for large datasets (e.g., Schirrmeister2017 / HGD),
+            # calling `get_data` for all subjects at once can transiently hold many Raw/Epochs
+            # objects in memory (filtering/resampling/copying), leading to OOM kills.
+            # We therefore load *per subject* and concatenate at the end.
+            X_parts: List[np.ndarray] = []
+            y_parts: List[np.ndarray] = []
+            meta_parts: List[pd.DataFrame] = []
 
-            if self.sessions is not None:
-                if "session" not in meta.columns:
-                    raise ValueError("MOABB metadata must contain a 'session' column.")
-                session_col = meta["session"].astype(str)
-                mask = session_col.isin([str(s) for s in self.sessions]).to_numpy()
-                if not bool(np.any(mask)):
-                    raise RuntimeError(f"No trials left after filtering sessions={list(self.sessions)}.")
-                X = X[mask]
-                y = y[mask]
-                meta = meta.loc[mask].reset_index(drop=True)
+            for subject in subjects:
+                X_s, y_s, meta_s = self.paradigm.get_data(dataset=self.dataset, subjects=[int(subject)])
 
-            X = np.asarray(X, dtype=dtype, order="C")
-            y = np.asarray(y)
-            return X, y, meta
+                if self.sessions is not None:
+                    # Most MOABB MI datasets expose a `session` column. Some (e.g., Schirrmeister2017)
+                    # also expose meaningful splits in `run` (e.g., 0train/1test) while `session`
+                    # stays constant. We therefore allow filtering by *either* column.
+                    allowed = [str(s) for s in self.sessions]
+                    mask = None
+                    if "session" in meta_s.columns:
+                        session_col = meta_s["session"].astype(str)
+                        mask = session_col.isin(allowed).to_numpy()
+                    if "run" in meta_s.columns:
+                        run_col = meta_s["run"].astype(str)
+                        mask_run = run_col.isin(allowed).to_numpy()
+                        mask = mask_run if mask is None else (mask | mask_run)
+                    if mask is None:
+                        raise ValueError("MOABB metadata must contain a 'session' or 'run' column for filtering.")
+                    if not bool(np.any(mask)):
+                        continue
+                    X_s = X_s[mask]
+                    y_s = y_s[mask]
+                    meta_s = meta_s.loc[mask].reset_index(drop=True)
+
+                X_parts.append(np.asarray(X_s, dtype=dtype, order="C"))
+                y_parts.append(np.asarray(y_s))
+                meta_parts.append(meta_s)
+
+            if not X_parts:
+                raise RuntimeError("No trials found after MOABB preprocessing (empty subject list or session filter?).")
+
+            X = np.concatenate(X_parts, axis=0)
+            y = np.concatenate(y_parts, axis=0)
+            meta = pd.concat(meta_parts, axis=0, ignore_index=True)
+            return np.asarray(X, dtype=dtype, order="C"), np.asarray(y), meta
 
         # paper_fir mode
         return self._load_arrays_paper_fir(subjects=subjects, dtype=dtype)

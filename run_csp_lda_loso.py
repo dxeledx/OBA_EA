@@ -595,6 +595,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--stack-candidate-families",
+        type=str,
+        default="ea,fbcsp,rpa,tsa,chan",
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: comma-separated candidate families to include. "
+            "Supported: ea (anchor), fbcsp, rpa, tsa, chan. "
+            "Note: 'tsa' requires 'rpa'."
+        ),
+    )
+    p.add_argument(
         "--oea-zo-min-improvement",
         type=float,
         default=0.0,
@@ -931,9 +941,11 @@ def main() -> None:
             if float(args.stack_safe_min_pred_improve) > 0.0:
                 global_min_pred_str = f", min_pred={float(args.stack_safe_min_pred_improve)}"
             feat_set_str = f", feat_set={str(args.stack_feature_set)}"
+            fams = [s.strip() for s in str(args.stack_candidate_families).split(",") if s.strip()]
+            fams_str = ",".join(fams) if fams else "ea,fbcsp,rpa,tsa,chan"
             method_details[method] = (
                 "EA-STACK-MULTI-SAFE: multi-family candidate selection with safe fallback to EA. "
-                "Candidates include EA(anchor), EA-FBCSP, RPA(LEA whitening), TSA(LEA+TSA rotation), and EA-SI-CHAN channel projectors "
+                f"Candidate families={fams_str} (EA anchor always included). "
                 f"(ranks={ranks_str}, lambdas={lambdas_str}, si_ridge={args.si_ridge}); "
                 f"selector={args.oea_zo_selector} "
                 f"(ridge_alpha={args.oea_zo_calib_ridge_alpha}, guard_C={args.oea_zo_calib_guard_c}, "
@@ -1372,6 +1384,9 @@ def main() -> None:
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
                 stack_feature_set=str(args.stack_feature_set),
+                stack_candidate_families=tuple(
+                    [s.strip() for s in str(args.stack_candidate_families).split(",") if s.strip()]
+                ),
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),

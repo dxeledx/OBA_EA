@@ -8,6 +8,7 @@ outputs/
 .mne/
 .mne_home/
 .mne_data/
+.cache/
 
 # Local reference papers/notes (often copyrighted; keep out of repo by default)
 papers/
