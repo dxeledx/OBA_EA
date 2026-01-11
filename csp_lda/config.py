@@ -26,6 +26,7 @@ class PreprocessingConfig:
     events: Sequence[str] = ("left_hand", "right_hand")
     sessions: Sequence[str] = ("0train",)
     preprocess: str = "moabb"  # "moabb" | "paper_fir"
+    car: bool = False  # common average reference after temporal filtering
     paper_fir_order: int = 50
     paper_fir_window: str = "hamming"
 

@@ -71,6 +71,7 @@ class MoabbMotorImageryLoader:
         events: Sequence[str],
         sessions: Optional[Sequence[str]] = None,
         preprocess: str = "moabb",
+        car: bool = False,
         paper_fir_order: int = 50,
         paper_fir_window: str = "hamming",
     ) -> None:
@@ -78,6 +79,7 @@ class MoabbMotorImageryLoader:
         self.dataset_id = str(self.dataset.__class__.__name__)
         self.sessions = tuple(sessions) if sessions is not None else None
         self.preprocess = str(preprocess)
+        self.car = bool(car)
         self.fmin = float(fmin)
         self.fmax = float(fmax)
         self.tmin = float(tmin)
@@ -167,6 +169,8 @@ class MoabbMotorImageryLoader:
             X = np.concatenate(X_parts, axis=0)
             y = np.concatenate(y_parts, axis=0)
             meta = pd.concat(meta_parts, axis=0, ignore_index=True)
+            if self.car:
+                self._apply_car_inplace(X)
             return np.asarray(X, dtype=dtype, order="C"), np.asarray(y), meta
 
         # paper_fir mode
@@ -274,7 +278,23 @@ class MoabbMotorImageryLoader:
         X = np.concatenate(X_parts, axis=0)
         y = np.concatenate(y_parts, axis=0)
         meta = pd.DataFrame(meta_rows)
+        if self.car:
+            self._apply_car_inplace(X)
         return X, y, meta
+
+    @staticmethod
+    def _apply_car_inplace(X: np.ndarray) -> None:
+        """Common average reference (CAR), in-place.
+
+        Subtract the per-timepoint mean across channels for each trial:
+            X[t] <- X[t] - mean_c X[t, c, :]
+
+        This is unsupervised and can reduce per-subject amplitude/reference offsets.
+        """
+
+        if X.ndim != 3:
+            raise ValueError("CAR expects X with shape (n_trials, n_channels, n_times).")
+        X -= X.mean(axis=1, keepdims=True)
 
     def _apply_causal_fir(self, raw: mne.io.BaseRaw) -> None:
         """Apply causal linear-phase FIR bandpass (Hamming window) in-place."""
@@ -307,6 +327,7 @@ class BCIIV2aMoabbLoader(MoabbMotorImageryLoader):
         events: Sequence[str],
         sessions: Optional[Sequence[str]] = None,
         preprocess: str = "moabb",
+        car: bool = False,
         paper_fir_order: int = 50,
         paper_fir_window: str = "hamming",
     ) -> None:
@@ -320,6 +341,7 @@ class BCIIV2aMoabbLoader(MoabbMotorImageryLoader):
             events=events,
             sessions=sessions,
             preprocess=preprocess,
+            car=car,
             paper_fir_order=paper_fir_order,
             paper_fir_window=paper_fir_window,
         )

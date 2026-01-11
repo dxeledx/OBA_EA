@@ -54,6 +54,14 @@ def parse_args() -> argparse.Namespace:
         default="moabb",
         help="Preprocessing pipeline: 'moabb' or 'paper_fir' (causal 50-order FIR Hamming).",
     )
+    p.add_argument(
+        "--car",
+        action="store_true",
+        help=(
+            "Apply common average reference (CAR) after temporal filtering and before alignment/feature extraction. "
+            "This is an unsupervised per-trial channel re-referencing: X <- X - mean_c X."
+        ),
+    )
     p.add_argument("--fir-order", type=int, default=50, help="FIR order for paper_fir mode.")
     p.add_argument(
         "--events",
@@ -231,6 +239,7 @@ def main() -> None:
         events=tuple(events),
         sessions=tuple(sessions),
         preprocess=str(args.preprocess),
+        car=bool(args.car),
         paper_fir_order=int(args.fir_order),
     )
     model_cfg = ModelConfig(csp_n_components=int(args.n_components))
@@ -244,6 +253,7 @@ def main() -> None:
         events=preprocessing.events,
         sessions=sessions,
         preprocess=preprocessing.preprocess,
+        car=preprocessing.car,
         paper_fir_order=preprocessing.paper_fir_order,
         paper_fir_window=preprocessing.paper_fir_window,
     )

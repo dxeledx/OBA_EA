@@ -147,6 +147,7 @@ def write_results_txt_multi(
 def _format_preprocessing(config: ExperimentConfig) -> str:
     sessions = list(getattr(config.preprocessing, "sessions", [])) or "ALL"
     preprocess = getattr(config.preprocessing, "preprocess", "moabb")
+    car = bool(getattr(config.preprocessing, "car", False))
     base = (
         "Preprocessing: "
         f"mode={preprocess}, "
@@ -156,6 +157,8 @@ def _format_preprocessing(config: ExperimentConfig) -> str:
         f"events={list(config.preprocessing.events)}, "
         f"sessions={sessions}"
     )
+    if car:
+        base += ", CAR=True"
     if preprocess == "paper_fir":
         base += (
             f", FIR(order={getattr(config.preprocessing, 'paper_fir_order', 50)}, "
