@@ -1,0 +1,3 @@
+method,n_subjects,mean_accuracy,std_accuracy,worst_accuracy,mean_kappa,std_kappa,worst_kappa,mean_delta_vs_baseline,delta_ci95_low,delta_ci95_high,neg_transfer_rate_vs_baseline,n_pos,n_neg,n_zero,p_wilcoxon_two_sided,p_wilcoxon_greater,p_sign_greater,accept_rate,p_wilcoxon_two_sided_holm,p_sign_greater_holm
+ea-csp-lda,14,0.5843929188891063,0.12525992861606403,0.3568181818181818,0.44584919168095727,0.16702482238537786,0.14242424242424245,0.0,0.0,0.0,0.0,0,0,14,,,,,,
+ea-stack-multi-safe-csp-lda,14,0.5843929188891063,0.12525992861606403,0.3568181818181818,0.44584919168095727,0.16702482238537786,0.14242424242424245,0.0,0.0,0.0,0.0,0,0,14,,,,0.0,,
