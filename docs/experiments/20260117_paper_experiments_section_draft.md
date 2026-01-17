@@ -57,9 +57,9 @@
 ## E.5 Results on Schirrmeister2017 (HGD)
 
 主表与图（直接引用）：  
-- Table (main): `docs/paper_assets/schirrmeister2017/4class_loso_strict_calib_pred_disagree/tables/main_table.md`  
-- Fig (mean acc/kappa + neg-transfer): `docs/paper_assets/schirrmeister2017/4class_loso_strict_calib_pred_disagree/figures/hgd4_strict_main_*`  
-- Fig (confusion matrices): `docs/paper_assets/schirrmeister2017/4class_loso_strict_calib_pred_disagree/figures/hgd4_strict_cm_*`  
+- Table (main): `docs/paper_assets/schirrmeister2017/4class_loso_strict/tables/main_table.md`  
+- Fig (mean acc/kappa + neg-transfer): `docs/paper_assets/schirrmeister2017/4class_loso_strict/figures/hgd4_strict_main_*`  
+- Fig (confusion matrices): `docs/paper_assets/schirrmeister2017/4class_loso_strict/figures/hgd4_strict_cm_*`  
 - Fig (tau sensitivity, analysis-only): `docs/paper_assets/schirrmeister2017/4class_loso_strict_calib_pred_disagree/figures/hgd4_strict_pred_disagree_tau037/tau_sweep.png`
 
 写法建议：强调 **高风险 candidate + 安全化选择** 的必要性：  
@@ -83,4 +83,3 @@
 ## E.7 Runtime / cost
 
 建议报告：候选数、每被试额外 wall-time、以及是否需要额外训练（我们这条 CSP+LDA 线基本是 “不更新分类器 + 轻量选择/门控”）。
-
