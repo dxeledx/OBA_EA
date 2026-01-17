@@ -20,8 +20,12 @@ def _extract_method_table(results_txt: Path, *, method: str) -> pd.DataFrame:
     m = pat.search(txt)
     if not m:
         raise RuntimeError(f"Method block not found: {method} in {results_txt}")
-    block = m.group(1).strip()
-    return pd.read_csv(io.StringIO(block), sep=r"\s+", engine="python")
+    # Keep the leading padding on the header line; pd.read_fwf relies on fixed-width alignment.
+    block = m.group(1).rstrip()
+    # NOTE: use fixed-width parsing. The printed table contains optional string columns
+    # (e.g., *_block_reason) that may be blank for some rows; whitespace-splitting would
+    # shift columns and silently corrupt downstream plots.
+    return pd.read_fwf(io.StringIO(block))
 
 
 def _ensure_dir(p: Path) -> None:

@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         default="ea-csp-lda,ea-zo-imr-csp-lda",
         help=(
             "Comma-separated methods to run: "
-            "csp-lda, ea-csp-lda, rpa-csp-lda, tsa-csp-lda, "
+            "csp-lda, ea-csp-lda, lea-csp-lda, lea-rot-csp-lda, "
             "oea-cov-csp-lda, oea-csp-lda, "
             "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
             "oea-zo-pce-csp-lda, oea-zo-conf-csp-lda, "
@@ -224,6 +224,18 @@ def main() -> None:
     sessions = sorted(set(train_sessions + test_sessions))
 
     methods = [m.strip() for m in str(args.methods).split(",") if m.strip()]
+    method_aliases = {
+        # Historical names (kept for backward compatibility): these are *not* paper-faithful RPA/TSA.
+        "rpa-csp-lda": "lea-csp-lda",
+        "tsa-csp-lda": "lea-rot-csp-lda",
+    }
+    methods_canon: list[str] = []
+    for m in methods:
+        canon = method_aliases.get(m, m)
+        if canon != m:
+            print(f"[DEPRECATED] method '{m}' is now '{canon}' (paper-faithful naming).")
+        methods_canon.append(canon)
+    methods = list(dict.fromkeys(methods_canon))
     date_prefix = today_yyyymmdd()
     n_classes = len(events)
     dataset_slug = re.sub(r"[^0-9a-zA-Z]+", "", str(args.dataset).strip().lower()) or "dataset"
@@ -282,12 +294,12 @@ def main() -> None:
         elif method == "ea-csp-lda":
             alignment = "ea"
             method_details[method] = "EA: session-wise whitening (train/test sessions aligned independently)."
-        elif method == "rpa-csp-lda":
+        elif method == "lea-csp-lda":
             alignment = "rpa"
-            method_details[method] = "RPA-center: log-Euclidean session-wise whitening (SPD mean)."
-        elif method == "tsa-csp-lda":
+            method_details[method] = "LEA: log-Euclidean session-wise whitening (SPD mean)."
+        elif method == "lea-rot-csp-lda":
             alignment = "tsa"
-            method_details[method] = "TSA: RPA-center + pseudo-label Procrustes rotation (closed-form)."
+            method_details[method] = "LEA + pseudo-label Procrustes target rotation (closed-form)."
         elif method == "oea-cov-csp-lda":
             alignment = "oea_cov"
             method_details[method] = "OEA (cov-eig): align test eigen-basis to train eigen-basis (within subject)."

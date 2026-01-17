@@ -25,16 +25,21 @@ def _save_fig(fig: plt.Figure, out_no_ext: Path) -> None:
 def _short_method_name(m: str) -> str:
     mapping = {
         "ea-stack-multi-safe-csp-lda": "Ours",
+        "ea-stack-multi-safe-csp-lda_strict_delta": "Ours (Δ-feats)",
+        "ea-stack-multi-safe-csp-lda_strict_delta_minpred002": "Ours (Δ-feats + minPred)",
         "ea-csp-lda": "EA",
         "csp-lda": "CSP-LDA",
         "fbcsp-lda": "FBCSP-LDA",
         "ea-fbcsp-lda": "EA-FBCSP",
         "riemann-mdm": "Riemann-MDM",
-        "rpa-csp-lda": "RPA-CSP",
+        "lea-csp-lda": "LEA-CSP",
+        "lea-rot-csp-lda": "LEA-ROT-CSP",
+        # Backward-compatible aliases.
+        "rpa-csp-lda": "LEA-CSP",
         "rpa-mdm": "RPA-MDM",
         "rpa-ts-lr": "RPA-TS-LR",
         "ts-lr": "TS-LR",
-        "tsa-csp-lda": "TSA-CSP",
+        "tsa-csp-lda": "LEA-ROT-CSP",
     }
     return mapping.get(m, m)
 
@@ -264,6 +269,12 @@ def main() -> None:
     ap.add_argument("--prefix", type=str, default="loso4_strong_baselines_v1")
     ap.add_argument("--ours", type=str, default="ea-stack-multi-safe-csp-lda")
     ap.add_argument("--baseline", type=str, default="ea-csp-lda")
+    ap.add_argument(
+        "--task-label",
+        type=str,
+        default="LOSO-4class",
+        help="Label used in figure titles (e.g., 'BNCI2014_001 LOSO-4class').",
+    )
     args = ap.parse_args()
 
     fig_dir = Path(args.fig_dir)
@@ -287,13 +298,14 @@ def main() -> None:
     ours = str(args.ours)
     baseline = str(args.baseline)
     prefix = str(args.prefix)
+    task = str(args.task_label)
 
     _bar_mean_with_std(
         main_table,
         metric="mean_accuracy",
         std_col="std_accuracy",
         out_no_ext=out_dir / f"{prefix}_bar_mean_accuracy",
-        title="LOSO-4class: mean accuracy (±std across subjects)",
+        title=f"{task}: mean accuracy (±std across subjects)",
         ours=ours,
         baseline=baseline,
     )
@@ -302,21 +314,21 @@ def main() -> None:
         metric="mean_kappa",
         std_col="std_kappa",
         out_no_ext=out_dir / f"{prefix}_bar_mean_kappa",
-        title="LOSO-4class: mean kappa (±std across subjects)",
+        title=f"{task}: mean kappa (±std across subjects)",
         ours=ours,
         baseline=baseline,
     )
     _scatter_mean_vs_worst(
         main_table,
         out_no_ext=out_dir / f"{prefix}_scatter_mean_vs_worst",
-        title="LOSO-4class: mean vs worst-subject accuracy",
+        title=f"{task}: mean vs worst-subject accuracy",
         ours=ours,
         baseline=baseline,
     )
     _bar_neg_transfer(
         main_table,
         out_no_ext=out_dir / f"{prefix}_bar_neg_transfer_rate",
-        title="LOSO-4class: negative transfer rate vs EA (lower is better)",
+        title=f"{task}: negative transfer rate vs EA (lower is better)",
         ours=ours,
         baseline=baseline,
     )
@@ -379,4 +391,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

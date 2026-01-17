@@ -238,6 +238,76 @@ def _compute_lda_evidence_params(
     }
 
 
+def _compute_gaussian_evidence_params_from_feats(
+    *,
+    feats: np.ndarray,
+    y_train: np.ndarray,
+    class_order: Sequence[str],
+    ridge: float = 1e-6,
+) -> dict:
+    """Gaussian-mixture evidence params from arbitrary feature space (2D array).
+
+    Returns the same dict format as `_compute_lda_evidence_params`.
+    """
+
+    class_order = [str(c) for c in class_order]
+    feats = np.asarray(feats, dtype=np.float64)
+    y_train = np.asarray(y_train)
+    if feats.ndim != 2:
+        raise ValueError("feats must be 2D.")
+    n = int(feats.shape[0])
+    if n != int(y_train.shape[0]):
+        raise ValueError("feats/y_train length mismatch for evidence params.")
+    k = int(len(class_order))
+    if k < 2:
+        raise ValueError("Need at least 2 classes for evidence params.")
+
+    mu = np.zeros((k, feats.shape[1]), dtype=np.float64)
+    priors = np.zeros(k, dtype=np.float64)
+    present = 0
+    for i, c in enumerate(class_order):
+        mask = y_train == c
+        if not np.any(mask):
+            continue
+        present += 1
+        priors[i] = float(np.sum(mask)) / float(n)
+        mu[i] = np.mean(feats[mask], axis=0)
+    if present < 2:
+        raise ValueError("At least two classes must be present to compute evidence params.")
+
+    priors = np.clip(priors, 1e-12, 1.0)
+    priors = priors / float(np.sum(priors))
+
+    # Pooled within-class covariance.
+    d = int(feats.shape[1])
+    scatter = np.zeros((d, d), dtype=np.float64)
+    for i, c in enumerate(class_order):
+        mask = y_train == c
+        if not np.any(mask):
+            continue
+        fc = feats[mask] - mu[i]
+        scatter += fc.T @ fc
+
+    denom = max(1, int(n - present))
+    cov = scatter / float(denom)
+    cov = 0.5 * (cov + cov.T)
+    scale = float(np.trace(cov)) / float(d) if float(np.trace(cov)) > 0.0 else 1.0
+    cov = cov + float(ridge) * float(scale) * np.eye(d, dtype=np.float64)
+    sign, logdet = np.linalg.slogdet(cov)
+    if sign <= 0.0 or not np.isfinite(logdet):
+        cov = cov + 1e-3 * np.eye(d, dtype=np.float64)
+        sign, logdet = np.linalg.slogdet(cov)
+    cov_inv = np.linalg.pinv(cov) if (sign <= 0.0 or not np.isfinite(logdet)) else np.linalg.inv(cov)
+
+    return {
+        "mu": mu,
+        "priors": priors,
+        "cov": cov,
+        "cov_inv": cov_inv,
+        "logdet": float(logdet) if np.isfinite(logdet) else float("nan"),
+    }
+
+
 @dataclass(frozen=True)
 class FoldResult:
     subject: int
@@ -259,6 +329,7 @@ def loso_cross_subject_evaluation(
     n_components: int = 4,
     average: str = "macro",
     alignment: str = "none",
+    fbcsp_multiclass_strategy: str = "multiclass",
     sfreq: float = 250.0,
     oea_eps: float = 1e-10,
     oea_shrinkage: float = 0.0,
@@ -316,6 +387,7 @@ def loso_cross_subject_evaluation(
     stack_safe_fbcsp_guard_threshold: float = -1.0,
     stack_safe_fbcsp_min_pred_improve: float = 0.0,
     stack_safe_fbcsp_drift_delta: float = 0.0,
+    stack_safe_fbcsp_max_pred_disagree: float = -1.0,
     stack_safe_tsa_guard_threshold: float = -1.0,
     stack_safe_tsa_min_pred_improve: float = 0.0,
     stack_safe_tsa_drift_delta: float = 0.0,
@@ -388,6 +460,9 @@ def loso_cross_subject_evaluation(
         "rpa_mdm",
         "rpa_rot_mdm",
         "ts_lr",
+        "ts_svc",
+        "tsa_ts_svc",
+        "fgmdm",
         "rpa_ts_lr",
         "ea_ts_lr",
         "ea_si_zo",
@@ -403,12 +478,14 @@ def loso_cross_subject_evaluation(
         raise ValueError(
             "alignment must be one of: "
             "'none', 'ea', 'rpa', 'fbcsp', 'ea_fbcsp', 'ea_si', 'ea_si_chan', 'ea_si_chan_safe', 'ea_si_chan_multi_safe', 'ea_si_chan_spsa_safe', 'ea_mm_safe', 'ea_stack_multi_safe', "
-            "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', 'ts_lr', 'rpa_ts_lr', 'ea_ts_lr', "
+            "'riemann_mdm', 'rpa_mdm', 'rpa_rot_mdm', 'ts_lr', 'ts_svc', 'tsa_ts_svc', 'fgmdm', 'rpa_ts_lr', 'ea_ts_lr', "
             "'ea_si_zo', 'ea_zo', 'raw_zo', 'rpa_zo', 'tsa', 'tsa_zo', 'oea_cov', 'oea', 'oea_zo'"
         )
 
     if oea_pseudo_mode not in {"hard", "soft"}:
         raise ValueError("oea_pseudo_mode must be one of: 'hard', 'soft'")
+    if str(fbcsp_multiclass_strategy) not in {"auto", "multiclass", "ovo", "ovr"}:
+        raise ValueError("fbcsp_multiclass_strategy must be one of: 'auto', 'multiclass', 'ovo', 'ovr'.")
     if not (0.0 <= float(oea_pseudo_confidence) <= 1.0):
         raise ValueError("oea_pseudo_confidence must be in [0,1].")
     if int(oea_pseudo_topk_per_class) < 0:
@@ -464,11 +541,15 @@ def loso_cross_subject_evaluation(
         "calibrated_stack_ridge_guard",
         "calibrated_stack_ridge_guard_borda",
         "calibrated_stack_bandit_guard",
+        "prefer_fbcsp",
         "oracle",
     }:
         raise ValueError(
             "oea_zo_selector must be one of: "
-            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', 'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', 'calibrated_stack_ridge', 'calibrated_stack_ridge_guard', 'calibrated_stack_bandit_guard', 'oracle'."
+            "'objective', 'dev', 'evidence', 'probe_mixup', 'probe_mixup_hard', 'iwcv', 'iwcv_ucb', "
+            "'calibrated_ridge', 'calibrated_guard', 'calibrated_ridge_guard', "
+            "'calibrated_stack_ridge', 'calibrated_stack_ridge_guard', 'calibrated_stack_ridge_guard_borda', "
+            "'calibrated_stack_bandit_guard', 'prefer_fbcsp', 'oracle'."
         )
     if float(oea_zo_iwcv_kappa) < 0.0:
         raise ValueError("oea_zo_iwcv_kappa must be >= 0.")
@@ -548,6 +629,12 @@ def loso_cross_subject_evaluation(
         raise ValueError("stack_safe_fbcsp_min_pred_improve must be >= 0.")
     if float(stack_safe_fbcsp_drift_delta) < 0.0:
         raise ValueError("stack_safe_fbcsp_drift_delta must be >= 0.")
+    if float(stack_safe_fbcsp_max_pred_disagree) < -1.0:
+        raise ValueError("stack_safe_fbcsp_max_pred_disagree must be -1 (disable) or in [0,1].")
+    if float(stack_safe_fbcsp_max_pred_disagree) >= 0.0 and not (
+        0.0 <= float(stack_safe_fbcsp_max_pred_disagree) <= 1.0
+    ):
+        raise ValueError("stack_safe_fbcsp_max_pred_disagree must be -1 (disable) or in [0,1].")
     if float(stack_safe_tsa_guard_threshold) >= 0.0 and not (0.0 <= float(stack_safe_tsa_guard_threshold) <= 1.0):
         raise ValueError("stack_safe_tsa_guard_threshold must be in [0,1] (or <0 to disable).")
     if float(stack_safe_tsa_min_pred_improve) < 0.0:
@@ -571,7 +658,7 @@ def loso_cross_subject_evaluation(
     stack_fams = {str(f).strip().lower() for f in stack_candidate_families if str(f).strip()}
     if not stack_fams:
         stack_fams = {"ea"}
-    allowed_stack_fams = {"ea", "fbcsp", "rpa", "tsa", "chan"}
+    allowed_stack_fams = {"ea", "fbcsp", "rpa", "tsa", "chan", "ts_svc", "tsa_ts_svc", "fgmdm"}
     if not stack_fams.issubset(allowed_stack_fams):
         raise ValueError(f"stack_candidate_families must be subset of {sorted(allowed_stack_fams)}; got {sorted(stack_fams)}")
     stack_fams.add("ea")
@@ -604,6 +691,37 @@ def loso_cross_subject_evaluation(
         ranks = np.empty_like(order, dtype=np.float64)
         ranks[order] = np.arange(x.size, dtype=np.float64)
         return ranks
+
+    def _trace_normalize_covs(covs: np.ndarray) -> np.ndarray:
+        covs = np.asarray(covs, dtype=np.float64)
+        tr = np.trace(covs, axis1=1, axis2=2)
+        tr = np.maximum(tr, 1e-12)
+        return covs / tr[:, None, None]
+
+    def _covs_for_riemann(X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=np.float64)
+        X_c = X - np.mean(X, axis=2, keepdims=True)
+        covs = covariances_from_epochs(X_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+        return _trace_normalize_covs(covs)
+
+    def _tsa_tangent_vectors_from_covs(covs: np.ndarray) -> np.ndarray:
+        from pyriemann.utils.base import invsqrtm
+        from pyriemann.utils.mean import mean_riemann
+        from pyriemann.utils.tangentspace import tangent_space
+
+        covs = np.asarray(covs, dtype=np.float64)
+        if covs.ndim != 3 or covs.shape[1] != covs.shape[2]:
+            raise ValueError("Expected covs with shape (n,C,C).")
+        c = int(covs.shape[1])
+        m = mean_riemann(covs)
+        w = invsqrtm(m)
+        cov_rec = np.einsum("ij,njk,kl->nil", w, covs, w.T, optimize=True)
+        v = tangent_space(cov_rec, np.eye(c, dtype=np.float64))
+        v = np.asarray(v, dtype=np.float64)
+        norms = np.linalg.norm(v, axis=1)
+        scale = float(np.mean(norms)) if norms.size else 1.0
+        scale = scale if np.isfinite(scale) and scale > 1e-12 else 1.0
+        return v / scale
 
     # Fast path: subject-wise EA can be precomputed once.
     if alignment in {
@@ -644,6 +762,44 @@ def loso_cross_subject_evaluation(
                 aligned_rpa[int(s)] = SubjectData(subject=int(s), X=X_rpa, y=sd.y)
         subject_data = aligned_ea
         subject_data_rpa = aligned_rpa if need_rpa_view else None
+
+    # Precompute per-subject SPD covariances for Riemannian/TS baselines to avoid O(n_folds)
+    # recomputation of trial-wise covariances (HGD becomes prohibitively slow otherwise).
+    #
+    # Note: caches are built after alignment preprocessing so they reflect the final view used in the fold loop.
+    cov_raw_by_subject: dict[int, np.ndarray] | None = None
+    cov_centered_by_subject: dict[int, np.ndarray] | None = None
+    cov_riemann_by_subject: dict[int, np.ndarray] | None = None
+
+    need_cov_raw = alignment in {"ts_lr", "ea_ts_lr", "rpa_ts_lr"}
+    need_cov_centered = alignment in {"riemann_mdm", "rpa_mdm", "rpa_rot_mdm"}
+    need_cov_riemann = alignment in {"ts_svc", "tsa_ts_svc", "fgmdm"} or (
+        alignment == "ea_stack_multi_safe" and bool({"ts_svc", "tsa_ts_svc", "fgmdm"} & stack_fams)
+    )
+
+    if need_cov_raw:
+        cov_raw_by_subject = {}
+    if need_cov_centered or need_cov_riemann:
+        cov_centered_by_subject = {}
+    if need_cov_riemann:
+        cov_riemann_by_subject = {}
+
+    if need_cov_raw or need_cov_centered or need_cov_riemann:
+        for s, sd in subject_data.items():
+            s = int(s)
+            if cov_raw_by_subject is not None:
+                cov_raw_by_subject[s] = covariances_from_epochs(
+                    sd.X, eps=float(oea_eps), shrinkage=float(oea_shrinkage)
+                )
+
+            if cov_centered_by_subject is not None:
+                X_c = sd.X - np.mean(sd.X, axis=2, keepdims=True)
+                cov_c = covariances_from_epochs(X_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+                cov_centered_by_subject[s] = cov_c
+
+            if cov_riemann_by_subject is not None:
+                # Center + trace-normalize covariances (equivalent to _covs_for_riemann on this subject).
+                cov_riemann_by_subject[s] = _trace_normalize_covs(cov_centered_by_subject[s])
 
     # Cache for expensive per-train-set computations (used by ea_si_chan_multi_safe).
     chan_bundle_cache: dict[tuple[int, ...], dict] = {}
@@ -768,10 +924,84 @@ def loso_cross_subject_evaluation(
                 sfreq=float(sfreq),
                 n_components=fb_n_components,
                 filter_order=4,
-                multiclass_strategy="auto",
+                multiclass_strategy=str(fbcsp_multiclass_strategy),
                 select_k=24,
             )
             bundle["fbcsp"] = {"model": model_fbcsp}
+
+        if "ts_svc" in stack_fams:
+            try:
+                from pyriemann.tangentspace import TangentSpace
+                from sklearn.pipeline import make_pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.svm import SVC
+
+                if cov_riemann_by_subject is not None:
+                    cov_tr = np.concatenate([cov_riemann_by_subject[int(s)] for s in key], axis=0)
+                else:
+                    cov_tr = _covs_for_riemann(X_train_ea)
+                ts = TangentSpace(metric="riemann")
+                x_tr = ts.fit_transform(cov_tr)
+                clf = make_pipeline(
+                    StandardScaler(with_mean=True, with_std=True),
+                    SVC(kernel="linear", probability=True, random_state=0),
+                )
+                clf.fit(x_tr, y_train)
+                ev = _compute_gaussian_evidence_params_from_feats(
+                    feats=x_tr,
+                    y_train=y_train,
+                    class_order=tuple([str(c) for c in class_order]),
+                    ridge=float(si_ridge),
+                )
+                bundle["ts_svc"] = {"ts": ts, "clf": clf, "evidence": ev}
+            except Exception:
+                pass
+
+        if "tsa_ts_svc" in stack_fams:
+            try:
+                from sklearn.pipeline import make_pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.svm import SVC
+
+                if cov_riemann_by_subject is not None:
+                    cov_tr = np.concatenate([cov_riemann_by_subject[int(s)] for s in key], axis=0)
+                else:
+                    cov_tr = _covs_for_riemann(X_train_ea)
+                v_tr = _tsa_tangent_vectors_from_covs(cov_tr)
+                mu_s = np.zeros((len(class_order), v_tr.shape[1]), dtype=np.float64)
+                for i, c in enumerate([str(x) for x in class_order]):
+                    mask = np.asarray(y_train == c)
+                    if np.any(mask):
+                        mu_s[int(i)] = np.mean(v_tr[mask], axis=0)
+
+                clf = make_pipeline(
+                    StandardScaler(with_mean=True, with_std=True),
+                    SVC(kernel="linear", probability=True, random_state=0),
+                )
+                clf.fit(v_tr, y_train)
+                ev = _compute_gaussian_evidence_params_from_feats(
+                    feats=v_tr,
+                    y_train=y_train,
+                    class_order=tuple([str(c) for c in class_order]),
+                    ridge=float(si_ridge),
+                )
+                bundle["tsa_ts_svc"] = {"clf": clf, "mu_s": mu_s, "evidence": ev}
+            except Exception:
+                pass
+
+        if "fgmdm" in stack_fams:
+            try:
+                from pyriemann.classification import FgMDM
+
+                if cov_riemann_by_subject is not None:
+                    cov_tr = np.concatenate([cov_riemann_by_subject[int(s)] for s in key], axis=0)
+                else:
+                    cov_tr = _covs_for_riemann(X_train_ea)
+                fg = FgMDM(metric="riemann")
+                fg.fit(cov_tr, y_train)
+                bundle["fgmdm"] = {"model": fg}
+            except Exception:
+                pass
 
         if need_rpa_view:
             X_train_rpa = np.concatenate([subject_data_rpa[int(s)].X for s in key], axis=0)
@@ -841,25 +1071,31 @@ def loso_cross_subject_evaluation(
             X_test_raw = subject_data[test_subject].X
             y_test = subject_data[test_subject].y
 
-            X_train_parts = []
             y_train_parts = []
             dom_train_parts = []
+            cov_train_parts: list[np.ndarray] | None = [] if cov_centered_by_subject is not None else None
             for s in train_subjects:
                 sd = subject_data[int(s)]
-                X_train_parts.append(sd.X)
                 y_train_parts.append(sd.y)
                 dom_train_parts.append(np.full(sd.y.shape[0], f"src_{int(s)}", dtype=object))
-            X_train = np.concatenate(X_train_parts, axis=0)
+                if cov_train_parts is not None:
+                    cov_train_parts.append(cov_centered_by_subject[int(s)])
             y_train = np.concatenate(y_train_parts, axis=0)
             dom_train = np.concatenate(dom_train_parts, axis=0)
 
             dom_test = np.full(y_test.shape[0], "target", dtype=object)
 
-            # Use centered covariances (subtract per-channel mean) for tangent-space features.
-            X_train_c = X_train - np.mean(X_train, axis=2, keepdims=True)
-            X_test_c = X_test_raw - np.mean(X_test_raw, axis=2, keepdims=True)
-            cov_train = covariances_from_epochs(X_train_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
-            cov_test = covariances_from_epochs(X_test_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            if cov_train_parts is not None and cov_centered_by_subject is not None:
+                cov_train = np.concatenate(cov_train_parts, axis=0)
+                cov_test = cov_centered_by_subject[int(test_subject)]
+            else:
+                # Use centered covariances (subtract per-channel mean) for tangent-space features.
+                X_train_parts = [subject_data[int(s)].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                X_train_c = X_train - np.mean(X_train, axis=2, keepdims=True)
+                X_test_c = X_test_raw - np.mean(X_test_raw, axis=2, keepdims=True)
+                cov_train = covariances_from_epochs(X_train_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+                cov_test = covariances_from_epochs(X_test_c, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
 
             if alignment == "riemann_mdm":
                 model = MDM(metric="riemann")
@@ -908,13 +1144,17 @@ def loso_cross_subject_evaluation(
             X_test_raw = subject_data[test_subject].X
             y_test = subject_data[test_subject].y
 
-            X_train_parts = [subject_data[s].X for s in train_subjects]
             y_train_parts = [subject_data[s].y for s in train_subjects]
-            X_train = np.concatenate(X_train_parts, axis=0)
             y_train = np.concatenate(y_train_parts, axis=0)
 
-            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
-            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            if cov_raw_by_subject is not None:
+                cov_train = np.concatenate([cov_raw_by_subject[int(s)] for s in train_subjects], axis=0)
+                cov_test = cov_raw_by_subject[int(test_subject)]
+            else:
+                X_train_parts = [subject_data[s].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+                cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
 
             # Riemannian pipelines commonly apply trace-normalization to reduce per-trial power scale effects
             # (keeps SPD and improves cross-subject robustness).
@@ -938,6 +1178,108 @@ def loso_cross_subject_evaluation(
             )
             model.fit(cov_train, y_train)
             X_test = cov_test
+        elif alignment == "ts_svc":
+            # Tangent-space classifier: TangentSpace(metric='riemann') + linear SVC on SPD covariances.
+            from pyriemann.tangentspace import TangentSpace
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.svm import SVC
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            if cov_riemann_by_subject is not None:
+                cov_train = np.concatenate([cov_riemann_by_subject[int(s)] for s in train_subjects], axis=0)
+                cov_test = cov_riemann_by_subject[int(test_subject)]
+            else:
+                X_train_parts = [subject_data[s].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                cov_train = _covs_for_riemann(X_train)
+                cov_test = _covs_for_riemann(X_test_raw)
+
+            model = make_pipeline(
+                TangentSpace(metric="riemann"),
+                StandardScaler(with_mean=True, with_std=True),
+                SVC(kernel="linear", probability=True, random_state=0),
+            )
+            model.fit(cov_train, y_train)
+            X_test = cov_test
+        elif alignment == "tsa_ts_svc":
+            # TSA-style alignment in tangent space (recenter+rescale per domain + pseudo-label Procrustes rotation),
+            # then linear SVC on tangent vectors.
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.svm import SVC
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            if cov_riemann_by_subject is not None:
+                cov_train = np.concatenate([cov_riemann_by_subject[int(s)] for s in train_subjects], axis=0)
+                cov_test = cov_riemann_by_subject[int(test_subject)]
+            else:
+                X_train_parts = [subject_data[s].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                cov_train = _covs_for_riemann(X_train)
+                cov_test = _covs_for_riemann(X_test_raw)
+
+            v_train = _tsa_tangent_vectors_from_covs(cov_train)
+            v_test = _tsa_tangent_vectors_from_covs(cov_test)
+
+            model = make_pipeline(
+                StandardScaler(with_mean=True, with_std=True),
+                SVC(kernel="linear", probability=True, random_state=0),
+            )
+            model.fit(v_train, y_train)
+
+            # Pseudo labels on target to build Procrustes rotation.
+            y_pseudo = np.asarray(model.predict(v_test), dtype=object)
+            mu_s = np.zeros((len(class_order), v_train.shape[1]), dtype=np.float64)
+            mu_t = np.full_like(mu_s, np.nan)
+            for i, c in enumerate([str(x) for x in class_order]):
+                m_s = y_train == c
+                if np.any(m_s):
+                    mu_s[int(i)] = np.mean(v_train[m_s], axis=0)
+                m_t = y_pseudo == c
+                if np.any(m_t):
+                    mu_t[int(i)] = np.mean(v_test[m_t], axis=0)
+
+            valid = np.all(np.isfinite(mu_t), axis=1) & np.all(np.isfinite(mu_s), axis=1)
+            r = np.eye(int(v_test.shape[1]), dtype=np.float64)
+            if int(np.sum(valid)) >= 2:
+                a = mu_t[valid]
+                b = mu_s[valid]
+                u, _s, vt = np.linalg.svd(a.T @ b, full_matrices=False)
+                r = u @ vt
+            X_test = v_test @ r
+        elif alignment == "fgmdm":
+            # FgMDM baseline on SPD covariances.
+            from pyriemann.classification import FgMDM
+
+            X_test_raw = subject_data[test_subject].X
+            y_test = subject_data[test_subject].y
+
+            y_train_parts = [subject_data[s].y for s in train_subjects]
+            y_train = np.concatenate(y_train_parts, axis=0)
+
+            if cov_riemann_by_subject is not None:
+                cov_train = np.concatenate([cov_riemann_by_subject[int(s)] for s in train_subjects], axis=0)
+                cov_test = cov_riemann_by_subject[int(test_subject)]
+            else:
+                X_train_parts = [subject_data[s].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                cov_train = _covs_for_riemann(X_train)
+                cov_test = _covs_for_riemann(X_test_raw)
+
+            model = FgMDM(metric="riemann")
+            model.fit(cov_train, y_train)
+            X_test = cov_test
         elif alignment == "rpa_ts_lr":
             # RPA-style tangent-space classifier: TLCenter+TLStretch (unlabeled target) then
             # TangentSpace(metric='riemann') + LogisticRegression on covariances.
@@ -950,22 +1292,28 @@ def loso_cross_subject_evaluation(
             X_test_raw = subject_data[test_subject].X
             y_test = subject_data[test_subject].y
 
-            X_train_parts = []
             y_train_parts = []
             dom_train_parts = []
+            cov_train_parts: list[np.ndarray] | None = [] if cov_raw_by_subject is not None else None
             for s in train_subjects:
                 sd = subject_data[int(s)]
-                X_train_parts.append(sd.X)
                 y_train_parts.append(sd.y)
                 dom_train_parts.append(np.full(sd.y.shape[0], f"src_{int(s)}", dtype=object))
-            X_train = np.concatenate(X_train_parts, axis=0)
+                if cov_train_parts is not None:
+                    cov_train_parts.append(cov_raw_by_subject[int(s)])
             y_train = np.concatenate(y_train_parts, axis=0)
             dom_train = np.concatenate(dom_train_parts, axis=0)
 
             dom_test = np.full(y_test.shape[0], "target", dtype=object)
 
-            cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
-            cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+            if cov_train_parts is not None and cov_raw_by_subject is not None:
+                cov_train = np.concatenate(cov_train_parts, axis=0)
+                cov_test = cov_raw_by_subject[int(test_subject)]
+            else:
+                X_train_parts = [subject_data[int(s)].X for s in train_subjects]
+                X_train = np.concatenate(X_train_parts, axis=0)
+                cov_train = covariances_from_epochs(X_train, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
+                cov_test = covariances_from_epochs(X_test_raw, eps=float(oea_eps), shrinkage=float(oea_shrinkage))
 
             # Center + stretch (RPA without rotation) using both source and target (unlabeled) covariances.
             y_dummy = np.full(y_test.shape[0], str(class_order[0]), dtype=object)
@@ -1036,6 +1384,9 @@ def loso_cross_subject_evaluation(
             include_rpa = "rpa" in stack_fams
             include_tsa = "tsa" in stack_fams
             include_chan = "chan" in stack_fams
+            include_ts_svc = "ts_svc" in stack_fams
+            include_tsa_ts_svc = "tsa_ts_svc" in stack_fams
+            include_fgmdm = "fgmdm" in stack_fams
 
             class_labels = tuple([str(c) for c in class_order])
             selector = str(oea_zo_selector)
@@ -1498,6 +1849,121 @@ def loso_cross_subject_evaluation(
                             except Exception:
                                 pass
 
+                    # Tangent-space SVC candidate (EA view -> cov -> TS -> linear SVC).
+                    if include_ts_svc:
+                        try:
+                            info = dict(inner_bundle.get("ts_svc", {}))
+                            ts = info.get("ts", None)
+                            clf = info.get("clf", None)
+                            ev = info.get("evidence", None)
+                            if ts is not None and clf is not None:
+                                cov_p = _covs_for_riemann(z_p_ea)
+                                x_p = np.asarray(ts.transform(cov_p), dtype=np.float64)
+                                p_ts = _reorder_proba_columns(
+                                    clf.predict_proba(x_p),
+                                    getattr(clf, "classes_", np.asarray(class_labels, dtype=object)),
+                                    list(class_labels),
+                                )
+                                acc_ts = float(accuracy_score(y_p, np.asarray(clf.predict(x_p))))
+                                improve_ts = float(acc_ts - acc_id)
+                                rec_ts = _record_for_candidate(
+                                    p_id=p_id,
+                                    p_c=p_ts,
+                                    feats_c=(x_p if use_stack else None),
+                                    lda_c=(clf if use_stack else None),
+                                    lda_ev=(ev if use_stack else None),
+                                    seed_local=seed_pseudo_base + 44,
+                                )
+                                rec_ts["cand_family"] = "ts_svc"
+                                feats_ts, names = _feats_for_stack(rec_ts)
+                                if feat_names is None:
+                                    feat_names = names
+                                _add_calib_sample(fam="ts_svc", feats=feats_ts, improve=improve_ts)
+                                _add_bandit_sample(gid=int(pseudo_t), feats=feats_ts, reward=improve_ts)
+                        except Exception:
+                            pass
+
+                    # Tangent-space alignment + SVC candidate (TSA in tangent space; pseudo-label rotation).
+                    if include_tsa_ts_svc:
+                        try:
+                            info = dict(inner_bundle.get("tsa_ts_svc", {}))
+                            clf = info.get("clf", None)
+                            mu_s = np.asarray(info.get("mu_s"), dtype=np.float64)
+                            ev = info.get("evidence", None)
+                            if clf is not None and mu_s.ndim == 2 and mu_s.shape[0] == len(class_labels):
+                                cov_p = _covs_for_riemann(z_p_ea)
+                                v_t = _tsa_tangent_vectors_from_covs(cov_p)
+                                y_pseudo = np.asarray(clf.predict(v_t), dtype=object)
+
+                                mu_t = np.full_like(mu_s, np.nan)
+                                for i, c in enumerate([str(x) for x in class_labels]):
+                                    m = y_pseudo == c
+                                    if np.any(m):
+                                        mu_t[int(i)] = np.mean(v_t[m], axis=0)
+                                valid = np.all(np.isfinite(mu_t), axis=1) & np.all(np.isfinite(mu_s), axis=1)
+
+                                r = np.eye(int(v_t.shape[1]), dtype=np.float64)
+                                if int(np.sum(valid)) >= 2:
+                                    a = mu_t[valid]
+                                    b = mu_s[valid]
+                                    u, _s, vt = np.linalg.svd(a.T @ b, full_matrices=False)
+                                    r = u @ vt
+
+                                v_t_rot = v_t @ r
+                                p_tsa_ts = _reorder_proba_columns(
+                                    clf.predict_proba(v_t_rot),
+                                    getattr(clf, "classes_", np.asarray(class_labels, dtype=object)),
+                                    list(class_labels),
+                                )
+                                acc_tsa_ts = float(accuracy_score(y_p, np.asarray(clf.predict(v_t_rot))))
+                                improve_tsa_ts = float(acc_tsa_ts - acc_id)
+                                rec_tsa_ts = _record_for_candidate(
+                                    p_id=p_id,
+                                    p_c=p_tsa_ts,
+                                    feats_c=(v_t_rot if use_stack else None),
+                                    lda_c=(clf if use_stack else None),
+                                    lda_ev=(ev if use_stack else None),
+                                    seed_local=seed_pseudo_base + 55,
+                                )
+                                rec_tsa_ts["cand_family"] = "tsa_ts_svc"
+                                feats_tsa_ts, names = _feats_for_stack(rec_tsa_ts)
+                                if feat_names is None:
+                                    feat_names = names
+                                _add_calib_sample(fam="tsa_ts_svc", feats=feats_tsa_ts, improve=improve_tsa_ts)
+                                _add_bandit_sample(gid=int(pseudo_t), feats=feats_tsa_ts, reward=improve_tsa_ts)
+                        except Exception:
+                            pass
+
+                    # FgMDM candidate on covariances (no probe/evidence features yet).
+                    if include_fgmdm:
+                        try:
+                            fg = inner_bundle.get("fgmdm", {}).get("model", None)
+                            if fg is not None:
+                                cov_p = _covs_for_riemann(z_p_ea)
+                                p_fg = _reorder_proba_columns(
+                                    fg.predict_proba(cov_p),
+                                    getattr(fg, "classes_", np.asarray(class_labels, dtype=object)),
+                                    list(class_labels),
+                                )
+                                acc_fg = float(accuracy_score(y_p, np.asarray(fg.predict(cov_p))))
+                                improve_fg = float(acc_fg - acc_id)
+                                rec_fg = _record_for_candidate(
+                                    p_id=p_id,
+                                    p_c=p_fg,
+                                    feats_c=None,
+                                    lda_c=None,
+                                    lda_ev=None,
+                                    seed_local=seed_pseudo_base + 66,
+                                )
+                                rec_fg["cand_family"] = "fgmdm"
+                                feats_fg, names = _feats_for_stack(rec_fg)
+                                if feat_names is None:
+                                    feat_names = names
+                                _add_calib_sample(fam="fgmdm", feats=feats_fg, improve=improve_fg)
+                                _add_bandit_sample(gid=int(pseudo_t), feats=feats_fg, reward=improve_fg)
+                        except Exception:
+                            pass
+
                     # Channel projector candidates (EA view).
                     if include_chan:
                         cand_inner_chan: dict = dict(inner_bundle.get("chan", {}).get("candidates", {}))
@@ -1802,6 +2268,112 @@ def loso_cross_subject_evaluation(
                 except Exception:
                     X_test_tsa = None
 
+            # Tangent-space SVC candidate (EA view -> cov -> TS -> linear SVC).
+            if include_ts_svc:
+                try:
+                    info = dict(outer_bundle.get("ts_svc", {}))
+                    ts = info.get("ts", None)
+                    clf = info.get("clf", None)
+                    ev = info.get("evidence", None)
+                    if ts is not None and clf is not None:
+                        cov_t = _covs_for_riemann(X_test_ea)
+                        x_t = np.asarray(ts.transform(cov_t), dtype=np.float64)
+                        p_ts_t = _reorder_proba_columns(
+                            clf.predict_proba(x_t),
+                            getattr(clf, "classes_", np.asarray(class_labels, dtype=object)),
+                            list(class_labels),
+                        )
+                        rec_ts_t = _record_for_candidate(
+                            p_id=p_id_t,
+                            p_c=p_ts_t,
+                            feats_c=(x_t if use_stack else None),
+                            lda_c=(clf if use_stack else None),
+                            lda_ev=(ev if use_stack else None),
+                            seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 5,
+                        )
+                        rec_ts_t["cand_family"] = "ts_svc"
+                        if bool(do_diag):
+                            y_hat = np.asarray(clf.predict(x_t), dtype=object)
+                            rec_ts_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                        records.append(rec_ts_t)
+                except Exception:
+                    pass
+
+            # Tangent-space alignment + SVC candidate (TSA in tangent space; pseudo-label rotation).
+            if include_tsa_ts_svc:
+                try:
+                    info = dict(outer_bundle.get("tsa_ts_svc", {}))
+                    clf = info.get("clf", None)
+                    mu_s = np.asarray(info.get("mu_s"), dtype=np.float64)
+                    ev = info.get("evidence", None)
+                    if clf is not None and mu_s.ndim == 2 and mu_s.shape[0] == len(class_labels):
+                        cov_t = _covs_for_riemann(X_test_ea)
+                        v_t = _tsa_tangent_vectors_from_covs(cov_t)
+                        y_pseudo = np.asarray(clf.predict(v_t), dtype=object)
+
+                        mu_t = np.full_like(mu_s, np.nan)
+                        for i, c in enumerate([str(x) for x in class_labels]):
+                            m = y_pseudo == c
+                            if np.any(m):
+                                mu_t[int(i)] = np.mean(v_t[m], axis=0)
+                        valid = np.all(np.isfinite(mu_t), axis=1) & np.all(np.isfinite(mu_s), axis=1)
+
+                        r = np.eye(int(v_t.shape[1]), dtype=np.float64)
+                        if int(np.sum(valid)) >= 2:
+                            a = mu_t[valid]
+                            b = mu_s[valid]
+                            u, _s, vt = np.linalg.svd(a.T @ b, full_matrices=False)
+                            r = u @ vt
+
+                        v_t_rot = v_t @ r
+                        p_tsa_ts_t = _reorder_proba_columns(
+                            clf.predict_proba(v_t_rot),
+                            getattr(clf, "classes_", np.asarray(class_labels, dtype=object)),
+                            list(class_labels),
+                        )
+                        rec_tsa_ts_t = _record_for_candidate(
+                            p_id=p_id_t,
+                            p_c=p_tsa_ts_t,
+                            feats_c=(v_t_rot if use_stack else None),
+                            lda_c=(clf if use_stack else None),
+                            lda_ev=(ev if use_stack else None),
+                            seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 6,
+                        )
+                        rec_tsa_ts_t["cand_family"] = "tsa_ts_svc"
+                        if bool(do_diag):
+                            y_hat = np.asarray(clf.predict(v_t_rot), dtype=object)
+                            rec_tsa_ts_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                        records.append(rec_tsa_ts_t)
+                except Exception:
+                    pass
+
+            # FgMDM candidate on covariances (no probe/evidence features yet).
+            if include_fgmdm:
+                try:
+                    fg = outer_bundle.get("fgmdm", {}).get("model", None)
+                    if fg is not None:
+                        cov_t = _covs_for_riemann(X_test_ea)
+                        p_fg_t = _reorder_proba_columns(
+                            fg.predict_proba(cov_t),
+                            getattr(fg, "classes_", np.asarray(class_labels, dtype=object)),
+                            list(class_labels),
+                        )
+                        rec_fg_t = _record_for_candidate(
+                            p_id=p_id_t,
+                            p_c=p_fg_t,
+                            feats_c=None,
+                            lda_c=None,
+                            lda_ev=None,
+                            seed_local=int(oea_zo_seed) + int(test_subject) * 997 + 7,
+                        )
+                        rec_fg_t["cand_family"] = "fgmdm"
+                        if bool(do_diag):
+                            y_hat = np.asarray(fg.predict(cov_t), dtype=object)
+                            rec_fg_t["accuracy"] = float(accuracy_score(y_test, y_hat))
+                        records.append(rec_fg_t)
+                except Exception:
+                    pass
+
             # Channel projector candidates.
             ev_chan_outer: dict = {}
             for cand_key, info in (chan_outer.items() if include_chan else []):
@@ -1968,6 +2540,15 @@ def loso_cross_subject_evaluation(
                     drift_gamma=float(oea_zo_drift_gamma),
                     drift_delta=float(oea_zo_drift_delta),
                 )
+            elif selector == "prefer_fbcsp":
+                # Lightweight policy: prefer the (single) FBCSP candidate when available,
+                # then let the family-specific safety gates decide accept/fallback.
+                fbcsp_recs = [
+                    r
+                    for r in records
+                    if str(r.get("cand_family", "")).lower() == "fbcsp" and str(r.get("kind", "")) != "identity"
+                ]
+                selected = fbcsp_recs[0] if fbcsp_recs else rec_id
             elif selector == "objective":
                 best = min(records, key=lambda r: float(r.get("score", r.get("objective_base", 0.0))))
                 selected = best
@@ -1977,6 +2558,7 @@ def loso_cross_subject_evaluation(
             pre_guard_pos = float(selected.get("guard_p_pos", float("nan")))
             pre_ridge_pred = float(selected.get("ridge_pred_improve", float("nan")))
             pre_drift = float(selected.get("drift_best", float("nan")))
+            pre_pred_disagree = float(selected.get("pred_disagree", float("nan")))
             anchor_guard_pos = float(rec_id.get("guard_p_pos", float("nan")))
             anchor_probe_hard = float(rec_id.get("probe_mixup_hard_best", float("nan")))
             base_thr = float(oea_zo_calib_guard_threshold)
@@ -1999,17 +2581,20 @@ def loso_cross_subject_evaluation(
                 float(stack_safe_fbcsp_guard_threshold) >= 0.0
                 or float(stack_safe_fbcsp_min_pred_improve) > 0.0
                 or float(stack_safe_fbcsp_drift_delta) > 0.0
+                or float(stack_safe_fbcsp_max_pred_disagree) >= 0.0
             )
+            apply_fbcsp_gate = selector in {
+                "calibrated_ridge_guard",
+                "calibrated_stack_ridge_guard",
+                "calibrated_stack_ridge_guard_borda",
+                "calibrated_stack_bandit_guard",
+                "prefer_fbcsp",
+            }
             if (
                 fbcsp_gate_active
                 and pre_family == "fbcsp"
                 and str(selected.get("kind", "")) != "identity"
-                and selector in {
-                    "calibrated_ridge_guard",
-                    "calibrated_stack_ridge_guard",
-                    "calibrated_stack_ridge_guard_borda",
-                    "calibrated_stack_bandit_guard",
-                }
+                and apply_fbcsp_gate
             ):
                 base_thr = float(oea_zo_calib_guard_threshold)
                 fbcsp_thr = (
@@ -2029,61 +2614,74 @@ def loso_cross_subject_evaluation(
                     not np.isfinite(pre_drift) or float(pre_drift) > float(stack_safe_fbcsp_drift_delta)
                 ):
                     reasons.append("drift")
+                if float(stack_safe_fbcsp_max_pred_disagree) >= 0.0 and (
+                    not np.isfinite(pre_pred_disagree)
+                    or float(pre_pred_disagree) > float(stack_safe_fbcsp_max_pred_disagree)
+                ):
+                    reasons.append("pred_disagree")
 
                 if reasons:
                     fbcsp_blocked = 1
                     fbcsp_block_reason = ",".join(reasons)
 
-                    # Re-select among the remaining candidates using already-computed ridge/guard scores.
-                    best_alt: dict | None = None
-                    best_alt_score = -float("inf")
-                    for rec in records:
-                        if str(rec.get("kind", "")) == "identity":
-                            continue
-                        p_pos = float(rec.get("guard_p_pos", float("nan")))
-                        if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
-                            continue
-                        if np.isfinite(probe_thr):
-                            probe = float(rec.get("probe_mixup_hard_best", float("nan")))
-                            if not np.isfinite(probe) or float(probe) > float(probe_thr):
-                                continue
-
-                        fam = str(rec.get("cand_family", ""))
-                        if fam == "fbcsp":
-                            if float(stack_safe_fbcsp_guard_threshold) >= 0.0 and float(p_pos) < float(fbcsp_thr):
-                                continue
-                            pred = float(rec.get("ridge_pred_improve", float("nan")))
-                            if float(stack_safe_fbcsp_min_pred_improve) > 0.0 and (
-                                not np.isfinite(pred) or float(pred) < float(stack_safe_fbcsp_min_pred_improve)
-                            ):
-                                continue
-                            drift = float(rec.get("drift_best", 0.0))
-                            if float(stack_safe_fbcsp_drift_delta) > 0.0 and float(drift) > float(
-                                stack_safe_fbcsp_drift_delta
-                            ):
-                                continue
-
-                        drift = float(rec.get("drift_best", 0.0))
-                        if str(oea_zo_drift_mode) == "hard" and float(oea_zo_drift_delta) > 0.0 and float(
-                            drift
-                        ) > float(oea_zo_drift_delta):
-                            continue
-
-                        pred = float(rec.get("ridge_pred_improve", float("nan")))
-                        if not np.isfinite(pred):
-                            continue
-                        score = float(pred)
-                        if str(oea_zo_drift_mode) == "penalty" and float(oea_zo_drift_gamma) > 0.0:
-                            score = float(score) - float(oea_zo_drift_gamma) * float(drift)
-
-                        if float(score) > float(best_alt_score):
-                            best_alt_score = float(score)
-                            best_alt = rec
-
-                    if best_alt is not None and float(best_alt_score) > 0.0:
-                        selected = best_alt
-                    else:
+                    if selector == "prefer_fbcsp":
+                        # With the lightweight policy we simply fall back to EA when FBCSP is rejected.
                         selected = rec_id
+                    else:
+                        # Re-select among the remaining candidates using already-computed ridge/guard scores.
+                        best_alt: dict | None = None
+                        best_alt_score = -float("inf")
+                        for rec in records:
+                            if str(rec.get("kind", "")) == "identity":
+                                continue
+                            p_pos = float(rec.get("guard_p_pos", float("nan")))
+                            if not np.isfinite(p_pos) or float(p_pos) < float(anchor_thr):
+                                continue
+                            if np.isfinite(probe_thr):
+                                probe = float(rec.get("probe_mixup_hard_best", float("nan")))
+                                if not np.isfinite(probe) or float(probe) > float(probe_thr):
+                                    continue
+
+                            fam = str(rec.get("cand_family", ""))
+                            if fam == "fbcsp":
+                                if float(stack_safe_fbcsp_guard_threshold) >= 0.0 and float(p_pos) < float(fbcsp_thr):
+                                    continue
+                                pred = float(rec.get("ridge_pred_improve", float("nan")))
+                                if float(stack_safe_fbcsp_min_pred_improve) > 0.0 and (
+                                    not np.isfinite(pred) or float(pred) < float(stack_safe_fbcsp_min_pred_improve)
+                                ):
+                                    continue
+                                drift = float(rec.get("drift_best", 0.0))
+                                if float(stack_safe_fbcsp_drift_delta) > 0.0 and float(drift) > float(
+                                    stack_safe_fbcsp_drift_delta
+                                ):
+                                    continue
+                                if float(stack_safe_fbcsp_max_pred_disagree) >= 0.0:
+                                    disagree = float(rec.get("pred_disagree", float("nan")))
+                                    if not np.isfinite(disagree) or float(disagree) > float(stack_safe_fbcsp_max_pred_disagree):
+                                        continue
+
+                            drift = float(rec.get("drift_best", 0.0))
+                            if str(oea_zo_drift_mode) == "hard" and float(oea_zo_drift_delta) > 0.0 and float(
+                                drift
+                            ) > float(oea_zo_drift_delta):
+                                continue
+
+                            pred = float(rec.get("ridge_pred_improve", float("nan")))
+                            if not np.isfinite(pred):
+                                continue
+                            score = float(pred)
+                            if str(oea_zo_drift_mode) == "penalty" and float(oea_zo_drift_gamma) > 0.0:
+                                score = float(score) - float(oea_zo_drift_gamma) * float(drift)
+
+                            if float(score) > float(best_alt_score):
+                                best_alt_score = float(score)
+                                best_alt = rec
+
+                        if best_alt is not None and float(best_alt_score) > 0.0:
+                            selected = best_alt
+                        else:
+                            selected = rec_id
 
             # Family-specific high-risk gate: treat TSA as risky and enforce stricter acceptance rules.
             tsa_gate_active = (
@@ -2162,6 +2760,10 @@ def loso_cross_subject_evaluation(
                                     stack_safe_fbcsp_drift_delta
                                 ):
                                     continue
+                                if float(stack_safe_fbcsp_max_pred_disagree) >= 0.0:
+                                    disagree = float(rec.get("pred_disagree", float("nan")))
+                                    if not np.isfinite(disagree) or float(disagree) > float(stack_safe_fbcsp_max_pred_disagree):
+                                        continue
 
                         if fam == "tsa" and tsa_gate_active:
                             if float(stack_safe_tsa_guard_threshold) >= 0.0 and float(p_pos) < float(tsa_thr):
@@ -2249,6 +2851,10 @@ def loso_cross_subject_evaluation(
                                 stack_safe_fbcsp_min_pred_improve
                             ):
                                 continue
+                            if float(stack_safe_fbcsp_max_pred_disagree) >= 0.0:
+                                disagree = float(rec.get("pred_disagree", float("nan")))
+                                if not np.isfinite(disagree) or float(disagree) > float(stack_safe_fbcsp_max_pred_disagree):
+                                    continue
 
                         if fam == "tsa" and tsa_gate_active:
                             tsa_thr = (
@@ -5126,7 +5732,7 @@ def loso_cross_subject_evaluation(
                     sfreq=float(sfreq),
                     n_components=fb_n_components,
                     filter_order=4,
-                    multiclass_strategy="auto",
+                    multiclass_strategy=str(fbcsp_multiclass_strategy),
                     select_k=24,
                 )
             else:

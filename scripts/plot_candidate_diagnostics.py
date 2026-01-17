@@ -129,6 +129,32 @@ def _plot_oracle_gap(summary: pd.DataFrame, *, out: Path, title: str) -> None:
     plt.close(fig)
 
 
+def _plot_headroom(summary: pd.DataFrame, *, out: Path, title: str) -> None:
+    subjects = summary["subject"].astype(int).to_numpy()
+    id_acc = summary["id_acc"].astype(float).to_numpy()
+    sel_acc = summary["sel_acc"].astype(float).to_numpy()
+    oracle_acc = summary["oracle_acc"].astype(float).to_numpy()
+
+    headroom = oracle_acc - id_acc
+    eaten = sel_acc - id_acc
+    eaten = np.clip(eaten, 0.0, None)
+
+    x = np.arange(len(subjects))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(x, headroom, color="#4C72B0", alpha=0.35, label="headroom (oracle − EA)")
+    ax.bar(x, eaten, color="#DD8452", alpha=0.9, label="eaten (selected − EA)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(int(s)) for s in subjects])
+    ax.set_xlabel("Subject")
+    ax.set_ylabel("Δacc")
+    ax.set_title(title)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _plot_pred_vs_true(
     cand: pd.DataFrame,
     *,
@@ -208,6 +234,11 @@ def main() -> None:
         out=out_dir / f"{args.prefix}_oracle_gap.png",
         title=f"{args.prefix}: oracle gap (oracle − selected)",
     )
+    _plot_headroom(
+        summ,
+        out=out_dir / f"{args.prefix}_headroom.png",
+        title=f"{args.prefix}: headroom vs eaten",
+    )
 
     if "ridge_pred_improve" in cand.columns and _has_finite("ridge_pred_improve"):
         _plot_pred_vs_true(
@@ -232,6 +263,26 @@ def main() -> None:
             out=out_dir / f"{args.prefix}_bandit_vs_true.png",
             title=f"{args.prefix}: bandit_score vs true Δacc",
             xlabel="bandit_score",
+        )
+    if "probe_mixup_hard_best" in cand.columns and _has_finite("probe_mixup_hard_best"):
+        cand2 = cand.copy()
+        cand2["neg_probe_mixup_hard_best"] = -pd.to_numeric(cand2["probe_mixup_hard_best"], errors="coerce")
+        _plot_pred_vs_true(
+            cand2,
+            pred_col="neg_probe_mixup_hard_best",
+            out=out_dir / f"{args.prefix}_neg_probe_hard_vs_true.png",
+            title=f"{args.prefix}: -probe_mixup_hard_best vs true Δacc",
+            xlabel="-probe_mixup_hard_best",
+        )
+    if "evidence_nll_best" in cand.columns and _has_finite("evidence_nll_best"):
+        cand2 = cand.copy()
+        cand2["neg_evidence_nll_best"] = -pd.to_numeric(cand2["evidence_nll_best"], errors="coerce")
+        _plot_pred_vs_true(
+            cand2,
+            pred_col="neg_evidence_nll_best",
+            out=out_dir / f"{args.prefix}_neg_evidence_vs_true.png",
+            title=f"{args.prefix}: -evidence_nll_best vs true Δacc",
+            xlabel="-evidence_nll_best",
         )
 
 

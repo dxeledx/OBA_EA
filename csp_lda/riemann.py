@@ -33,24 +33,27 @@ def covariances_from_epochs(
     if float(eps) <= 0.0:
         raise ValueError("eps must be > 0.")
 
-    covs = np.empty((int(n_trials), int(n_channels), int(n_channels)), dtype=np.float64)
-    eye = np.eye(int(n_channels), dtype=np.float64)
-    scale = 1.0 / float(max(1, int(n_times)))
+    c = int(n_channels)
+    t = int(n_times)
+    eye = np.eye(c, dtype=np.float64)
+    scale = 1.0 / float(max(1, t))
     alpha = float(shrinkage)
 
-    for i in range(int(n_trials)):
-        xi = X[int(i)]
-        cov = scale * (xi @ xi.T)
-        cov = 0.5 * (cov + cov.T)
+    # Vectorized covariance: cov[n] = (1/T) * X[n] @ X[n]^T.
+    covs = scale * np.einsum("nct,ndt->ncd", X, X, optimize=True)
+    covs = 0.5 * (covs + np.swapaxes(covs, 1, 2))
 
-        if alpha > 0.0:
-            cov = (1.0 - alpha) * cov + alpha * (float(np.trace(cov)) / float(n_channels)) * eye
+    if alpha > 0.0:
+        tr = np.trace(covs, axis1=1, axis2=2)
+        covs *= 1.0 - alpha
+        diag = np.arange(c)
+        covs[:, diag, diag] += (alpha * (tr / float(c)))[:, None]
 
-        # SPD floor via eigenvalue clipping.
-        evals, evecs = np.linalg.eigh(cov)
-        floor = float(eps) * float(np.max(evals)) if float(np.max(evals)) > 0.0 else float(eps)
-        evals = np.maximum(evals, floor)
-        covs[int(i)] = evecs @ np.diag(evals) @ evecs.T
+    # Ensure SPD via diagonal loading (much faster than per-trial eigendecomposition).
+    tr = np.trace(covs, axis1=1, axis2=2)
+    floor = float(eps) * (tr / float(c))
+    floor = np.where(np.isfinite(floor) & (floor > 0.0), floor, float(eps))
+    diag = np.arange(c)
+    covs[:, diag, diag] += floor[:, None]
 
-    return covs
-
+    return np.asarray(covs, dtype=np.float64)

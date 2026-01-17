@@ -6,6 +6,7 @@ from typing import Optional
 from mne.decoding import CSP
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
+import warnings
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import mutual_info_classif
@@ -80,9 +81,19 @@ class FilterBankCSP(BaseEstimator, TransformerMixin):
         if strategy not in {"multiclass", "ovo", "ovr"}:
             raise ValueError("multiclass_strategy must be one of: 'auto', 'multiclass', 'ovo', 'ovr'.")
 
+        valid_bands: list[tuple[float, float]] = []
         for fmin, fmax in bands:
-            if not (0.0 < fmin < fmax < nyq):
-                raise ValueError(f"Invalid band ({fmin}, {fmax}) for sfreq={sfreq}.")
+            if 0.0 < fmin < fmax < nyq:
+                valid_bands.append((float(fmin), float(fmax)))
+        if len(valid_bands) != len(bands):
+            dropped = [b for b in bands if b not in valid_bands]
+            warnings.warn(
+                f"FilterBankCSP: dropped {len(dropped)}/{len(bands)} invalid bands for sfreq={sfreq} (nyq={nyq}): {dropped}"
+            )
+        if not valid_bands:
+            raise ValueError(f"No valid bands for sfreq={sfreq} (nyq={nyq}); got bands={bands}.")
+
+        for fmin, fmax in valid_bands:
             sos = butter(int(self.filter_order), [fmin, fmax], btype="bandpass", fs=sfreq, output="sos")
             X_f = sosfiltfilt(sos, X, axis=-1)
             sos_list.append(sos)
@@ -115,6 +126,89 @@ class FilterBankCSP(BaseEstimator, TransformerMixin):
         self._sos = sos_list
         self._csps_by_band = csps_by_band
         return self
+
+    def fit_transform(self, X, y=None, **fit_params):  # noqa: N803  (match sklearn signature)
+        """Fit CSPs per band and transform X in one pass.
+
+        This avoids filtering the training data twice during `Pipeline.fit` (fit+transform),
+        which is a major bottleneck for large datasets like Schirrmeister2017 (HGD).
+        """
+
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 3:
+            raise ValueError(f"Expected X with shape (n_trials,n_channels,n_times); got {X.shape}.")
+        if y is None:
+            raise ValueError("y must be provided for CSP fitting.")
+        y = np.asarray(y)
+
+        sfreq = float(self.sfreq)
+        if not np.isfinite(sfreq) or sfreq <= 0.0:
+            raise ValueError("sfreq must be positive and finite.")
+        nyq = 0.5 * sfreq
+
+        bands = [(float(lo), float(hi)) for lo, hi in list(self.bands)]
+        if not bands:
+            raise ValueError("bands must be a non-empty list of (fmin,fmax).")
+
+        sos_list: list[np.ndarray] = []
+        csps_by_band: list[list[CSP]] = []
+        feats: list[np.ndarray] = []
+
+        classes = np.unique(y)
+        strategy = str(self.multiclass_strategy).strip().lower()
+        if strategy == "auto":
+            strategy = "multiclass" if int(classes.size) <= 2 else "ovo"
+        if strategy not in {"multiclass", "ovo", "ovr"}:
+            raise ValueError("multiclass_strategy must be one of: 'auto', 'multiclass', 'ovo', 'ovr'.")
+
+        valid_bands: list[tuple[float, float]] = []
+        for fmin, fmax in bands:
+            if 0.0 < fmin < fmax < nyq:
+                valid_bands.append((float(fmin), float(fmax)))
+        if len(valid_bands) != len(bands):
+            dropped = [b for b in bands if b not in valid_bands]
+            warnings.warn(
+                f"FilterBankCSP: dropped {len(dropped)}/{len(bands)} invalid bands for sfreq={sfreq} (nyq={nyq}): {dropped}"
+            )
+        if not valid_bands:
+            raise ValueError(f"No valid bands for sfreq={sfreq} (nyq={nyq}); got bands={bands}.")
+
+        for fmin, fmax in valid_bands:
+            sos = butter(int(self.filter_order), [fmin, fmax], btype="bandpass", fs=sfreq, output="sos")
+            X_f = sosfiltfilt(sos, X, axis=-1)
+            sos_list.append(sos)
+            csps: list[CSP] = []
+            if strategy == "multiclass":
+                csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                csp.fit(X_f, y)
+                csps.append(csp)
+            elif strategy == "ovo":
+                # One-vs-one CSP per class pair (common in multi-class FBCSP).
+                from itertools import combinations
+
+                for c1, c2 in combinations(classes.tolist(), 2):
+                    mask = (y == c1) | (y == c2)
+                    if int(np.sum(mask)) < 2:
+                        continue
+                    csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                    csp.fit(X_f[mask], y[mask])
+                    csps.append(csp)
+            else:  # "ovr"
+                for c in classes.tolist():
+                    y_bin = (y == c).astype(int)
+                    if int(np.unique(y_bin).size) < 2:
+                        continue
+                    csp = CSP(n_components=int(self.n_components), reg=self.csp_reg)
+                    csp.fit(X_f, y_bin)
+                    csps.append(csp)
+            csps_by_band.append(csps)
+
+            for csp in csps:
+                feats.append(np.asarray(csp.transform(X_f), dtype=np.float64))
+
+        self._sos = sos_list
+        self._csps_by_band = csps_by_band
+        return np.concatenate(feats, axis=1)
 
     def transform(self, X):  # noqa: N803  (match sklearn signature)
         X = np.asarray(X, dtype=np.float64)

@@ -179,8 +179,8 @@ conda run -n eeg python run_csp_lda_cross_session.py \\
 
 如果想把“下层对齐”从 EA 升级到更偏几何的强基线（再把证书 stacking 直接沿用到该下层），可以尝试：
 
-- `rpa-csp-lda`：log-Euclidean mean whitening（RPA-center，仍是 session-wise，无标签闭式）
-- `tsa-csp-lda`：RPA-center + pseudo-label Procrustes rotation（TSA 风格闭式旋转）
+- `lea-csp-lda`：log-Euclidean whitening（LEA 视图，无标签闭式；旧名 `rpa-csp-lda` 仅保留为兼容 alias）
+- `lea-rot-csp-lda`：LEA + pseudo-label Procrustes target rotation（闭式旋转；旧名 `tsa-csp-lda` 仅保留为兼容 alias）
 - `rpa-zo-*` / `tsa-zo-*`：在上述下层上继续做 ZO(Q/A) 目标优化与候选选择（`--oea-zo-selector calibrated_stack_ridge` 等）
 
 示例（4 类，证书 stacking）：
@@ -189,7 +189,7 @@ conda run -n eeg python run_csp_lda_cross_session.py \\
 conda run -n eeg python run_csp_lda_cross_session.py \\
   --preprocess paper_fir --n-components 6 \\
   --events left_hand,right_hand,feet,tongue \\
-  --methods ea-csp-lda,rpa-csp-lda,tsa-csp-lda,rpa-zo-imr-csp-lda,tsa-zo-imr-csp-lda \\
+  --methods ea-csp-lda,lea-csp-lda,lea-rot-csp-lda,rpa-zo-imr-csp-lda,tsa-zo-imr-csp-lda \\
   --oea-zo-transform rot_scale --oea-zo-selector calibrated_stack_ridge
 ```
 

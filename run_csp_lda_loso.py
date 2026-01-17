@@ -13,6 +13,12 @@ import mne
 
 from csp_lda.config import ExperimentConfig, ModelConfig, PreprocessingConfig
 from csp_lda.data import MoabbMotorImageryLoader, split_by_subject
+from csp_lda.deep_baselines import (
+    ATCNetParams,
+    Deep4NetParams,
+    loso_atcnet_evaluation,
+    loso_deep4net_evaluation,
+)
 from csp_lda.evaluation import compute_metrics, loso_cross_subject_evaluation
 from csp_lda.plots import (
     plot_confusion_matrix,
@@ -54,6 +60,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resample", type=float, default=250.0)
     p.add_argument("--n-components", type=int, default=4, help="CSP components (n_components).")
     p.add_argument(
+        "--fbcsp-multiclass-strategy",
+        type=str,
+        default="multiclass",
+        choices=["auto", "multiclass", "ovo", "ovr"],
+        help=(
+            "For fbcsp-lda / ea-fbcsp-lda (and stack candidate family 'fbcsp'): multiclass CSP strategy inside "
+            "FilterBankCSP. 'ovo' can be very slow for K>2 (fits CSP per class pair per band)."
+        ),
+    )
+    p.add_argument(
         "--preprocess",
         choices=["moabb", "paper_fir"],
         default="moabb",
@@ -85,7 +101,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="csp-lda,ea-csp-lda",
 	        help=(
-	            "Comma-separated methods to run: csp-lda, fbcsp-lda, ea-csp-lda, ea-fbcsp-lda, rpa-csp-lda, tsa-csp-lda, "
+	            "Comma-separated methods to run: csp-lda, fbcsp-lda, ea-csp-lda, ea-fbcsp-lda, lea-csp-lda, lea-rot-csp-lda, "
+                "deep4net, "
+                "atcnet, "
 	            "riemann-mdm, rpa-mdm, rpa-rot-mdm, ts-lr, rpa-ts-lr, ea-ts-lr, "
 	            "ea-stack-multi-safe-csp-lda, "
 	            "ea-mm-safe, "
@@ -107,6 +125,21 @@ def parse_args() -> argparse.Namespace:
         "--no-plots",
         action="store_true",
         help="Skip saving plots (confusion matrices / CSP patterns / comparison bar).",
+    )
+    p.add_argument(
+        "--deep-max-epochs",
+        type=int,
+        default=50,
+        help=(
+            "Max epochs for deep baselines (deep4net/atcnet). "
+            "Note: many deep MI baselines require larger values; use this to scale compute."
+        ),
+    )
+    p.add_argument(
+        "--deep-patience",
+        type=int,
+        default=10,
+        help="Early-stopping patience (valid_loss) for deep baselines (deep4net/atcnet).",
     )
     p.add_argument(
         "--oea-eps",
@@ -381,6 +414,7 @@ def parse_args() -> argparse.Namespace:
             "calibrated_stack_ridge_guard",
             "calibrated_stack_ridge_guard_borda",
             "calibrated_stack_bandit_guard",
+            "prefer_fbcsp",
             "oracle",
         ],
         default="objective",
@@ -402,6 +436,8 @@ def parse_args() -> argparse.Namespace:
             "of (ridge_pred_improve, probe_hard_improve) after safety gates; "
             "calibrated_stack_bandit_guard trains a softmax contextual bandit policy on stacked certificate features (full-information Δacc on pseudo-targets) "
             "to select a candidate, with the same guard/fallback safety; "
+            "prefer_fbcsp is a lightweight policy for ea-stack-multi-safe-csp-lda: prefer the FBCSP candidate when present, "
+            "then rely on family-specific safety gates (e.g., pred_disagree) to accept/fallback to EA; "
             "oracle selects by true accuracy (analysis-only upper bound; uses labels)."
         ),
     )
@@ -501,6 +537,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For method=ea-stack-multi-safe-csp-lda only: additional hard drift guard (mean KL(p_anchor||p_fbcsp) <= delta) "
             "applied only to the FBCSP candidate. 0 disables."
+        ),
+    )
+    p.add_argument(
+        "--stack-safe-fbcsp-max-pred-disagree",
+        type=float,
+        default=-1.0,
+        help=(
+            "For method=ea-stack-multi-safe-csp-lda only: additional hard gate applied only to the FBCSP candidate. "
+            "Requires pred_disagree <= tau, where pred_disagree is the fraction of target trials whose argmax prediction "
+            "differs from the EA anchor. Set tau in [0,1]. Use -1 to disable."
         ),
     )
     p.add_argument(
@@ -608,7 +654,8 @@ def parse_args() -> argparse.Namespace:
         default="ea,fbcsp,rpa,tsa,chan",
         help=(
             "For method=ea-stack-multi-safe-csp-lda only: comma-separated candidate families to include. "
-            "Supported: ea (anchor), fbcsp, rpa, tsa, chan. "
+            "Supported: ea (anchor), fbcsp, rpa(=LEA view), tsa(=LEA+rot view), lea(alias of rpa), lea_rot(alias of tsa), "
+            "chan, ts_svc, tsa_ts_svc, fgmdm. "
             "Note: 'tsa' requires 'rpa'."
         ),
     )
@@ -730,6 +777,41 @@ def main() -> None:
         [s.strip() for s in sessions_raw.split(",") if s.strip()]
     )
     methods = [m.strip() for m in str(args.methods).split(",") if m.strip()]
+    method_aliases = {
+        # Historical names (kept for backward compatibility): these are *not* paper-faithful RPA/TSA.
+        "rpa-csp-lda": "lea-csp-lda",
+        "tsa-csp-lda": "lea-rot-csp-lda",
+    }
+    methods_canon: list[str] = []
+    for m in methods:
+        canon = method_aliases.get(m, m)
+        if canon != m:
+            print(f"[DEPRECATED] method '{m}' is now '{canon}' (paper-faithful naming).")
+        methods_canon.append(canon)
+    # Preserve order but de-duplicate (aliases can cause duplicates).
+    methods = list(dict.fromkeys(methods_canon))
+
+    stack_fams_raw = [s.strip() for s in str(args.stack_candidate_families).split(",") if s.strip()]
+    stack_fam_aliases = {
+        # Paper-faithful naming aliases (internal code uses historical family ids).
+        "lea": "rpa",
+        "lea_rot": "tsa",
+        "lea-rot": "tsa",
+    }
+    stack_candidate_families_canon: list[str] = []
+    for fam in stack_fams_raw:
+        canon = stack_fam_aliases.get(fam, fam)
+        if canon != fam:
+            print(f"[INFO] stack family alias '{fam}' -> '{canon}'.")
+        stack_candidate_families_canon.append(canon)
+    stack_candidate_families = tuple(dict.fromkeys(stack_candidate_families_canon))
+    deep_device = "cpu"
+    try:
+        import torch
+
+        deep_device = "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        deep_device = "cpu"
 
     def _parse_csv_ints(raw: str) -> list[int]:
         raw = str(raw).strip()
@@ -855,7 +937,8 @@ def main() -> None:
             fb_n_components = max(2, min(4, int(config.model.csp_n_components)))
             method_details[method] = (
                 "FBCSP+LDA: FilterBank-CSP over sub-bands within 8–30 Hz "
-                f"(n_components_per_band={fb_n_components}, selector=MI@24, lda=shrinkage_auto)."
+                f"(n_components_per_band={fb_n_components}, selector=MI@24, lda=shrinkage_auto, "
+                f"multiclass_strategy={str(args.fbcsp_multiclass_strategy)})."
             )
         elif method == "ea-csp-lda":
             alignment = "ea"
@@ -866,18 +949,19 @@ def main() -> None:
             method_details[method] = (
                 "EA + FBCSP+LDA: per-subject EA whitening, then FilterBank-CSP over sub-bands within 8–30 Hz "
                 f"(n_components_per_band={fb_n_components}, selector=MI@24, lda=shrinkage_auto, "
+                f"multiclass_strategy={str(args.fbcsp_multiclass_strategy)}, "
                 f"eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
             )
-        elif method == "rpa-csp-lda":
+        elif method == "lea-csp-lda":
             alignment = "rpa"
             method_details[method] = (
-                "RPA (LEA whitening baseline): per-subject log-Euclidean whitening "
+                "LEA: per-subject log-Euclidean whitening "
                 f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
             )
-        elif method == "tsa-csp-lda":
+        elif method == "lea-rot-csp-lda":
             alignment = "tsa"
             method_details[method] = (
-                "TSA (closed-form target rotation on top of LEA whitening): "
+                "LEA + closed-form pseudo-anchor target rotation: "
                 f"pseudo_mode={args.oea_pseudo_mode}, pseudo_iters={args.oea_pseudo_iters}, q_blend={args.oea_q_blend}, "
                 f"pseudo_conf={args.oea_pseudo_confidence}, topk={args.oea_pseudo_topk_per_class}, balance={bool(args.oea_pseudo_balance)} "
                 f"(eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
@@ -922,6 +1006,41 @@ def main() -> None:
                 "TangentSpace(metric='riemann') + LogisticRegression on per-trial covariances "
                 f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
             )
+        elif method == "ts-svc":
+            alignment = "ts_svc"
+            method_details[method] = (
+                "Riemannian baseline: TangentSpace(metric='riemann') + linear SVC(probability=True) "
+                "on per-trial SPD covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "tsa-ts-svc":
+            alignment = "tsa_ts_svc"
+            method_details[method] = (
+                "TSA (tangent-space alignment) + linear SVC: recenter+rescale per domain in tangent space, "
+                "then pseudo-label Procrustes rotation on target and classify with linear SVC(probability=True)."
+            )
+        elif method == "fgmdm":
+            alignment = "fgmdm"
+            method_details[method] = (
+                "Riemannian baseline: FgMDM(metric='riemann') on per-trial SPD covariances "
+                f"(cov eps={args.oea_eps}, shrinkage={args.oea_shrinkage})."
+            )
+        elif method == "deep4net":
+            alignment = "deep4net"
+            method_details[method] = (
+                "Braindecode Deep4Net baseline (trialwise): train per LOSO fold on pooled source subjects; "
+                "per-channel z-score standardization fit on training fold only; "
+                f"optimizer=AdamW(lr=1e-2, wd=5e-4); early stop on valid loss "
+                f"(max_epochs={int(args.deep_max_epochs)}, patience={int(args.deep_patience)})."
+            )
+        elif method == "atcnet":
+            alignment = "atcnet"
+            method_details[method] = (
+                "Braindecode ATCNet baseline (trialwise): train per LOSO fold on pooled source subjects; "
+                "per-channel z-score standardization fit on training fold only; "
+                f"optimizer=AdamW(lr=1e-3); early stop on valid loss "
+                f"(max_epochs={int(args.deep_max_epochs)}, patience={int(args.deep_patience)})."
+            )
         elif method == "ea-stack-multi-safe-csp-lda":
             alignment = "ea_stack_multi_safe"
             ranks_str = str(args.si_chan_ranks).strip() or str(args.si_proj_dim)
@@ -933,6 +1052,8 @@ def main() -> None:
                 fbcsp_gate_str += f", fbcsp_min_pred={float(args.stack_safe_fbcsp_min_pred_improve)}"
             if float(args.stack_safe_fbcsp_drift_delta) > 0.0:
                 fbcsp_gate_str += f", fbcsp_drift_delta={float(args.stack_safe_fbcsp_drift_delta)}"
+            if float(args.stack_safe_fbcsp_max_pred_disagree) >= 0.0:
+                fbcsp_gate_str += f", fbcsp_max_pred_disagree={float(args.stack_safe_fbcsp_max_pred_disagree)}"
             tsa_gate_str = ""
             if float(args.stack_safe_tsa_guard_threshold) >= 0.0:
                 tsa_gate_str += f", tsa_guard_thr={float(args.stack_safe_tsa_guard_threshold)}"
@@ -1300,7 +1421,7 @@ def main() -> None:
             raise ValueError(
                 "Unknown method "
                 f"'{method}'. Supported: csp-lda, ea-csp-lda, oea-cov-csp-lda, oea-csp-lda, "
-                "fbcsp-lda, ea-fbcsp-lda, rpa-csp-lda, tsa-csp-lda, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
+                "fbcsp-lda, ea-fbcsp-lda, lea-csp-lda, lea-rot-csp-lda, deep4net, atcnet, riemann-mdm, rpa-mdm, rpa-rot-mdm, "
                 "ea-stack-multi-safe-csp-lda, "
                 "ea-mm-safe, "
                 "oea-zo-csp-lda, oea-zo-ent-csp-lda, oea-zo-im-csp-lda, oea-zo-imr-csp-lda, "
@@ -1313,22 +1434,63 @@ def main() -> None:
                 "ea-zo-pce-csp-lda, ea-zo-conf-csp-lda"
             )
 
-        (
-            results_df,
-            pred_df,
-            y_true_all,
-            y_pred_all,
-            y_proba_all,
-            _class_order,
-            _models_by_subject,
-        ) = (
-            loso_cross_subject_evaluation(
+        if alignment == "deep4net":
+            (
+                results_df,
+                pred_df,
+                y_true_all,
+                y_pred_all,
+                y_proba_all,
+                _class_order,
+                _models_by_subject,
+            ) = loso_deep4net_evaluation(
+                subject_data,
+                class_order=class_order,
+                average=config.metrics_average,
+                sfreq=float(args.resample),
+                params=Deep4NetParams(
+                    max_epochs=int(args.deep_max_epochs),
+                    early_stop_patience=int(args.deep_patience),
+                    device=str(deep_device),
+                ),
+            )
+        elif alignment == "atcnet":
+            (
+                results_df,
+                pred_df,
+                y_true_all,
+                y_pred_all,
+                y_proba_all,
+                _class_order,
+                _models_by_subject,
+            ) = loso_atcnet_evaluation(
+                subject_data,
+                class_order=class_order,
+                average=config.metrics_average,
+                sfreq=float(args.resample),
+                params=ATCNetParams(
+                    max_epochs=int(args.deep_max_epochs),
+                    early_stop_patience=int(args.deep_patience),
+                    device=str(deep_device),
+                ),
+            )
+        else:
+            (
+                results_df,
+                pred_df,
+                y_true_all,
+                y_pred_all,
+                y_proba_all,
+                _class_order,
+                _models_by_subject,
+            ) = loso_cross_subject_evaluation(
                 subject_data,
                 class_order=class_order,
                 channel_names=list(info["ch_names"]),
                 n_components=config.model.csp_n_components,
                 average=config.metrics_average,
                 alignment=alignment,
+                fbcsp_multiclass_strategy=str(args.fbcsp_multiclass_strategy),
                 sfreq=float(args.resample),
                 oea_eps=float(args.oea_eps),
                 oea_shrinkage=float(args.oea_shrinkage),
@@ -1386,6 +1548,7 @@ def main() -> None:
                 stack_safe_fbcsp_guard_threshold=float(args.stack_safe_fbcsp_guard_threshold),
                 stack_safe_fbcsp_min_pred_improve=float(args.stack_safe_fbcsp_min_pred_improve),
                 stack_safe_fbcsp_drift_delta=float(args.stack_safe_fbcsp_drift_delta),
+                stack_safe_fbcsp_max_pred_disagree=float(args.stack_safe_fbcsp_max_pred_disagree),
                 stack_safe_tsa_guard_threshold=float(args.stack_safe_tsa_guard_threshold),
                 stack_safe_tsa_min_pred_improve=float(args.stack_safe_tsa_min_pred_improve),
                 stack_safe_tsa_drift_delta=float(args.stack_safe_tsa_drift_delta),
@@ -1396,9 +1559,7 @@ def main() -> None:
                 stack_calib_per_family_mode=str(args.stack_calib_per_family_mode),
                 stack_calib_per_family_shrinkage=float(args.stack_calib_per_family_shrinkage),
                 stack_feature_set=str(args.stack_feature_set),
-                stack_candidate_families=tuple(
-                    [s.strip() for s in str(args.stack_candidate_families).split(",") if s.strip()]
-                ),
+                stack_candidate_families=stack_candidate_families,
                 si_subject_lambda=float(args.si_subject_lambda),
                 si_ridge=float(args.si_ridge),
                 si_proj_dim=int(args.si_proj_dim),
@@ -1408,7 +1569,6 @@ def main() -> None:
                 diagnostics_subjects=diagnose_subjects,
                 diagnostics_tag=method,
             )
-        )
         results_by_method[method] = results_df
         trial_predictions_by_method[method] = pred_df
         overall_by_method[method] = compute_metrics(
@@ -1647,6 +1807,17 @@ def main() -> None:
     for method in results_by_method.keys():
         if method.endswith("-mdm"):
             # MDM-based methods do not use CSP; only plot confusion matrix.
+            y_true_all, y_pred_all = predictions_by_method[method]
+            plot_confusion_matrix(
+                y_true_all,
+                y_pred_all,
+                labels=class_order,
+                output_path=out_dir / f"{date_prefix}_{method}_confusion_matrix.png",
+                title=f"{method} confusion matrix (LOSO, all subjects)",
+            )
+            continue
+        if method in {"deep4net", "atcnet"} or method.endswith("-svc") or method.endswith("-lr"):
+            # Non-CSP baselines: only plot confusion matrix.
             y_true_all, y_pred_all = predictions_by_method[method]
             plot_confusion_matrix(
                 y_true_all,
