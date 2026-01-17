@@ -1,0 +1,4 @@
+Built from:
+- EA run: outputs/20260112/4class/loso4_schirr2017_0train_rs50_ea_only_v2 (method=ea-csp-lda)
+- Candidate run: outputs/20260115/4class/loso4_schirr2017_0train_rs50_ea_fbcsp_lda_v1 (method=ea-fbcsp-lda)
+- Gate mode: calib_loso_safe0

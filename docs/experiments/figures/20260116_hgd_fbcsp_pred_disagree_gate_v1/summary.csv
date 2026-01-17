@@ -1,0 +1,2 @@
+tau,n_subjects,mean_acc_ea,mean_acc_cand,mean_acc_selected,mean_delta_selected_vs_ea,neg_transfer_rate_selected_vs_ea,accept_rate,worst_acc_ea,worst_acc_selected
+0.37,14,0.5843929188891063,0.5971143247331332,0.6149319753546829,0.030539056465576593,0.0,0.5714285714285714,0.3568181818181818,0.3568181818181818

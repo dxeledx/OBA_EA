@@ -1,0 +1,3 @@
+Merged from:
+- outputs/20260116/4class/cross_session/crosssess4_bnci_paperfir_baselines_v1
+  Command: run_csp_lda_cross_session.py --dataset BNCI2014_001 --preprocess paper_fir --events left_hand,right_hand,feet,tongue --train-sessions 0train --test-sessions 1test --n-components 6 --methods csp-lda,ea-csp-lda,lea-csp-lda,lea-rot-csp-lda --oea-pseudo-iters 2 --oea-q-blend 1.0 --diagnose-subjects 1,2,3,4,5,6,7,8,9 --run-name crosssess4_bnci_paperfir_baselines_v1
